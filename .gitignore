@@ -1,0 +1,54 @@
+# ============================================================
+# 无人值守共享娱乐空间管理系统（uspace）—— 仓库根 .gitignore
+# 后端 Maven 相关（target/ 等）另见 backend/.gitignore
+# ============================================================
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 编辑器 ----------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# ---------- Java / Maven（冗余兜底，backend/.gitignore 已覆盖） ----------
+target/
+*.class
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 环境与本地配置 ----------
+.env
+.env.local
+.env.*.local
+application-local.properties
+application-local.yml
+
+# ---------- 临时文件 ----------
+*.tmp
+*.temp
+*.bak
+
+# ---------- 个人 / 仅本地 ----------
+CLAUDE.md
+AGENTS.md
+config.txt
+*.bat
+ignore/
+devnotes/
+
+# ---------- 前端（Vue，脚手架待创建） ----------
+node_modules/
+dist/
+dist-ssr/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,0 +1,42 @@
+package com.kaede.uspace.billing.dto;
+
+import com.kaede.uspace.billing.BillingPeriod;
+import lombok.Data;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * 单个时段的计费明细。
+ *
+ * <p>保留「计费档数」与「封顶前金额」两项中间结果，是为了让账单可追溯 ——
+ * 用户或管理员质疑金额时，能直接看出钱是按几档、有没有被封顶算出来的，
+ * 而不只是一个最终数字。
+ */
+@Data
+public class SegmentBill {
+
+    /** 所属时段（日场 / 夜场） */
+    private BillingPeriod period;
+
+    /** 该段起始时间 */
+    private LocalDateTime startTime;
+
+    /** 该段结束时间 */
+    private LocalDateTime endTime;
+
+    /** 该段实际时长（分钟），向下取整到整分钟 */
+    private long minutes;
+
+    /** 计费档数。每档对应一个计费单位时长（默认 30 分钟） */
+    private int units;
+
+    /** 封顶前的原始金额 = 档数 × 单价 */
+    private BigDecimal rawAmount;
+
+    /** 该段最终金额 = min(原始金额, 该时段封顶) */
+    private BigDecimal amount;
+
+    /** 是否触发了封顶。为 true 时说明原始金额已超过该时段的封顶金额 */
+    private boolean capped;
+}
