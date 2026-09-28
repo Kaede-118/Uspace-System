@@ -82,8 +82,18 @@ class JwtServiceTests {
     @DisplayName("凭证被篡改一个字符即拒绝")
     void parse_rejectsTamperedToken() {
         String token = jwtService.issue(USER_ID, "USER", 0);
-        char lastChar = token.charAt(token.length() - 1);
-        String tampered = token.substring(0, token.length() - 1) + (lastChar == 'A' ? 'B' : 'A');
+
+        // 篡改的是签名段的「首字符」而非末字符，这一点是刻意的：
+        // HS256 签名是 32 字节 = 256 位，Base64URL 无填充编码后为 43 个字符，
+        // 43 × 6 = 258 位，多出的 2 位全落在末字符上 —— 也就是说末字符只有
+        // 高 4 位有效，低 2 位在解码时被直接丢弃。若改的是末字符（如 'A' ↔ 'B'，
+        // 两者高 4 位同为 0000），签名会原封不动，用例概率性地假通过。
+        // 首字符承载 6 个有效位，改它必然改变签名。
+        int signatureStart = token.lastIndexOf('.') + 1;
+        char firstChar = token.charAt(signatureStart);
+        String tampered = token.substring(0, signatureStart)
+                + (firstChar == 'A' ? 'B' : 'A')
+                + token.substring(signatureStart + 1);
 
         assertThrows(JwtException.class, () -> jwtService.parse(tampered),
                 "改动任意一位都会让签名对不上，必须拒绝");
