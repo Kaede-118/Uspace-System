@@ -13,7 +13,7 @@ import java.util.List;
  * <ul>
  *   <li>前端账单页可以直接按段展示，用户能自己核对钱是怎么算出来的</li>
  *   <li>订单详情、QQ 机器人查询复用同一份数据，不必各自重新拆分时段</li>
- *   <li>出现计费争议时可追溯到具体是哪一段、几档、是否封顶</li>
+ *   <li>出现计费争议时可追溯到具体是哪一段、几档、单价多少、是否封顶</li>
  * </ul>
  *
  * <p>单时段订单同样返回本结构（该段有值、另一段不存在），
@@ -41,4 +41,23 @@ public class BillingResult {
 
     /** 总金额 = 各段金额之和（各段均已各自封顶） */
     private BigDecimal totalAmount;
+
+    /**
+     * 本次结算前的当月累计实付额（元），由调用方传入。
+     *
+     * <p>留痕用途：事后核对某笔订单为什么走了（或没走）优惠价时，
+     * 直接看这个数字与门槛的关系即可，不必再去翻当月订单明细。
+     */
+    private BigDecimal monthSpentBefore;
+
+    /** 本单是否按月度优惠价计费。整单统一，不会一段优惠一段不优惠 */
+    private boolean discounted;
+
+    /**
+     * 本单因月度优惠少收的金额（元）。未优惠时为 0。
+     *
+     * <p>对应订单表的 {@code discount_amount} 列，由计费服务直接给出，
+     * 免得订单、统计、QQ 机器人各处重复实现一遍优惠金额的算法。
+     */
+    private BigDecimal discountAmount;
 }
