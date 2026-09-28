@@ -297,7 +297,7 @@ CREATE TABLE `biz_lock` (
 
 
 -- ============================================================================
--- 模块 8：订单管理（主链路 5→6→7→8 的枢纽）
+-- 模块 8：订单管理（主链路 5→7→8 的枢纽）
 --
 -- 业务模式：即时制。用户到店下单 → 远程下发密码 → 开门进入（封闭空间）
 --          → 使用中 → 用户手动点「结束使用」→ 生成订单 → 离场出门
@@ -307,7 +307,10 @@ CREATE TABLE `biz_lock` (
 --   若设计为付款后才解锁出门，人在封闭空间内遇到火灾等紧急情况会被困住，
 --   存在消防隐患。因此改为信任制，用可控的欠费风险换取安全。
 --
--- 计费起点是 start_time（首次开门进场）而非下单时间。
+-- 计费起点是 start_time（用户点击「开门」的时刻）而非下单时间。
+-- 点开门即开始计费，顾客走到门口输密码的那段时间也计入使用时长 —— 这是刻意的：
+-- 无需等门锁上报开门记录再对齐时刻，既省下一次门锁云调用（额度 30000 次/月），
+-- 也免去了时刻精度与时区对齐的一整块复杂度。
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_order`;
 CREATE TABLE `biz_order` (
@@ -323,7 +326,7 @@ CREATE TABLE `biz_order` (
   `passcode_end`    DATETIME      DEFAULT NULL            COMMENT '密码失效时间',
 
   -- 计费区间
-  `start_time`      DATETIME      DEFAULT NULL            COMMENT '首次开门进场时刻，计费起点',
+  `start_time`      DATETIME      DEFAULT NULL            COMMENT '用户点击开门的时刻，计费起点',
   `end_time`        DATETIME      DEFAULT NULL            COMMENT '离场时刻，进行中为 NULL',
 
   -- 计费结果（分段存储，供账单分类展示与事后追溯）
@@ -376,6 +379,9 @@ CREATE TABLE `biz_order` (
 --       封闭空间的出门通常为机械推杠/按钮（消防要求内部免密自由开门），
 --       不产生门锁记录，因此系统只能记录到「进门」这一次开门。
 --       用户离场时刻由用户手动点「结束使用」确定，异常情况人工复核。
+--
+--       记录来源不设 QQ_BOT：QQ 机器人自 2026-09-28 起改为只读的信息播报端，
+--       不再承载开门、结账等业务操作，因此不会产生该来源的记录。
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_access_record`;
 CREATE TABLE `biz_access_record` (
@@ -387,7 +393,7 @@ CREATE TABLE `biz_access_record` (
   `passcode`   VARCHAR(10) DEFAULT NULL            COMMENT '本次开门所用密码',
   `open_type`  INT         DEFAULT NULL            COMMENT '开门方式，通通锁 lockRecord 原样返回',
   `open_time`  DATETIME    NOT NULL                COMMENT '开门时刻',
-  `source`     VARCHAR(20) NOT NULL                COMMENT '记录来源：MOCK / TTLOCK / QQ_BOT / ADMIN',
+  `source`     VARCHAR(20) NOT NULL                COMMENT '记录来源：MOCK 模拟 / TTLOCK 门锁云 / ADMIN 管理员补录',
   `created_at` DATETIME    NOT NULL                COMMENT '创建时间',
   PRIMARY KEY (`id`),
   KEY `idx_order_id` (`order_id`),

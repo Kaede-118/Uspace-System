@@ -86,7 +86,7 @@ public class BillingService {
      * <p>适用于无法确定用户当月累计消费的场景（如管理员手动试算、
      * 或明确希望看到原价时）。等价于传入门槛以下的累计额。
      *
-     * @param startTime 开始使用时间（用户开门进场时刻）
+     * @param startTime 开始使用时间（用户点击「开门」的时刻）
      * @param endTime   结束使用时间（用户离场或订单结算时刻）
      * @return 含分段明细与总金额的计费结果
      * @throws IllegalArgumentException 当时间为空、或结束时间早于开始时间时抛出
@@ -98,7 +98,7 @@ public class BillingService {
     /**
      * 计算一次消费的费用，并判定是否适用月度累计优惠。
      *
-     * @param startTime  开始使用时间（用户开门进场时刻）
+     * @param startTime  开始使用时间（用户点击「开门」的时刻）
      * @param endTime    结束使用时间（用户离场或订单结算时刻）
      * @param monthSpent 该用户<b>本月已支付订单的实付额之和</b>（元），
      *                   由调用方查询后传入，用于判定本单是否走优惠价；
