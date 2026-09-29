@@ -199,8 +199,13 @@ CREATE TABLE `biz_closure` (
 --   门必须有物理在场的动作（在门口输入密码）才会开。这是刻意的：
 --   防止线上误点一下就把陌生人放进店。因此本系统【不提供远程直接开锁】。
 --
--- 包场时段内不计费（包场费已预付），时段结束后仍逗留的部分按普通规则计时；
--- 订单如何挂接本表留到模块 8 细化。
+-- 包场时段内不计费（包场费已预付），时段结束后仍逗留的部分按普通规则计时。
+--
+-- 订单与本表的挂接（模块 8 已细化）：biz_order.booking_id 记下「进店时命中的包场」，
+--   结算时把包场时段从计费区间里剪掉。两种情形都要认 ——
+--   ① 被邀请者：下单时正处包场时段，booking_id 指向该场；
+--   ② 包场人提前到店：下单时包场尚未开始、booking_id 为空，
+--      结算时按 host_user_id 回查，否则他会被重复计费（既付了包场费又付了计时费）。
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_booking`;
 CREATE TABLE `biz_booking` (
@@ -295,20 +300,38 @@ CREATE TABLE `biz_lock` (
   KEY `idx_store_id` (`store_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '智能门锁';
 
+-- 初始门锁记录：单店单锁，开箱即用。
+--
+-- 为什么必须有这条：下单要走「下发限时密码」，而密码下发的入参是 lockId。
+-- 本表为空时取不到 lockId，整条主链路（下单 → 开门 → 计费）在第一步就断掉。
+-- 当前没有「后台添加门锁」的接口（单门店下也就一把锁），所以只能由脚本预置。
+--
+-- lock_mac 是占位值，不是真实 MAC。接入通通锁时改为锁的实际 MAC，
+-- 并补上 ttlock_lock_id / ttlock_key_id / aes_key_str / admin_pwd / pwd_info。
+-- gateway_id 留空表示未接网关 —— 真实远程下发需要它（mock 实现不校验）。
+INSERT INTO `biz_lock` (`store_id`, `lock_name`, `lock_mac`, `online_status`,
+                        `created_at`, `updated_at`, `deleted`)
+VALUES (1, '门店大门锁（演示）', 'MOCK0000000001', 'ONLINE', NOW(), NOW(), 0);
+
 
 -- ============================================================================
 -- 模块 8：订单管理（主链路 5→7→8 的枢纽）
 --
--- 业务模式：即时制。用户到店下单 → 远程下发密码 → 开门进入（封闭空间）
---          → 使用中 → 用户手动点「结束使用」→ 生成订单 → 离场出门
---          → 支付（H5 线上支付 / 扫收款码传截图）
+-- 业务模式：即时制。用户到店点「开门」→ 创建订单并下发限时密码 → 门口输密码进入
+--          → 使用中 → 用户点「结束使用」结算 → 离场出门 → 支付（三条线上通道 / 传截图核销）
+--
+-- 【点击一次，一步到位】：点「开门」这一下同时完成「创建订单 + 下发密码 + 开始计费」。
+--   后端不存在「订单已创建但没开门」的挂起态 —— 那种状态既没有用户价值，
+--   又留下「下了单不进门」的垃圾订单。因此 status 里不会出现 CREATED，
+--   也没有「取消订单」接口：误点一下不想进店，点「结束使用」即可，
+--   5 分钟内落在免费档、0 元自动结清（见 status 列的取值说明）。
 --
 -- 为什么是「先出门后付款」（信任制）：
 --   若设计为付款后才解锁出门，人在封闭空间内遇到火灾等紧急情况会被困住，
 --   存在消防隐患。因此改为信任制，用可控的欠费风险换取安全。
 --
--- 计费起点是 start_time（用户点击「开门」的时刻）而非下单时间。
--- 点开门即开始计费，顾客走到门口输密码的那段时间也计入使用时长 —— 这是刻意的：
+-- 计费起点是 start_time（用户点击「开门」的时刻）而非下单时间 —— 两者现在是同一时刻。
+-- 顾客走到门口输密码的那段时间也计入使用时长，这是刻意的：
 -- 无需等门锁上报开门记录再对齐时刻，既省下一次门锁云调用（额度 30000 次/月），
 -- 也免去了时刻精度与时区对齐的一整块复杂度。
 -- ============================================================================
@@ -318,7 +341,8 @@ CREATE TABLE `biz_order` (
   `order_no`        VARCHAR(32)   NOT NULL                COMMENT '业务单号，对外展示',
   `user_id`         BIGINT        NOT NULL                COMMENT '下单用户 ID',
   `store_id`        BIGINT        NOT NULL                COMMENT '使用门店 ID',
-  `lock_id`         BIGINT        DEFAULT NULL            COMMENT '门锁 ID，下单时快照',
+  `lock_id`         BIGINT        DEFAULT NULL            COMMENT '门锁 ID，开门时快照',
+  `booking_id`      BIGINT        DEFAULT NULL            COMMENT '关联的包场 ID。进店时命中包场才记，结算时据此把包场时段从计费区间剪掉',
 
   -- 密码相关
   `passcode`        VARCHAR(10)   DEFAULT NULL            COMMENT '下发的限时密码',
@@ -341,8 +365,11 @@ CREATE TABLE `biz_order` (
   `payable_amount`  DECIMAL(10,2) DEFAULT NULL            COMMENT '应付 = total_amount（预留独立列，供将来优惠券、押金等非计费项）',
 
   -- 状态
+  -- 默认值刻意保留 'CREATED' 而不是改成 'IN_USE'：正常业务里这一列总是被显式赋值，
+  -- 默认值只在「有人手工 INSERT 却忘了给 status」时兜底。此时落成 CREATED
+  -- 反而是一眼能认出的异常数据，而落成 IN_USE 会伪装成一条「永远在使用中」的订单。
   `status`          VARCHAR(20)   NOT NULL DEFAULT 'CREATED'
-                    COMMENT '状态：CREATED 已创建 / IN_USE 使用中 / PENDING_PAYMENT 待支付 / PAID 已支付 / CANCELLED 已取消',
+                    COMMENT '状态：IN_USE 使用中 / PENDING_PAYMENT 待支付 / PAID 已支付。CREATED 与 CANCELLED 为保留值，当前流程不产生',
 
   -- 支付（信任制：离场后才付款）
   --   通道按用户浏览器环境自动分流，商户订单号 out_trade_no 由本表 order_no 充当
@@ -368,7 +395,8 @@ CREATE TABLE `biz_order` (
   KEY `idx_user_status` (`user_id`, `status`),
   KEY `idx_store_status` (`store_id`, `status`),
   KEY `idx_created_at` (`created_at`),
-  KEY `idx_adjusted` (`adjusted`)
+  KEY `idx_adjusted` (`adjusted`),
+  KEY `idx_booking_id` (`booking_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '订单';
 
 

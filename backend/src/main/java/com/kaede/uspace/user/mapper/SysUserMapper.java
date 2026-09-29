@@ -7,6 +7,8 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.math.BigDecimal;
+
 /**
  * 用户表的数据访问接口。
  *
@@ -150,6 +152,34 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
                AND deleted = 0
             """)
     int updateRole(@Param("id") Long id, @Param("role") String role);
+
+    /**
+     * 累加用户的订单消费额。
+     *
+     * <p>供模块 8 的支付回调在<b>订单支付成功</b>时调用。月卡充值走另一个方法
+     * （模块 9 实现）—— 两类消费分开存是为了将来能给它们各自定政策。
+     *
+     * <p><b>一条 SQL 里同时累加两列</b>：{@code order_paid} 是订单消费的本体，
+     * {@code total_paid} 是它与 {@code card_paid} 之和的冗余列（供前端展示与全表筛选，
+     * 写成表达式走不了索引）。两列同源，必须一起动 —— 分成两条 SQL 就可能出现
+     * 「订单消费加了、总额没加」的不一致，且这种不一致不会有任何报错。
+     *
+     * <p>用相对更新 {@code order_paid + #{amount}} 而非先读后写：支付回调可能并发，
+     * 先读后写会丢更新。这也是回调幂等的第二道防线（见模块 8 的 PaymentService）。
+     *
+     * @param id     用户 ID
+     * @param amount 本次实付金额（元）
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    @Update("""
+            UPDATE sys_user
+               SET order_paid = order_paid + #{amount},
+                   total_paid = total_paid + #{amount},
+                   updated_at = NOW()
+             WHERE id = #{id}
+               AND deleted = 0
+            """)
+    int addOrderPaidAmount(@Param("id") Long id, @Param("amount") BigDecimal amount);
 
     /**
      * 按关键字分页查询用户，供运营后台的用户列表使用。

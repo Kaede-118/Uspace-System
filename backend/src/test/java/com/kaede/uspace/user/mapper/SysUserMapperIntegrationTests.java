@@ -239,6 +239,41 @@ class SysUserMapperIntegrationTests {
                 "不传关键字表示查全部");
     }
 
+    @Test
+    @DisplayName("累加订单消费额：order_paid 与 total_paid 两列同步增长，card_paid 不受影响")
+    void addOrderPaidAmount_updatesBothColumns() {
+        SysUser user = newUser("paid");
+        userMapper.insert(user);
+
+        userMapper.addOrderPaidAmount(user.getId(), new BigDecimal("22.00"));
+        userMapper.addOrderPaidAmount(user.getId(), new BigDecimal("16.50"));
+
+        SysUser loaded = userMapper.selectById(user.getId());
+        assertEquals(0, new BigDecimal("38.50").compareTo(loaded.getOrderPaid()),
+                "两次累加的结果应当是 38.50");
+        assertEquals(0, new BigDecimal("38.50").compareTo(loaded.getTotalPaid()),
+                "total_paid 是 order_paid 与 card_paid 之和的冗余列，必须同步 —— "
+                        + "漏加一列不会报任何错，只会让展示的总额慢慢偏小");
+        assertEquals(0, BigDecimal.ZERO.compareTo(loaded.getCardPaid()),
+                "月卡充值不该被订单支付影响 —— 两列分开存就是为了让两类消费各自记账");
+    }
+
+    @Test
+    @DisplayName("累加订单消费额：在既有金额上做相对累加，不覆盖")
+    void addOrderPaidAmount_accumulatesOnExistingValue() {
+        SysUser user = newUser("scale");
+        user.setOrderPaid(new BigDecimal("100.00"));
+        user.setTotalPaid(new BigDecimal("100.00"));
+        userMapper.insert(user);
+
+        userMapper.addOrderPaidAmount(user.getId(), new BigDecimal("0.05"));
+
+        SysUser loaded = userMapper.selectById(user.getId());
+        assertEquals(0, new BigDecimal("100.05").compareTo(loaded.getOrderPaid()),
+                "用相对更新（order_paid = order_paid + x）而非先读后写 —— "
+                        + "支付回调可能并发，先读后写会丢更新");
+    }
+
     // ==================================================================
     // 测试辅助
     // ==================================================================

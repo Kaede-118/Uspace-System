@@ -13,6 +13,7 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
@@ -93,6 +94,26 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResult<Void>> handleUnreadable(HttpMessageNotReadableException e) {
         log.warn("[异常] 请求体解析失败：{}", e.getMessage());
         return ApiResult.of(ErrorCode.PARAM_INVALID, "请求体格式不正确");
+    }
+
+    /**
+     * 处理查询参数、路径参数的类型转换失败，例如给一个本应是枚举的参数传了不存在的取值。
+     *
+     * <p><b>为什么必须单独处理</b>：这类异常不是 {@code IllegalArgumentException} 的子类，
+     * 落到兜底分支会返回 500 —— 而它明明是「请求发得不对」。
+     * 归到 500 会让监控里混进大量本可避免的「服务端错误」，
+     * 前端也会拿到一个含义完全不同的错误码，去做重试而不是提示用户改参数。
+     *
+     * <p>消息里带上参数名（用户自己能对照着改），但不带期望的类型 ——
+     * 那属于内部结构信息。
+     *
+     * @param e 类型不匹配异常
+     * @return 400 响应
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiResult<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        log.warn("[异常] 参数类型不匹配：{}", e.getMessage());
+        return ApiResult.of(ErrorCode.PARAM_INVALID, "参数 " + e.getName() + " 取值不合法");
     }
 
     /**

@@ -8,6 +8,7 @@ import com.kaede.uspace.user.mapper.SysUserMapper;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -106,6 +107,7 @@ public class FakeSysUserMapper implements InvocationHandler {
             case "updateStatus" -> updateStatus(args);
             case "updateRole" -> updateRole(args);
             case "selectPageByKeyword" -> selectPageByKeyword(args);
+            case "addOrderPaidAmount" -> addOrderPaidAmount(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -132,6 +134,41 @@ public class FakeSysUserMapper implements InvocationHandler {
         }
         rows.put(user.getId(), user);
         return 1;
+    }
+
+    /**
+     * 累加订单消费额。
+     *
+     * <p>复刻真实 SQL 的关键点：<b>一条语句里同时累加两列</b>
+     * （{@code order_paid} 与 {@code total_paid}），且用相对更新。
+     * 假实现若只加一列，就测不出「两列同源」这条约定 ——
+     * 而真实环境里漏加一列不会有任何报错，只会让展示的总额慢慢偏小。
+     *
+     * @param args 依次为用户 ID、金额
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    private int addOrderPaidAmount(Object[] args) {
+        SysUser user = selectById((Long) args[0]);
+        if (user == null) {
+            return 0;
+        }
+        BigDecimal amount = (BigDecimal) args[1];
+        user.setOrderPaid(nullToZero(user.getOrderPaid()).add(amount));
+        user.setTotalPaid(nullToZero(user.getTotalPaid()).add(amount));
+        return 1;
+    }
+
+    /**
+     * 把可能为 null 的金额归零。
+     *
+     * <p>真库上这三列是 {@code NOT NULL DEFAULT 0}，不会为 null；
+     * 但假实现里的对象是测试手工构造的，字段可能没设 —— 归零比抛 NPE 好排障。
+     *
+     * @param value 金额
+     * @return 非 null 的金额
+     */
+    private static BigDecimal nullToZero(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
     }
 
     /**

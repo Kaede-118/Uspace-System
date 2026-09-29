@@ -17,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ThreadLocalRandom;
@@ -96,6 +97,23 @@ public class BookingService {
     }
 
     /**
+     * 分页查询某人作为包场人的场次（含待付款的）。
+     *
+     * <p>供模块 8 的用户端使用：包场人要能看到自己名下的场、对未付款的发起支付。
+     * <b>被邀请者不在返回范围内</b> —— 他不记在 {@code host_user_id} 上，
+     * 只能凭邀请链接查看那一场（见模块 8 的邀请令牌入口）。
+     *
+     * @param userId   包场人用户 ID
+     * @param pageNum  页码，从 1 开始
+     * @param pageSize 每页条数
+     * @return 分页结果，按开始时间倒序
+     */
+    public BizResult<PageResult<BookingVo>> listMyBookings(Long userId, long pageNum, long pageSize) {
+        IPage<Booking> page = bookingMapper.selectPageByHost(new Page<>(pageNum, pageSize), userId);
+        return BizResult.ok(PageResult.of(page, BookingVo::from));
+    }
+
+    /**
      * 查询某时刻生效中的包场。
      *
      * <p>供营业状态判断与准入控制使用。只有 {@code PAID} 的包场会被返回 ——
@@ -110,6 +128,28 @@ public class BookingService {
             return null;
         }
         return bookingMapper.selectCoveringAt(storeId, time);
+    }
+
+    /**
+     * 查找落在「准入窗口」内的已付款包场。
+     *
+     * <p>与 {@link #findActiveBookingAt} 的差别只在于<b>窗口往前挪了一段</b>：
+     * 本方法还认「即将开始」的包场。下单准入要用这个 —— 包场开始前的提前量内
+     * 就不再接待新顾客了；而对外展示的营业状态仍用前者，它只认「正在包场中」。
+     *
+     * <p>提前量由调用方传入而不是在这里读配置：它属于<b>下单准入</b>的规则，
+     * 归 order 包管，放在这里会让 space 包反向依赖 order 包的配置类。
+     *
+     * @param time 当前时刻
+     * @param lead 提前量，从 {@code time} 起往后看多远
+     * @return 命中窗口的已付款包场；没有则返回 null
+     */
+    public Booking findAdmissionBookingAt(LocalDateTime time, Duration lead) {
+        Long storeId = storeMapper.selectCurrentId();
+        if (storeId == null) {
+            return null;
+        }
+        return bookingMapper.selectAdmissionAt(storeId, time, time.plus(lead));
     }
 
     // ==================================================================

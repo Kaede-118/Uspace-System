@@ -14,6 +14,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -300,6 +301,62 @@ class BookingServiceTests {
         assertNotNull(bookingService.findActiveBookingAt(start));
         assertNotNull(bookingService.findActiveBookingAt(end.minusSeconds(1)));
         assertNull(bookingService.findActiveBookingAt(end));
+    }
+
+    // ------------------------------------------------------------------
+    // 准入窗口：比「正在包场中」更早生效
+    //
+    // 下单准入用的窗口要往前挪一段（包场开始前的提前量内就停止接待新顾客）。
+    // OrderService 那侧的用例用相对时刻写 —— 构造包场与真正下单之间隔着几毫秒，
+    // 卡在分界线上的断言会时灵时不灵；窗口的精确边界在这里用固定时刻钉住，
+    // 传进去的「当前时刻」是自己给的，不受执行耗时影响。
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("准入窗口：提前量内命中，窗口右端之外不命中")
+    void findAdmissionBookingAt_usesLeadWindow() {
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime bookingStart = now.plusMinutes(30);
+        bookingMapper.seed(booking(bookingStart, bookingStart.plusHours(4), BookingStatus.PAID));
+        Duration lead = Duration.ofMinutes(15);
+
+        assertNull(bookingService.findAdmissionBookingAt(now, lead),
+                "包场 30 分钟后才开始，离窗口右端还有 15 分钟，不该命中");
+
+        assertNotNull(bookingService.findAdmissionBookingAt(bookingStart.minus(lead), lead),
+                "开始时刻恰好落在窗口右端时算命中 —— 与 SQL 的 start_at <= windowEnd 一致");
+
+        assertNull(bookingService.findAdmissionBookingAt(
+                        bookingStart.minus(lead).minusSeconds(1), lead),
+                "再早 1 秒就还在窗口之外 —— 差这一秒，散客还来得及打完一局");
+    }
+
+    @Test
+    @DisplayName("准入窗口：进行中的包场命中，结束时刻起不再命中")
+    void findAdmissionBookingAt_coversOngoingButNotEnded() {
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime bookingStart = now.minusMinutes(10);
+        LocalDateTime bookingEnd = now.plusHours(2);
+        bookingMapper.seed(booking(bookingStart, bookingEnd, BookingStatus.PAID));
+        Duration lead = Duration.ofMinutes(15);
+
+        assertNotNull(bookingService.findAdmissionBookingAt(now, lead), "包场进行中要命中");
+        assertNotNull(bookingService.findAdmissionBookingAt(bookingEnd.minusSeconds(1), lead),
+                "结束前 1 秒仍在包场里");
+        assertNull(bookingService.findAdmissionBookingAt(bookingEnd, lead),
+                "到结束时刻就出窗口了 —— 与「生效判断」用的半开区间是同一套口径");
+    }
+
+    @Test
+    @DisplayName("准入窗口：未付款的包场连预备窗口都不产生")
+    void findAdmissionBookingAt_ignoresUnpaid() {
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime bookingStart = now.plusMinutes(10);
+        bookingMapper.seed(booking(bookingStart, bookingStart.plusHours(4),
+                BookingStatus.PENDING_PAYMENT));
+
+        assertNull(bookingService.findAdmissionBookingAt(now, Duration.ofMinutes(15)),
+                "排了期还没付款的包场不该提前把散客挡在门外 —— 那样店会白空一个时段");
     }
 
     // ==================================================================
