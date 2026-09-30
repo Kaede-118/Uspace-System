@@ -49,6 +49,13 @@ export default [
   },
 
   {
+    // 全部公告。首页公告栏只放前 4 条，「查看全部 ›」点进这里
+    path: '/notices',
+    name: 'notices',
+    component: () => import('@/views/user/NoticeListView.vue'),
+    meta: { title: '全部公告' }
+  },
+  {
     path: '/instore',
     name: 'instore',
     component: () => import('@/views/user/InstoreView.vue'),
@@ -135,7 +142,8 @@ export default [
   },
 
   // 兜底：未匹配的路径回首页。
-  // 放在用户端路由数组的末尾 —— 后台路由（任务 10 加入）会在此之前匹配，
-  // 不会被这条吃掉（vue-router 按注册顺序匹配，后台路径更具体）。
+  // 写在数组末尾只是便于阅读 —— vue-router 4 并不按注册顺序匹配，
+  // 而是按路径得分排序（静态段优先于通配参数），所以 /admin/xxx
+  // 这类后台路径不会被这条通配的兜底吃掉（后台路由见 routes.admin.js）。
   { path: '/:pathMatch(.*)*', redirect: '/home' }
 ]

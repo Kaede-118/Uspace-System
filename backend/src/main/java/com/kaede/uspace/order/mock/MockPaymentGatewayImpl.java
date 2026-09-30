@@ -10,6 +10,8 @@ import com.kaede.uspace.order.dto.PaymentCreateResult;
 import com.kaede.uspace.order.dto.PaymentNotifyRequest;
 import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
+import com.kaede.uspace.order.dto.RefundCommand;
+import com.kaede.uspace.order.dto.RefundResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -73,6 +75,16 @@ public class MockPaymentGatewayImpl implements PaymentGateway {
 
     /** 模拟产生的支付单，key 为商户订单号 */
     private final Map<String, MockPayment> payments = new ConcurrentHashMap<>();
+
+    /**
+     * 已受理的退款单，key 为<b>商户退款单号</b>。
+     *
+     * <p>存下来是为了模拟平台侧最重要的一条语义：<b>幂等</b> ——
+     * 同一个退款单号重复请求，平台只会退一次、并且第二次返回的还是上次那个结果。
+     * 少了这一层，本地状态守卫（{@code WHERE status = 'PAID'}）就只能防住
+     * 「我们自己的代码退两次」，防不住「上次请求其实成功了、只是响应没收到」。
+     */
+    private final Map<String, RefundResult> refunds = new ConcurrentHashMap<>();
 
     /** 随机源。用 SecureRandom 与真实场景保持一致的安全习惯 */
     private final SecureRandom random = new SecureRandom();
@@ -153,6 +165,67 @@ public class MockPaymentGatewayImpl implements PaymentGateway {
         result.setPaid(payment.paid());
         result.setTransactionNo(payment.transactionNo());
         result.setPaidAt(payment.paidAt());
+        return result;
+    }
+
+    // ==================================================================
+    // 退款
+    // ==================================================================
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>模拟实现：把退款记进内存，并保留真实平台的两条关键语义 ——
+     * <b>只能退走过的线上通道</b>、<b>按商户退款单号幂等</b>。
+     */
+    @Override
+    public RefundResult refund(RefundCommand command) {
+        // 先查幂等表，再模拟网络 —— 平台侧也是对重复的退款单号直接回上次的结果，
+        // 不会因为「网络抖了一下」就把同一笔钱退两遍
+        RefundResult done = refunds.get(command.getRefundNo());
+        if (done != null) {
+            log.info("[Mock支付] 退款单号 {} 已受理过，直接返回上次结果（幂等）", command.getRefundNo());
+            return done;
+        }
+
+        if (!simulateNetwork("支付退款")) {
+            return RefundResult.fail("模拟网络异常：退款失败");
+        }
+
+        if (command.getChannel() == null
+                || !PaymentChannel.isOnline(command.getChannel().name())) {
+            return RefundResult.fail("该笔支付不是走线上通道收的，无法原路退回");
+        }
+
+        MockPayment payment = payments.get(command.getOutTradeNo());
+        if (payment == null) {
+            return RefundResult.fail("原支付单不存在：" + command.getOutTradeNo());
+        }
+        if (!payment.paid()) {
+            return RefundResult.fail("原支付单尚未支付，不能退款：" + command.getOutTradeNo());
+        }
+        if (command.getAmount() == null || command.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            return RefundResult.fail("退款金额必须大于 0");
+        }
+        if (command.getAmount().compareTo(payment.amount()) > 0) {
+            return RefundResult.fail("退款金额超过原订单金额");
+        }
+        if (payment.refundedAmount() != null
+                && payment.refundedAmount().add(command.getAmount()).compareTo(payment.amount()) > 0) {
+            return RefundResult.fail("累计退款金额超过原订单金额");
+        }
+
+        BigDecimal already = payment.refundedAmount() == null ? BigDecimal.ZERO : payment.refundedAmount();
+        payments.put(command.getOutTradeNo(), payment.refunded(already.add(command.getAmount())));
+
+        RefundResult result = RefundResult.ok(
+                command.getRefundNo(),
+                "mock_refund_" + command.getRefundNo(),
+                LocalDateTime.now());
+        refunds.put(command.getRefundNo(), result);
+
+        log.info("[Mock支付] 退款成功 outTradeNo={} 退款单号={} 通道={} 金额={} 元",
+                command.getOutTradeNo(), command.getRefundNo(), command.getChannel(), command.getAmount());
         return result;
     }
 
@@ -601,13 +674,14 @@ public class MockPaymentGatewayImpl implements PaymentGateway {
      * @param amount        金额（元）
      * @param channel       通道
      * @param createdAt     下单时刻
-     * @param paid          是否已支付
-     * @param transactionNo 平台交易号，未支付时为 null
-     * @param paidAt        支付完成时刻，未支付时为 null
+     * @param paid           是否已支付
+     * @param transactionNo  平台交易号，未支付时为 null
+     * @param paidAt         支付完成时刻，未支付时为 null
+     * @param refundedAmount 累计已退金额，从未退过时为 null
      */
     private record MockPayment(String outTradeNo, BigDecimal amount, PaymentChannel channel,
                                LocalDateTime createdAt, boolean paid, String transactionNo,
-                               LocalDateTime paidAt) {
+                               LocalDateTime paidAt, BigDecimal refundedAmount) {
 
         /**
          * 新建一笔待支付的单。
@@ -619,7 +693,7 @@ public class MockPaymentGatewayImpl implements PaymentGateway {
          */
         MockPayment(String outTradeNo, BigDecimal amount, PaymentChannel channel,
                     LocalDateTime createdAt) {
-            this(outTradeNo, amount, channel, createdAt, false, null, null);
+            this(outTradeNo, amount, channel, createdAt, false, null, null, null);
         }
 
         /**
@@ -630,7 +704,19 @@ public class MockPaymentGatewayImpl implements PaymentGateway {
          * @return 新的支付单记录
          */
         MockPayment paid(String transactionNo, LocalDateTime paidAt) {
-            return new MockPayment(outTradeNo, amount, channel, createdAt, true, transactionNo, paidAt);
+            return new MockPayment(outTradeNo, amount, channel, createdAt, true, transactionNo, paidAt,
+                    refundedAmount);
+        }
+
+        /**
+         * 返回一个「已退款若干」的新实例。
+         *
+         * @param refunded 累计已退金额
+         * @return 新的支付单记录
+         */
+        MockPayment refunded(BigDecimal refunded) {
+            return new MockPayment(outTradeNo, amount, channel, createdAt, paid, transactionNo, paidAt,
+                    refunded);
         }
     }
 }

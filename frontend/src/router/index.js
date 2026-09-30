@@ -13,14 +13,18 @@
  */
 import { createRouter, createWebHashHistory } from 'vue-router'
 import userRoutes from './routes.user'
+import adminRoutes from './routes.admin'
 import { isLoggedIn, isAdmin } from '@/stores/user'
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    ...userRoutes
-    // 运营后台路由（任务 10）挂在这里。它会自带一层 { path: '/admin', meta: { admin: true } }，
-    // 下面的守卫已经支持 admin 标记，届时不必改这个文件
+    ...userRoutes,
+    // 后台路由自带一层 { path: '/admin', meta: { admin: true } }，
+    // 下面的守卫直接支持这个标记，加它时这里一行都不用改。
+    // 顺序上放在用户端路由之后（含那条兜底的 catch-all）也没关系 ——
+    // vue-router 4 按路径得分排序匹配，静态段 /admin/notices 的得分高于通配参数
+    ...adminRoutes
   ],
   /**
    * 切换路由时回到页面顶部。

@@ -5,6 +5,8 @@ import com.kaede.uspace.order.dto.PaymentCreateResult;
 import com.kaede.uspace.order.dto.PaymentNotifyRequest;
 import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
+import com.kaede.uspace.order.dto.RefundCommand;
+import com.kaede.uspace.order.dto.RefundResult;
 
 /**
  * 支付网关接口。
@@ -74,6 +76,27 @@ public interface PaymentGateway {
      * <p>协议与微信完全不同，所以回调端点也不能合并成一个。
      */
     PaymentNotifyResult verifyAndParseAlipay(PaymentNotifyRequest request);
+
+    /**
+     * 发起退款（原路退回）。
+     *
+     * <p>对应微信 {@code POST /v3/refund/domestic/refunds} 与支付宝
+     * {@code alipay.trade.refund}：钱沿着用户当初付款的那条通道退回去。
+     *
+     * <p><b>幂等由「商户退款单号」保证</b>：同一个 {@code refundNo} 重复请求，
+     * 平台只会退一次。这是这道防线里唯一可靠的一层 —— 本地的状态守卫
+     * （{@code WHERE status = 'PAID'}）只能保证「同一场包场不会被我们自己的代码退两次」，
+     * 管不到「上一次请求其实成功了、只是响应没收到」这种情形。
+     *
+     * <p><b>调用时机</b>：管理员在后台点「撤销并退款」时。
+     * 与下单一样是<b>用户动作触发</b>的，不做定时任务、不做自动退款 ——
+     * 退钱这件事必须有人负责，让它自己发生比让它晚一点发生危险得多。
+     *
+     * @param command 退款参数
+     * @return 退款结果。{@code success=false} 时本地应当保持原状（仍是已付款），
+     *         宁可退不成，也不能记成退成了
+     */
+    RefundResult refund(RefundCommand command);
 
     /**
      * 主动查单。

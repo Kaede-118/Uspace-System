@@ -150,7 +150,7 @@ public class FakeNoticeMapper implements InvocationHandler {
             case "insert" -> insert((Notice) args[0]);
             case "selectById" -> selectById((Long) args[0]);
             case "deleteById" -> deleteById((Long) args[0]);
-            case "selectLatest" -> selectLatest((Integer) args[0]);
+            case "selectPageForUser" -> selectPageForUser(args);
             case "selectPageForAdmin" -> selectPageForAdmin(args);
             case "updateManualFields" -> updateManualFields(args);
             default -> throw new UnsupportedOperationException(
@@ -219,17 +219,29 @@ public class FakeNoticeMapper implements InvocationHandler {
     }
 
     /**
-     * 取最新的若干条：只排 id 倒序、只取未删的，<b>没有任何时间条件</b>。
+     * 用户端分页查询：置顶在前、其余按 id 倒序，只取未删的，<b>没有任何时间条件</b>。
      *
-     * @param limit 最多几条
-     * @return 公告，最新在前
+     * <p>⚠️ 排序必须与真 SQL 的 {@code ORDER BY pinned DESC, id DESC} 逐字一致 ——
+     * 不一致的话，单测与真库会得出相反的结论，而两边都「通过」。
+     *
+     * @param args 依次为 IPage
+     * @return 分页结果
      */
-    private List<Notice> selectLatest(int limit) {
-        return rows.values().stream()
+    @SuppressWarnings("unchecked")
+    private IPage<Notice> selectPageForUser(Object[] args) {
+        IPage<Notice> page = (IPage<Notice>) args[0];
+
+        List<Notice> matched = rows.values().stream()
                 .filter(FakeNoticeMapper::isAlive)
-                .sorted(Comparator.comparing(Notice::getId).reversed())
-                .limit(limit)
+                .sorted(Comparator.comparing(FakeNoticeMapper::isPinned, Comparator.reverseOrder())
+                        .thenComparing(Notice::getId, Comparator.reverseOrder()))
                 .toList();
+        return fillPage(page, matched);
+    }
+
+    /** 置顶标记，null 视为不置顶 */
+    private static int isPinned(Notice notice) {
+        return notice.getPinned() != null && notice.getPinned() == 1 ? 1 : 0;
     }
 
     /**
@@ -247,7 +259,8 @@ public class FakeNoticeMapper implements InvocationHandler {
                 .filter(FakeNoticeMapper::isAlive)
                 .filter(n -> publishMode == null || publishMode.isEmpty()
                         || publishMode.equals(n.getPublishMode()))
-                .sorted(Comparator.comparing(Notice::getId).reversed())
+                .sorted(Comparator.comparing(FakeNoticeMapper::isPinned, Comparator.reverseOrder())
+                        .thenComparing(Notice::getId, Comparator.reverseOrder()))
                 .toList();
         return fillPage(page, matched);
     }
@@ -257,7 +270,7 @@ public class FakeNoticeMapper implements InvocationHandler {
      *
      * <p>带 {@code publish_mode = 'MANUAL'} 条件，与真实 SQL 一致。
      *
-     * @param args 依次为 id、title、content
+     * @param args 依次为 id、title、content、pinned
      * @return 受影响行数；0 表示不存在、已删，或不是手写公告
      */
     private int updateManualFields(Object[] args) {
@@ -269,6 +282,7 @@ public class FakeNoticeMapper implements InvocationHandler {
         }
         notice.setTitle((String) args[1]);
         notice.setContent((String) args[2]);
+        notice.setPinned((Integer) args[3]);
         return 1;
     }
 

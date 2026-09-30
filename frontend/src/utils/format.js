@@ -57,6 +57,41 @@ export function formatDateTime(value) {
 }
 
 /**
+ * 后端时间串 → {@code <input type="datetime-local">} 的 value。
+ *
+ * <p>用于把一条已有记录回填进表单（如包场改期）。
+ *
+ * @param {string} str 形如 "2026-09-30 14:00:00"
+ * @returns {string} 形如 "2026-09-30T14:00"；无法解析时返回空串
+ */
+export function toInputDateTime(str) {
+  if (!str) return ''
+  const m = String(str).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/)
+  if (!m) return ''
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`
+}
+
+/**
+ * {@code <input type="datetime-local">} 的 value → 后端要的时间串。
+ *
+ * <p>⚠️ <b>这一对函数不是「顺手加的」</b>：后端 {@code JacksonConfig} 里
+ * {@code LocalDateTime} 的反序列化只认 {@code yyyy-MM-dd HH:mm:ss} 一种格式，
+ * 而浏览器控件给出的是带 {@code T} 分隔、<b>且不带秒</b>的
+ * {@code 2026-09-30T14:00} —— 直接提交会 400，而返回的报错文案只会说
+ * 「参数格式不正确」，不会告诉你差在哪。本项目此前只展示时间、从不发送时间，
+ * 后台的包场排期是**第一处由前端发出时间**的地方。
+ *
+ * @param {string} str 形如 "2026-09-30T14:00"（带秒也行）
+ * @returns {string} 形如 "2026-09-30 14:00:00"；无法解析时返回空串
+ */
+export function fromInputDateTime(str) {
+  if (!str) return ''
+  const m = String(str).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/)
+  if (!m) return ''
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6] || '00'}`
+}
+
+/**
  * 只取日期部分（"2026-09-30"）。
  *
  * @param {string} str 后端的时间串

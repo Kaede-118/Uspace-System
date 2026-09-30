@@ -50,6 +50,9 @@ public class AdminNoticeVo {
     /** 这条消息的产生时刻 */
     private LocalDateTime createdAt;
 
+    /** 是否置顶。对外给布尔，理由同 {@link NoticeVo#getPinned()} */
+    private Boolean pinned;
+
     /**
      * 是否可编辑。
      *
@@ -77,6 +80,7 @@ public class AdminNoticeVo {
         vo.setSourceId(notice.getSourceId());
         vo.setCreatedBy(notice.getCreatedBy());
         vo.setCreatedAt(notice.getCreatedAt());
+        vo.setPinned(notice.getPinned() != null && notice.getPinned() == 1);
         vo.setEditable(NoticePublishMode.MANUAL.name().equals(notice.getPublishMode()));
         return vo;
     }

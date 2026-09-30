@@ -161,15 +161,20 @@ export function listBookings(params = {}) {
  * <p>创建出来是 {@code PENDING_PAYMENT} —— <b>包场只做排期，收款归模块 8</b>。
  * 付款后才生成邀请令牌、才产生排他性。
  *
- * <p>排期不校验过去的时间，但过去时段排了也没有意义（准入不会命中）。
+ * <p>⚠️ <b>开始时刻必须是将来</b>（后端校验，返回 {@code BOOKING_START_IN_PAST} 40911）——
+ * 排一场已经开始的包场没有意义，邀请链接刚生成就只剩一半可用。
+ * 注意这与「改期」不同：{@link updateBooking} <b>刻意不校验过去的时间</b>，
+ * 把一场已经开始的场次往后挪是合理诉求。所以 {@code datetime-local} 上的
+ * {@code min} 只给新建表单加，别顺手加到改期表单上。
  *
  * @param {object} data
  * @param {number|string} data.hostUserId 包场人用户 ID
- * @param {string} data.startAt 开始时刻
+ * @param {string} data.startAt 开始时刻（格式 {@code yyyy-MM-dd HH:mm:ss}，见 utils/format.js）
  * @param {string} data.endAt   结束时刻
  * @param {number|string} data.price 包场费
  * @param {string} [data.remark] 备注
  * @returns {Promise}
+ * @throws 40911 开始时刻在过去；40912 与既有包场重叠；40913 与停业区间重叠
  */
 export function createBooking(data) {
   return http.post('/api/admin/bookings', data)
@@ -190,13 +195,36 @@ export function updateBooking(id, data) {
 }
 
 /**
- * 删包场。
+ * 取消包场（**只有待付款的可以取消**，没有钱的事）。
+ *
+ * <p>已付款的要撤销退款，走 {@link revokeBooking} —— 两个动作的后果不同，
+ * 是两个端点、两个错误码。
  *
  * @param {number|string} id 包场 ID
  * @returns {Promise}
  */
 export function deleteBooking(id) {
   return http.delete(`/api/admin/bookings/${id}`)
+}
+
+/**
+ * 撤销已付款的包场并退款（**只有已付款的可以撤**）。
+ *
+ * <p>退款金额固定为全额（包场是一口价，撤销就是整场作废），由后端自己取，
+ * 前端传不了金额 —— 能传就能传错。
+ *
+ * <p>服务端是「先占位、再退钱」：先把状态原子地翻成已退款（并发时只有一个能成功，
+ * 这是防「同一笔钱被退两次」的关键），再去调支付平台；
+ * <b>平台失败会把状态回滚成已付款并返回 502</b>，钱与单子始终对得上。
+ *
+ * @param {number|string} id 包场 ID
+ * @param {string} refundMode 退款方式：**MANUAL** 管理员线下退 / **ONLINE** 原路退回
+ * @returns {Promise<{data:{id, bookingNo, status, refundMode, refundAmount, refundedAt, refundedBy, refundNo}}>}
+ * @throws 40934 该场不是已付款状态（含已被别人撤销过）
+ * @throws 50201 原路退回失败，状态已回滚
+ */
+export function revokeBooking(id, refundMode) {
+  return http.post(`/api/admin/bookings/${id}/revoke`, { refundMode })
 }
 
 /* ==================== 设备 ==================== */
@@ -392,6 +420,9 @@ export function confirmPayment(id, paymentNo) {
  * @param {number} [params.pageSize] 每页条数
  * @param {string} [params.keyword]  按名称搜索
  * @param {number} [params.enabled]  1 上架 / 0 下架
+ * @param {boolean} [params.stockAsc] 按「库存从少到多」排，补货优先。
+ *   ⚠️ <b>排序必须交给后端</b>：结果是分页的，前端只能排当前这一页，
+ *   第二页可能藏着比本页更少的库存
  * @returns {Promise<{data:{total, current, size, records}}>}
  */
 export function listAdminProducts(params = {}) {

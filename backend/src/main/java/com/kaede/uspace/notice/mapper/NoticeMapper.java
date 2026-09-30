@@ -7,8 +7,6 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
-import java.util.List;
-
 /**
  * 公告的数据访问接口。
  *
@@ -34,20 +32,28 @@ public interface NoticeMapper extends BaseMapper<Notice> {
      * 用 {@code created_at} 反而会因为同秒多条而出现不稳定的顺序
      * （两条同一秒写入的公告每次查询可能换个位置，页面看起来像在抖动）。
      *
-     * <p>带 {@code LIMIT} 是因为首页公告栏只展示最近几条，
-     * 全量拉回来再由前端截断是白费一次网络传输。
+     * <p><b>分页而不是 {@code LIMIT 几条}</b>：等首页那几条看完，用户还可以点进
+     * 「全部公告」一直往下翻 —— 公告是只增不减的消息流，机台每变一次状况就多一条，
+     * 只给最近若干条的话，更早的内容就永远看不到了。
      *
-     * @param limit 最多返回几条
-     * @return 公告，按 id 倒序（最新在前）；没有则返回空列表
+     * <p><b>排序是 {@code pinned DESC, id DESC}</b>：置顶的在最前，
+     * 其余按时间倒序。置顶只对手写公告有意义（自动公告恒为 0），
+     * 所以正常情况下置顶区就是运营想让大家先看到的那几条。
+     *
+     * <p>次序键用 {@code id} 而不是 {@code created_at}：主键自增且不可变，
+     * 倒序就是严格的时间倒序；用 {@code created_at} 反而会因为同秒多条
+     * 而出现不稳定的顺序（两条同一秒写入的公告每次查询可能换个位置，页面看起来像在抖动）。
+     *
+     * @param page 分页参数，由 MyBatis-Plus 的分页插件处理
+     * @return 分页结果，置顶在前、其余按 id 倒序
      */
     @Select("""
             SELECT *
               FROM biz_notice
              WHERE deleted = 0
-             ORDER BY id DESC
-             LIMIT #{limit}
+             ORDER BY pinned DESC, id DESC
             """)
-    List<Notice> selectLatest(@Param("limit") int limit);
+    IPage<Notice> selectPageForUser(IPage<Notice> page);
 
     /**
      * 后台分页查询公告。
@@ -62,14 +68,14 @@ public interface NoticeMapper extends BaseMapper<Notice> {
      *
      * @param page        分页参数，由 MyBatis-Plus 的分页插件处理
      * @param publishMode 发布方式筛选，可空
-     * @return 分页结果，按 id 倒序
+     * @return 分页结果，置顶在前、其余按 id 倒序
      */
     @Select("""
             SELECT *
               FROM biz_notice
              WHERE deleted = 0
                AND (#{publishMode} IS NULL OR #{publishMode} = '' OR publish_mode = #{publishMode})
-             ORDER BY id DESC
+             ORDER BY pinned DESC, id DESC
             """)
     IPage<Notice> selectPageForAdmin(IPage<Notice> page,
                                      @Param("publishMode") String publishMode);
@@ -93,12 +99,14 @@ public interface NoticeMapper extends BaseMapper<Notice> {
      * @param id      公告 ID
      * @param title   新标题
      * @param content 新正文，可为 null（清空）
+     * @param pinned  是否置顶（1/0）
      * @return 受影响行数；0 表示公告不存在、已删，或它不是手写公告
      */
     @Update("""
             UPDATE biz_notice
                SET title      = #{title},
                    content    = #{content},
+                   pinned     = #{pinned},
                    updated_at = NOW()
              WHERE id = #{id}
                AND deleted = 0
@@ -106,7 +114,8 @@ public interface NoticeMapper extends BaseMapper<Notice> {
             """)
     int updateManualFields(@Param("id") Long id,
                            @Param("title") String title,
-                           @Param("content") String content);
+                           @Param("content") String content,
+                           @Param("pinned") Integer pinned);
 
     // 说明：新增公告直接用 MyBatis-Plus 自带的 insert 即可 ——
     // 自动公告就是插一行，没有幂等、没有 upsert，不必手写 SQL。

@@ -51,6 +51,10 @@ public class AdminProductController {
      * @param pageSize 每页条数
      * @param keyword  名称关键词，可空
      * @param enabled  上架状态筛选（1=上架 0=下架），可空
+     * @param stockAsc 是否按「库存从少到多」排，默认否。
+     *                 补货优先用的排序 —— <b>必须由后端排</b>：
+     *                 结果是分页的，前端只能排当前这一页，
+     *                 第二页可能藏着比本页更少的库存，而运营看的是「最上面那条最少」
      * @return 分页结果
      */
     @GetMapping
@@ -58,8 +62,9 @@ public class AdminProductController {
             @RequestParam(defaultValue = "1") long pageNum,
             @RequestParam(defaultValue = "10") long pageSize,
             @RequestParam(required = false) String keyword,
-            @RequestParam(required = false) Integer enabled) {
-        return ApiResult.of(productService.listAll(pageNum, pageSize, keyword, enabled));
+            @RequestParam(required = false) Integer enabled,
+            @RequestParam(defaultValue = "false") boolean stockAsc) {
+        return ApiResult.of(productService.listAll(pageNum, pageSize, keyword, enabled, stockAsc));
     }
 
     /**

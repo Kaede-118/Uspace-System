@@ -46,6 +46,14 @@ public class NoticeVo {
     private LocalDateTime createdAt;
 
     /**
+     * 是否置顶。
+     *
+     * <p>对外给布尔而不是 0/1：调用方只关心「是不是置顶的」，
+     * 让它自己判断 1 与 0 只会多一个写错的机会。
+     */
+    private Boolean pinned;
+
+    /**
      * 由实体构造视图。
      *
      * <p>写成静态工厂而不是构造函数，是为了让调用处读起来有语义。
@@ -61,6 +69,7 @@ public class NoticeVo {
         vo.setPublishMode(notice.getPublishMode());
         vo.setPublishModeText(NoticePublishMode.labelOf(notice.getPublishMode()));
         vo.setCreatedAt(notice.getCreatedAt());
+        vo.setPinned(notice.getPinned() != null && notice.getPinned() == 1);
         return vo;
     }
 }

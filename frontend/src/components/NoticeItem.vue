@@ -10,7 +10,7 @@ import { computed } from 'vue'
 import { relativeTime } from '@/utils/format'
 
 const props = defineProps({
-  /** 公告对象：{ id, title, content, publishMode, createdAt } */
+  /** 公告对象：{ id, title, content, publishMode, createdAt, pinned } */
   notice: { type: Object, required: true }
 })
 
@@ -24,7 +24,11 @@ const time = computed(() => relativeTime(props.notice.createdAt))
   <div class="notice">
     <span class="notice__icon" aria-hidden="true">{{ icon }}</span>
     <div class="notice__main">
-      <p class="notice__title">{{ notice.title }}</p>
+      <p class="notice__title">
+        <!-- 置顶的加个小标记：没有它的话，用户看不出这条为什么排在最前面 -->
+        <span v-if="notice.pinned" class="notice__pin">置顶</span>
+        {{ notice.title }}
+      </p>
       <p v-if="notice.content" class="notice__content">{{ notice.content }}</p>
     </div>
     <span class="notice__time">{{ time }}</span>
@@ -32,6 +36,19 @@ const time = computed(() => relativeTime(props.notice.createdAt))
 </template>
 
 <style scoped>
+/* 置顶标记。用主色小胶囊，不抢标题的注意力 */
+.notice__pin {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--c-primary);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
 .notice {
   display: flex;
   align-items: flex-start;

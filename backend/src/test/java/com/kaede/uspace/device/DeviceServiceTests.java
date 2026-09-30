@@ -714,7 +714,7 @@ class DeviceServiceTests {
 
         // 两条按时间倒序展示时，读起来是一段过程
         assertEquals(List.of("拍拍机 1 号 由 维护中 转为 良好", "拍拍机 1 号 由 良好 转为 维护中"),
-                noticeServiceOf().listForUser(null).getData().stream()
+                noticeServiceOf().listForUser(1, 5).getData().getRecords().stream()
                         .map(vo -> vo.getTitle()).toList());
     }
 

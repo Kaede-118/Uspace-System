@@ -228,13 +228,20 @@ CREATE TABLE `biz_booking` (
   `end_at`         DATETIME      NOT NULL                COMMENT '包场结束时刻（不含）',
   `price`          DECIMAL(10,2) NOT NULL                COMMENT '包场价格（元），一口价预付，不按分钟计',
   `status`         VARCHAR(20)   NOT NULL DEFAULT 'PENDING_PAYMENT'
-                   COMMENT '状态：PENDING_PAYMENT 待付款 / PAID 已付款（准入生效）/ CANCELLED 已取消 / CLOSED 已结束',
+                   COMMENT '状态：PENDING_PAYMENT 待付款 / PAID 已付款（准入生效）/ CANCELLED 已取消 / REFUNDED 已退款（撤销并退款，时段释放）/ CLOSED 已结束',
   `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
   `payment_no`     VARCHAR(64)   DEFAULT NULL            COMMENT '支付平台交易号',
   `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付完成时刻，也是邀请链接开始可用的时刻',
   `invite_token`   VARCHAR(64)   DEFAULT NULL            COMMENT '邀请令牌，付款后生成，被邀请者凭它鉴权',
   `remark`         VARCHAR(255)  DEFAULT NULL            COMMENT '备注',
   `created_by`     BIGINT        DEFAULT NULL            COMMENT '安排人（管理员 ID）',
+  -- 退款四列：撤销已付款的包场时写入。分四列而不是一个 JSON，
+  -- 是为了能直接按「谁退的」「什么时候退的」查与审计
+  `refund_mode`    VARCHAR(16)   DEFAULT NULL            COMMENT '退款方式：MANUAL 人工退 / ONLINE 原路退回；未退款时为空',
+  `refund_amount`  DECIMAL(10,2) DEFAULT NULL            COMMENT '退款金额（元），当前恒为全额；未退款时为空',
+  `refunded_at`    DATETIME      DEFAULT NULL            COMMENT '退款完成时刻；未退款时为空',
+  `refunded_by`    BIGINT        DEFAULT NULL            COMMENT '操作退款的管理员用户 ID；未退款时为空',
+  `refund_no`      VARCHAR(64)   DEFAULT NULL            COMMENT '原路退回的商户退款单号；人工退与未退款时为空',
   `created_at`     DATETIME      NOT NULL                COMMENT '创建时间',
   `updated_at`     DATETIME      NOT NULL                COMMENT '更新时间',
   `deleted`        TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
@@ -671,11 +678,16 @@ CREATE TABLE `biz_notice` (
   `source_type`  VARCHAR(20)   DEFAULT NULL            COMMENT '自动公告的来源类型：DEVICE 机台；手写公告为 NULL。见 NoticeSourceType',
   `source_id`    BIGINT        DEFAULT NULL            COMMENT '自动公告的来源记录 ID（机台 ID）；手写公告为 NULL。用来追溯「这条是哪台机器产生的」',
   `created_by`   BIGINT        DEFAULT NULL            COMMENT '发布人（管理员 ID）；自动公告为 NULL',
+  -- 置顶只对手写公告有意义：置顶是运营的意图（「这条请大家务必看到」），
+  -- 而自动公告是机台状态变化的事实记录，恒为 0 —— 让自动公告也能置顶的话，
+  -- 一次机台故障就会把首页前几条全占满
+  `pinned`       TINYINT       NOT NULL DEFAULT 0      COMMENT '是否置顶：1=置顶。置顶的排在首页最前，自动公告恒为 0',
   `created_at`   DATETIME      NOT NULL                COMMENT '创建时间，同时也是这条消息的发生时刻',
   `updated_at`   DATETIME      NOT NULL                COMMENT '更新时间',
   `deleted`      TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删。只有手写公告会被删',
   PRIMARY KEY (`id`),
-  -- 用户端取最新几条就是 ORDER BY id DESC LIMIT n，主键索引直接服务。
+  -- 用户端取最新几条是 ORDER BY pinned DESC, id DESC LIMIT n，
+  -- 主键索引直接服务（置顶的条数极少，排序代价可以忽略）。
   -- 这条二级索引给后台按来源追溯用（「这台机器都发生过什么」），
   -- 注意它是【普通索引】不是唯一索引 —— 同一台机台会有很多条
   KEY `idx_source` (`source_type`, `source_id`),

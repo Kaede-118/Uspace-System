@@ -5,6 +5,10 @@ import com.kaede.uspace.order.dto.PaymentCreateResult;
 import com.kaede.uspace.order.dto.PaymentNotifyRequest;
 import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
+import com.kaede.uspace.order.dto.RefundCommand;
+import com.kaede.uspace.order.dto.RefundResult;
+
+import java.time.LocalDateTime;
 
 /**
  * 内存版的 {@link PaymentGateway}，供模块 8 的单元测试使用。
@@ -33,6 +37,17 @@ public class FakePaymentGateway implements PaymentGateway {
     private PaymentCreateCommand lastCommand;
 
     private int createCalls = 0;
+
+    /** 下一次退款是否失败 */
+    private boolean nextRefundFails = false;
+
+    /** 退款失败时返回的原因 */
+    private String refundFailReason = "模拟网络异常：退款失败";
+
+    /** 最后一次退款收到的参数 */
+    private RefundCommand lastRefundCommand;
+
+    private int refundCalls = 0;
 
     /**
      * 设定回调解析的返回值。
@@ -116,6 +131,47 @@ public class FakePaymentGateway implements PaymentGateway {
     @Override
     public PaymentQueryResult queryPayment(String outTradeNo, PaymentChannel channel) {
         return queryResult;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>模拟实现：默认成功，可用 {@link #failNextRefund} 让下一次失败 ——
+     * 「退款被平台拒绝」是必须走得到的分支，它决定了本地状态该不该回滚。
+     */
+    @Override
+    public RefundResult refund(RefundCommand command) {
+        refundCalls++;
+        lastRefundCommand = command;
+
+        if (nextRefundFails) {
+            nextRefundFails = false;
+            return RefundResult.fail(refundFailReason);
+        }
+        return RefundResult.ok(command.getRefundNo(),
+                "platform_" + command.getRefundNo(), LocalDateTime.now());
+    }
+
+    /**
+     * 让下一次退款失败。
+     *
+     * @param reason 失败原因
+     * @return 本对象，便于链式调用
+     */
+    public FakePaymentGateway failNextRefund(String reason) {
+        this.nextRefundFails = true;
+        this.refundFailReason = reason;
+        return this;
+    }
+
+    /** @return 退款方法的累计调用次数 */
+    public int refundCalls() {
+        return refundCalls;
+    }
+
+    /** @return 最后一次退款的参数；从未调用过时为 null */
+    public RefundCommand lastRefundCommand() {
+        return lastRefundCommand;
     }
 
     /**

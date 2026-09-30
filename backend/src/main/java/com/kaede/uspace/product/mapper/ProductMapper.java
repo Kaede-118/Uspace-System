@@ -46,22 +46,46 @@ public interface ProductMapper extends BaseMapper<Product> {
      *
      * <p>关键词按名称模糊匹配，{@code LIKE} 的写法与设备列表同款。
      *
-     * @param page    分页参数，由 MyBatis-Plus 的分页插件处理
-     * @param keyword 名称关键词，可空
-     * @param enabled 上架状态（1/0），可空
+     * <p><b>排序只有两种，用 {@code <choose>} 从两句写死的 ORDER BY 里挑一句</b>，
+     * 不用 {@code ${}} 拼字符串 —— 那才是注入口。这一点很要紧：
+     * 排序字段一旦能被调用方拼进来，就等于把 SQL 的一部分交出去了。
+     * <ul>
+     *   <li>默认（{@code stockAsc = false}）：{@code sort_no, id DESC} ——
+     *       运营在编辑表单里调的展示顺序</li>
+     *   <li>{@code stockAsc = true}：{@code stock ASC, id ASC} ——
+     *       库存少的在前，补货优先</li>
+     * </ul>
+     * 两种排序都带 {@code id} 兜底：{@code sort_no} 会撞值、{@code stock} 更会，
+     * 只按业务列排的话，同值行的先后由存储引擎决定，翻页时表现为「某条没出现过」。
+     *
+     * <p>⚠️ <b>排序必须做在 SQL 里，不能拿回前端排</b>：结果是分页的，
+     * 前端只能排当前这一页 —— 第二页可能藏着比本页更少的库存，
+     * 而运营看的是「最上面那条最少」。
+     *
+     * @param page     分页参数，由 MyBatis-Plus 的分页插件处理
+     * @param keyword  名称关键词，可空
+     * @param enabled  上架状态（1/0），可空
+     * @param stockAsc 是否按库存从少到多排
      * @return 分页结果
      */
     @Select("""
+            <script>
             SELECT *
               FROM biz_product
              WHERE deleted = 0
                AND (#{keyword} IS NULL OR #{keyword} = '' OR name LIKE CONCAT('%', #{keyword}, '%'))
                AND (#{enabled} IS NULL OR enabled = #{enabled})
-             ORDER BY sort_no, id DESC
+             ORDER BY
+            <choose>
+                <when test="stockAsc">stock ASC, id ASC</when>
+                <otherwise>sort_no, id DESC</otherwise>
+            </choose>
+            </script>
             """)
     IPage<Product> selectPageBy(IPage<Product> page,
                                 @Param("keyword") String keyword,
-                                @Param("enabled") Integer enabled);
+                                @Param("enabled") Integer enabled,
+                                @Param("stockAsc") boolean stockAsc);
 
     /**
      * 按 ID 全量更新商品（后台修改走这一条）。

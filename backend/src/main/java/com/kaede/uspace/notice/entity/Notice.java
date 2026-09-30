@@ -91,4 +91,16 @@ public class Notice extends BaseEntity {
 
     /** 发布人（管理员 ID）。自动公告为 null */
     private Long createdBy;
+
+    /**
+     * 是否置顶：1 置顶 / 0 普通。
+     *
+     * <p><b>只有手写公告能置顶</b>：置顶是运营的意图（「这条请大家务必看到」），
+     * 而自动公告是机台状态变化的事实记录，由系统写入，恒为 0。
+     * 让自动公告也能置顶的话，一次机台故障就会把首页前几条全占满。
+     *
+     * <p>用 {@code Integer} 而不是 {@code Boolean}，与 {@code biz_product.enabled}
+     * 同一套：库里是 TINYINT，映射成 Boolean 会引入一层隐式转换。
+     */
+    private Integer pinned;
 }

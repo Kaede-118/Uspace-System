@@ -48,11 +48,13 @@ import java.util.Objects;
 @Service
 public class NoticeService {
 
-    /** 用户端一次最多取几条公告，防止调用方传一个很大的 limit 把整表拉出来 */
-    private static final int MAX_USER_LIMIT = 20;
-
-    /** 用户端默认取几条 */
-    private static final int DEFAULT_USER_LIMIT = 5;
+    /**
+     * 用户端分页每页最多几条。
+     *
+     * <p>由 {@code UserNoticeController} 的 {@code @Max} 引用，防止调用方
+     * 传一个很大的 pageSize 把整表拉出来。改这里就改了接口约束，两处不会是两份数。
+     */
+    public static final int MAX_USER_PAGE_SIZE = 20;
 
     private final NoticeMapper noticeMapper;
 
@@ -65,18 +67,21 @@ public class NoticeService {
     // ==================================================================
 
     /**
-     * 取最新的公告，即首页公告栏看到的内容。
+     * 分页查询公告，供用户端使用（首页公告栏与「全部公告」页共用这一个接口）。
      *
      * <p>没有可见性判断 —— 公告没有生效/失效时刻，发出来就是可见的。
-     * 只按主键倒序取最近若干条。
      *
-     * @param limit 最多几条；为 null 时取默认值，超出上限则截到上限
-     * @return 公告，最新在前
+     * <p><b>为什么是分页而不是「取最近 N 条」</b>：首页那几条看完之后，
+     * 用户还能点进「全部公告」一直往下翻。公告是只增不减的消息流
+     * （机台每变一次状况就多一条），只给最近若干条的话，更早的内容就永远看不到了。
+     *
+     * @param pageNum  页码，从 1 开始
+     * @param pageSize 每页条数
+     * @return 分页结果，<b>置顶的在前</b>，其余按时间倒序
      */
-    public BizResult<List<NoticeVo>> listForUser(Integer limit) {
-        int size = normalizeLimit(limit);
-        List<Notice> notices = noticeMapper.selectLatest(size);
-        return BizResult.ok(notices.stream().map(NoticeVo::from).toList());
+    public BizResult<PageResult<NoticeVo>> listForUser(long pageNum, long pageSize) {
+        IPage<Notice> page = noticeMapper.selectPageForUser(new Page<>(pageNum, pageSize));
+        return BizResult.ok(PageResult.of(page, NoticeVo::from));
     }
 
     /**
@@ -119,6 +124,7 @@ public class NoticeService {
         notice.setSourceType(null);
         notice.setSourceId(null);
         notice.setCreatedBy(adminId);
+        notice.setPinned(normalizePinned(request.getPinned()));
         noticeMapper.insert(notice);
 
         log.info("[公告] 管理员 {} 发布公告 id={} 标题={}", adminId, notice.getId(), notice.getTitle());
@@ -151,7 +157,7 @@ public class NoticeService {
         // 而这里「content 传 null 表示清空正文」是刻意的语义。走 updateById 的话
         // 正文清不掉，而且不报任何错。理由同 DeviceMapper#updateDevice
         noticeMapper.updateManualFields(id, request.getTitle().trim(),
-                trimToNull(request.getContent()));
+                trimToNull(request.getContent()), normalizePinned(request.getPinned()));
 
         log.info("[公告] 修改公告 id={} 标题={}", id, request.getTitle().trim());
         return BizResult.ok(AdminNoticeVo.from(noticeMapper.selectById(id)));
@@ -243,20 +249,16 @@ public class NoticeService {
     // ==================================================================
 
     /**
-     * 归一化的用户端条数上限。
+     * 归一化置顶标记。
      *
-     * <p>不合法时<b>回落而不是报错</b>：这个参数由前端传，
-     * 传错（负数、超大值）的后果只是多取几条或少取几条公告，
-     * 没有让整个首页接口失败的必要。
+     * <p>只认 1，其余（null、0、2、-1）一律按 0。<b>刻意不报错</b>：
+     * 置顶是个显示偏好，为它把整个「发公告」的请求打回去不值得。
      *
-     * @param limit 原始值，可为 null
-     * @return 1 到 {@value #MAX_USER_LIMIT} 之间的条数
+     * @param pinned 入参，可为 null
+     * @return 1 或 0
      */
-    private static int normalizeLimit(Integer limit) {
-        if (limit == null || limit < 1) {
-            return DEFAULT_USER_LIMIT;
-        }
-        return Math.min(limit, MAX_USER_LIMIT);
+    private static int normalizePinned(Integer pinned) {
+        return pinned != null && pinned == 1 ? 1 : 0;
     }
 
     /**

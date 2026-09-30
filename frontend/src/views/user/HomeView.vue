@@ -34,6 +34,14 @@ import LoadingMask from '@/components/LoadingMask.vue'
 
 const storeStatus = ref(null)
 const notices = ref([])
+
+/**
+ * 首页公告栏显示几条。
+ *
+ * <p>只显示前几条（含置顶的），完整的走「查看全部 ›」——
+ * 公告是只增不减的消息流，全摊在首页会把下面几张卡片全挤下去。
+ */
+const HOME_NOTICE_LIMIT = 4
 const schedule = ref([])
 const currentOrder = ref(null)
 const unpaidCount = ref(0)
@@ -98,14 +106,14 @@ const nextChangeText = computed(() => preview.value?.nextChangeText || '')
 async function loadAll() {
   const [statusRes, noticesRes, scheduleRes, currentRes, unpaidRes] = await Promise.allSettled([
     getStoreStatus(),
-    getNotices(5),
+    getNotices({ page: 1, size: HOME_NOTICE_LIMIT }),
     getBookingSchedule(5),
     getCurrentOrder(),
     listMyOrders({ status: 'PENDING_PAYMENT', size: 1 })
   ])
 
   if (statusRes.status === 'fulfilled') storeStatus.value = statusRes.value.data
-  if (noticesRes.status === 'fulfilled') notices.value = noticesRes.value.data || []
+  if (noticesRes.status === 'fulfilled') notices.value = noticesRes.value.data?.records || []
   if (scheduleRes.status === 'fulfilled') schedule.value = scheduleRes.value.data || []
   if (currentRes.status === 'fulfilled') currentOrder.value = currentRes.value.data || null
   if (unpaidRes.status === 'fulfilled') unpaidCount.value = unpaidRes.value.data?.total || 0
@@ -282,9 +290,14 @@ onUnmounted(() => {
       窄屏（手机）下 auto-fit 会自动退回单列。
     -->
     <div class="home__panels">
-      <!-- 公告（消息流） -->
+      <!-- 公告（消息流）。只显示前几条，看全部去「全部公告」页 -->
       <div class="card">
-        <div class="card-title">📢 门店公告</div>
+        <div class="card-title">
+          📢 门店公告
+          <router-link v-if="notices.length" class="home__more" to="/notices">
+            查看全部 ›
+          </router-link>
+        </div>
         <template v-if="notices.length">
           <NoticeItem v-for="item in notices" :key="item.id" :notice="item" />
         </template>
@@ -351,6 +364,14 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 「查看全部 ›」：贴在卡片标题行的右端 */
+.home__more {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--c-primary);
+}
+
 .home__head {
   margin-bottom: var(--sp-4);
 }

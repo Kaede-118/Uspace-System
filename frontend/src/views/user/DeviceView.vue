@@ -14,23 +14,15 @@ import { ref, onMounted } from 'vue'
 import { listDevices } from '@/api/device'
 import { toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
+// 状况的标签配色与运营后台共用同一份映射（utils/labels.js），
+// 免得两处的颜色慢慢分岔成「顾客看到的红」与「管理员看到的橙」
+import { deviceStatusCls } from '@/utils/labels'
 import NavBar from '@/components/NavBar.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
 
 const groups = ref([])
 const loading = ref(true)
-
-/** 机台状况的标签配色。取值 NORMAL / NEEDS_REPAIR / MAINTAINING。 */
-const STATUS_CLASS = {
-  NORMAL: 'tag tag-success',
-  NEEDS_REPAIR: 'tag tag-warning',
-  MAINTAINING: 'tag tag-danger'
-}
-
-function statusClass(status) {
-  return STATUS_CLASS[status] || 'tag'
-}
 
 async function load() {
   loading.value = true
@@ -74,7 +66,8 @@ onMounted(load)
             </div>
             <div class="device__side">
               <span class="device__no">{{ d.deviceNo }}</span>
-              <span :class="statusClass(d.status)">{{ d.statusLabel }}</span>
+              <!-- 中文用后端给的 statusLabel，只有配色取自共用映射 -->
+              <span :class="deviceStatusCls(d.status)">{{ d.statusLabel }}</span>
             </div>
           </div>
 

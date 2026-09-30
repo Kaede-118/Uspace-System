@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BookingStatusTests {
 
     @Test
-    @DisplayName("占时段判定：待付款与已付款都算占着，已取消与已结束不算")
+    @DisplayName("占时段判定：待付款与已付款都算占着，已取消 / 已退款 / 已结束不算")
     void occupiesSlot() {
         assertTrue(BookingStatus.occupiesSlot("PENDING_PAYMENT"),
                 "虽然还没付款，但管理员排期时已经把它许出去了 —— "
@@ -34,6 +34,9 @@ class BookingStatusTests {
 
         assertFalse(BookingStatus.occupiesSlot("CANCELLED"),
                 "取消了就不该继续占着时段，否则这个时段白白空着排不出去");
+        assertFalse(BookingStatus.occupiesSlot("REFUNDED"),
+                "撤销退款就是把时段还回来 —— 判成占着的话，那一场退掉之后 "
+                        + "这个时段再也排不出去，且没有任何报错");
         assertFalse(BookingStatus.occupiesSlot("CLOSED"), "时段已过，归档状态不参与排期判定");
     }
 
@@ -47,11 +50,12 @@ class BookingStatusTests {
     }
 
     @Test
-    @DisplayName("合法取值：四个枚举名都认，其余一律不认")
+    @DisplayName("合法取值：五个枚举名都认，其余一律不认")
     void isValid() {
         assertTrue(BookingStatus.isValid("PENDING_PAYMENT"));
         assertTrue(BookingStatus.isValid("PAID"));
         assertTrue(BookingStatus.isValid("CANCELLED"));
+        assertTrue(BookingStatus.isValid("REFUNDED"));
         assertTrue(BookingStatus.isValid("CLOSED"));
 
         assertFalse(BookingStatus.isValid("paid"));

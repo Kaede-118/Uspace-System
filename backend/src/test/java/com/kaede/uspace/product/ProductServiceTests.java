@@ -459,10 +459,24 @@ class ProductServiceTests {
         Product disabled = seedProduct("下架了", "5.00", 10);
         disabled.setEnabled(0);
 
-        assertEquals(2, service.listAll(1, 10, null, null).getData().getTotal(),
+        assertEquals(2, service.listAll(1, 10, null, null, false).getData().getTotal(),
                 "后台要能看到下架的商品，否则没法重新上架");
-        assertEquals(1, service.listAll(1, 10, null, 1).getData().getTotal(), "只看上架的");
-        assertEquals(1, service.listAll(1, 10, null, 0).getData().getTotal(), "只看下架的");
+        assertEquals(1, service.listAll(1, 10, null, 1, false).getData().getTotal(), "只看上架的");
+        assertEquals(1, service.listAll(1, 10, null, 0, false).getData().getTotal(), "只看下架的");
+    }
+
+    @Test
+    @DisplayName("后台列表：按库存从少到多排，补货优先")
+    void listAll_sortsByStockAscending() {
+        seedProduct("库存多", "2.00", 90);
+        seedProduct("库存少", "2.00", 3);
+        seedProduct("库存中等", "2.00", 20);
+
+        List<String> names = service.listAll(1, 10, null, null, true).getData()
+                .getRecords().stream().map(ProductVo::getName).toList();
+
+        assertEquals(List.of("库存少", "库存中等", "库存多"), names,
+                "库存少的排在前面 —— 这条排序必须做在 SQL 里，前端排只能排当前页");
     }
 
     @Test
@@ -475,7 +489,7 @@ class ProductServiceTests {
 
         assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.detail(product.getId()).getError());
         assertTrue(service.listOnSale().getData().isEmpty());
-        assertEquals(0, service.listAll(1, 10, null, null).getData().getTotal());
+        assertEquals(0, service.listAll(1, 10, null, null, false).getData().getTotal());
 
         // 订单上存的是下单时的名称与价格快照，不依赖商品记录还在不在
         BizResult<PageResult<ProductOrderVo>> orders = service.myOrders(USER_ID, 1, 10, null);

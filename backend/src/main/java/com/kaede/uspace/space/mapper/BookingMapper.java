@@ -262,6 +262,81 @@ public interface BookingMapper extends BaseMapper<Booking> {
                  @Param("inviteToken") String inviteToken);
 
     /**
+     * 撤销已付款的包场并记下退款：一次性写状态与全部退款字段。
+     *
+     * <p><b>{@code AND status = 'PAID'} 是并发守卫</b>，与 {@link #markPaid}
+     * 的那道守卫同一个道理：两个管理员同时点了撤销，只有一个能改成功，
+     * 另一个拿到 0 行受影响 —— 调用方据此判定「已经被别人撤销过了」，
+     * <b>绝不能把钱退两次</b>。这是本方法存在的全部意义。
+     *
+     * <p>状态与退款字段必须一起写：分成两条 SQL 的话，中间失败会留下
+     * 一个「钱退了、单子还是已付款」的包场 —— 准入仍然生效、时段仍被占着，
+     * 而对账时那笔钱已经出去了。
+     *
+     * <p>只从 {@code PAID} 出发：待付款的直接走取消（没有钱的事），
+     * 已结束的场次要不要退属于运营判断，不在这个接口的语义里。
+     *
+     * @param id           包场 ID
+     * @param refundMode   退款方式：{@code MANUAL} / {@code ONLINE}
+     * @param refundAmount 退款金额（当前恒为全额）
+     * @param refundedAt   退款完成时刻
+     * @param refundedBy   操作的管理员用户 ID
+     * @param refundNo     原路退回的退款单号；人工退传 null
+     * @return 受影响行数；0 表示该场已不是已付款状态（被撤过、或状态被改过）
+     */
+    @Update("""
+            UPDATE biz_booking
+               SET status        = 'REFUNDED',
+                   refund_mode   = #{refundMode},
+                   refund_amount = #{refundAmount},
+                   refunded_at   = #{refundedAt},
+                   refunded_by   = #{refundedBy},
+                   refund_no     = #{refundNo},
+                   updated_at    = NOW()
+             WHERE id = #{id}
+               AND status = 'PAID'
+               AND deleted = 0
+            """)
+    int markRefunded(@Param("id") Long id,
+                     @Param("refundMode") String refundMode,
+                     @Param("refundAmount") BigDecimal refundAmount,
+                     @Param("refundedAt") LocalDateTime refundedAt,
+                     @Param("refundedBy") Long refundedBy,
+                     @Param("refundNo") String refundNo);
+
+    /**
+     * 撤销退款失败时把状态原样退回 —— <b>补偿用</b>，不是常规路径。
+     *
+     * <p>撤销是「先占位、再退钱」：先用 {@link #markRefunded} 把状态从
+     * {@code PAID} 翻成 {@code REFUNDED}（这是并发守卫，保证两个人同时点只会有一个成功），
+     * 再去调支付平台。平台那边失败时，就用本方法把占位撤掉。
+     *
+     * <p><b>为什么宁可退不成也不能记成退成了</b>：状态写着已退款、钱却没出去，
+     * 管理员会以为事情办完了，顾客却一直没收到钱 —— 而账面上看一切都是对的。
+     * 反过来（钱退了、状态还是已付款）至少一眼看得出来，也好补。
+     *
+     * <p>带着 {@code AND status = 'REFUNDED'} 守卫：万一这中间有人把状态又改成了别的
+     * （理论上不该发生），就不要覆盖他 —— 受影响行数为 0 时调用方只记日志。
+     *
+     * @param id 包场 ID
+     * @return 受影响行数；0 表示状态已被改动过，不做覆盖
+     */
+    @Update("""
+            UPDATE biz_booking
+               SET status        = 'PAID',
+                   refund_mode   = NULL,
+                   refund_amount = NULL,
+                   refunded_at   = NULL,
+                   refunded_by   = NULL,
+                   refund_no     = NULL,
+                   updated_at    = NOW()
+             WHERE id = #{id}
+               AND status = 'REFUNDED'
+               AND deleted = 0
+            """)
+    int revertRefund(@Param("id") Long id);
+
+    /**
      * 分页查询某人作为包场人的场次（含待付款的）。
      *
      * <p>供模块 8 的用户端使用：包场人要能看到自己名下的场、对未付款的发起支付。

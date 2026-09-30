@@ -111,17 +111,40 @@ class ProductMapperIntegrationTests {
         productMapper.insert(offSale);
 
         Page<Product> all = (Page<Product>) productMapper.selectPageBy(
-                new Page<>(1, 10), marker, null);
+                new Page<>(1, 10), marker, null, false);
         assertEquals(2, all.getTotal(), "关键词应当同时命中上架与下架的");
 
         Page<Product> enabledOnly = (Page<Product>) productMapper.selectPageBy(
-                new Page<>(1, 10), marker, 1);
+                new Page<>(1, 10), marker, 1, false);
         assertEquals(1, enabledOnly.getTotal(), "只看上架的");
         assertEquals(onSale.getId(), enabledOnly.getRecords().get(0).getId());
 
         Page<Product> disabledOnly = (Page<Product>) productMapper.selectPageBy(
-                new Page<>(1, 10), marker, 0);
+                new Page<>(1, 10), marker, 0, false);
         assertEquals(offSale.getId(), disabledOnly.getRecords().get(0).getId());
+    }
+
+    @Test
+    @DisplayName("分页查询：两种排序各自生效（默认按展示序、可按库存从少到多）")
+    void selectPageBy_switchesOrderBy() {
+        String marker = "排序标记" + System.nanoTime();
+        // 故意让 sort_no 与 stock 的顺序相反，两种排序的结果才区分得开
+        productMapper.insert(newProduct(marker + "甲", "1.00", 80, 1, 10));
+        productMapper.insert(newProduct(marker + "乙", "1.00", 5, 1, 20));
+        productMapper.insert(newProduct(marker + "丙", "1.00", 40, 1, 30));
+
+        Page<Product> bySortNo = (Page<Product>) productMapper.selectPageBy(
+                new Page<>(1, 10), marker, null, false);
+        assertEquals(List.of(marker + "甲", marker + "乙", marker + "丙"),
+                bySortNo.getRecords().stream().map(Product::getName).toList(),
+                "默认按 sort_no 升序");
+
+        Page<Product> byStock = (Page<Product>) productMapper.selectPageBy(
+                new Page<>(1, 10), marker, null, true);
+        assertEquals(List.of(marker + "乙", marker + "丙", marker + "甲"),
+                byStock.getRecords().stream().map(Product::getName).toList(),
+                "按库存从少到多 —— 排序必须落在 SQL 的 ORDER BY 上，"
+                        + "否则分页之后『库存最少的』根本不在这一页里");
     }
 
     @Test

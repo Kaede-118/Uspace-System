@@ -218,12 +218,15 @@ public class ProductService {
      * @param pageSize 每页条数
      * @param keyword  名称关键词，可空
      * @param enabled  上架状态筛选（1/0），可空
+     * @param stockAsc 是否按「库存从少到多」排（补货优先）。
+     *                 <b>排序做在 SQL 里</b>，理由见 {@code ProductMapper#selectPageBy}
      * @return 分页结果
      */
     public BizResult<PageResult<ProductVo>> listAll(long pageNum, long pageSize,
-                                                    String keyword, Integer enabled) {
+                                                    String keyword, Integer enabled,
+                                                    boolean stockAsc) {
         IPage<Product> page = productMapper.selectPageBy(
-                new Page<>(pageNum, pageSize), trimToNull(keyword), enabled);
+                new Page<>(pageNum, pageSize), trimToNull(keyword), enabled, stockAsc);
 
         Map<Long, Integer> pending = pendingQuantitiesOf(
                 page.getRecords().stream().map(Product::getId).toList());

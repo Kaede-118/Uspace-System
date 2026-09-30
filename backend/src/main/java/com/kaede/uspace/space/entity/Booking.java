@@ -84,4 +84,31 @@ public class Booking extends BaseEntity {
 
     /** 安排人（管理员用户 ID） */
     private Long createdBy;
+
+    /* ---------------- 以下四个字段由「撤销并退款」写入 ---------------- */
+
+    /**
+     * 退款方式：{@code MANUAL}（人工退）/ {@code ONLINE}（原路退回）。
+     *
+     * <p>仅当状态为 {@code REFUNDED} 时有值。
+     */
+    private String refundMode;
+
+    /**
+     * 退款金额（元）。
+     *
+     * <p>当前恒等于 {@link #price}（一口价，撤销即全退），<b>但仍然单独存一列</b>：
+     * 将来要做部分退款（已经用了一半时段）时不必改表结构，
+     * 也不必回头去猜「当时到底退了多少」—— 账单上的数只能来自当时记下的数。
+     */
+    private BigDecimal refundAmount;
+
+    /** 退款完成时刻 */
+    private LocalDateTime refundedAt;
+
+    /** 操作退款的管理员用户 ID。人工退时尤其要留下是谁办的 */
+    private Long refundedBy;
+
+    /** 原路退回时支付平台给的退款单号；人工退为 null */
+    private String refundNo;
 }

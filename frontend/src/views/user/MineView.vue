@@ -21,7 +21,7 @@ import { logout } from '@/api/auth'
 import { getMyStats, getMonthSpent } from '@/api/order'
 import { getMyCards } from '@/api/card'
 import { listEquipmentTypes } from '@/api/device'
-import { userState, setUser, clear } from '@/stores/user'
+import { userState, setUser, clear, isAdmin } from '@/stores/user'
 import { toastError, toastInfo } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatMoney, formatDuration } from '@/utils/format'
@@ -85,16 +85,29 @@ const discountText = computed(() => {
     : `再消费 ¥${formatMoney(remaining)} 即可享优惠（门槛 ¥${formatMoney(threshold)}）`
 })
 
-/** 菜单项。 */
-const menus = [
-  { key: 'orders', icon: '📋', label: '我的订单' },
-  { key: 'productOrders', icon: '🛍', label: '我的商品订单' },
-  { key: 'cards', icon: '🎫', label: '我的月卡' },
-  { key: 'bookings', icon: '📅', label: '我发起的包场' },
-  { key: 'joined', icon: '👥', label: '我参与的包场' },
-  { key: 'profile', icon: '✏️', label: '修改个人资料' },
-  { key: 'preference', icon: '🎯', label: '设置游玩偏好' }
-]
+/**
+ * 菜单项。
+ *
+ * <p><b>管理员多一条「运营后台」入口</b>：后台不在底部 TabBar 上，
+ * 而登录时的角色分流只在「没带 redirect 参数」时才生效 ——
+ * 管理员从用户端这一路逛过来，没有这条入口就再也进不去后台了。
+ * 判断依据是本地存的角色，真正的权限仍然由服务端把关。
+ */
+const menus = computed(() => {
+  const list = [
+    { key: 'orders', icon: '📋', label: '我的订单' },
+    { key: 'productOrders', icon: '🛍', label: '我的商品订单' },
+    { key: 'cards', icon: '🎫', label: '我的月卡' },
+    { key: 'bookings', icon: '📅', label: '我发起的包场' },
+    { key: 'joined', icon: '👥', label: '我参与的包场' },
+    { key: 'profile', icon: '✏️', label: '修改个人资料' },
+    { key: 'preference', icon: '🎯', label: '设置游玩偏好' }
+  ]
+  if (isAdmin.value) {
+    list.push({ key: 'admin', icon: '⚙️', label: '运营后台' })
+  }
+  return list
+})
 
 async function loadAll() {
   // 资料、统计、月累计、卡包四路并发。任一失败不影响其余 ——
@@ -131,7 +144,8 @@ const MENU_ROUTES = {
   bookings: '/bookings/host',
   joined: '/bookings/joined',
   profile: '/profile',
-  preference: '/preference'
+  preference: '/preference',
+  admin: '/admin'
 }
 
 /** 菜单跳转。已实现的直接跳，未实现的给一句提示（别静默无反应）。 */

@@ -113,34 +113,65 @@ class NoticeMapperIntegrationTests {
     // ==================================================================
 
     @Test
-    @DisplayName("首页取最新几条：按 id 倒序，最新的在最上面")
-    void selectLatest_ordersByIdDesc() {
+    @DisplayName("用户端列表：默认按 id 倒序，最新的在最上面")
+    void selectPageForUser_ordersByIdDesc() {
         Notice older = newManualNotice("先发的", null);
         Notice newer = newManualNotice("后发的", null);
         noticeMapper.insert(older);
         noticeMapper.insert(newer);
 
-        List<Notice> latest = noticeMapper.selectLatest(2);
+        Page<Notice> page = (Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 10));
+        List<Long> ids = page.getRecords().stream().map(Notice::getId).toList();
 
-        assertEquals(2, latest.size(), "自增主键只增不减，新插入的两条 id 必然最大");
-        assertEquals(newer.getId(), latest.get(0).getId(), "最新的在最上面");
-        assertEquals(older.getId(), latest.get(1).getId());
+        assertTrue(ids.indexOf(newer.getId()) < ids.indexOf(older.getId()), "最新的在最上面");
     }
 
     @Test
-    @DisplayName("首页条数受 LIMIT 约束")
-    void selectLatest_respectsLimit() {
+    @DisplayName("用户端列表：置顶的排在其他公告前面，其余仍按 id 倒序")
+    void selectPageForUser_pinnedFirst() {
+        Notice pinned = newManualNotice("要大家先看到的", null);
+        noticeMapper.insert(pinned);
+        Notice middle = newManualNotice("中间发的", null);
+        noticeMapper.insert(middle);
+        Notice latest = newManualNotice("最晚发的", null);
+        noticeMapper.insert(latest);
+
+        // 把最早那条置顶
+        noticeMapper.updateManualFields(pinned.getId(), pinned.getTitle(), null, 1);
+
+        List<Long> ids = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 20)))
+                .getRecords().stream().map(Notice::getId).toList();
+
+        // ⚠️ 只比较自己这几条的相对次序，不断言「整页就是这三条」——
+        // 开发库里本来就有别的公告，断言全序会把这个用例绑死在「库是空的」上
+        assertTrue(ids.indexOf(pinned.getId()) < ids.indexOf(latest.getId()),
+                "置顶的要排在最新那条前面 —— ORDER BY pinned DESC 写漏了不会有任何报错，"
+                        + "只是置顶不生效，而首页前几条就那么点位置");
+        assertTrue(ids.indexOf(pinned.getId()) < ids.indexOf(middle.getId()));
+        assertTrue(ids.indexOf(latest.getId()) < ids.indexOf(middle.getId()),
+                "同是未置顶时仍按 id 倒序");
+    }
+
+    @Test
+    @DisplayName("用户端列表：分页真的在 SQL 里生效，两页之间不重不漏")
+    void selectPageForUser_pages() {
         for (int i = 0; i < 3; i++) {
             noticeMapper.insert(newManualNotice("第 " + i + " 条", null));
         }
 
-        assertEquals(1, noticeMapper.selectLatest(1).size(),
-                "LIMIT 没生效的话会整表拉回来，首页公告栏会变成一条长列表");
+        List<Long> first = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 2)))
+                .getRecords().stream().map(Notice::getId).toList();
+        List<Long> second = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(2, 2)))
+                .getRecords().stream().map(Notice::getId).toList();
+
+        assertEquals(2, first.size(), "LIMIT 没生效的话会整表拉回来，首页会变成一条长列表");
+        assertEquals(2, second.size(), "库里的公告远多于两页，第二页同样应当是满的");
+        assertTrue(first.stream().noneMatch(second::contains), "两页不能有重叠");
     }
 
     @Test
-    @DisplayName("下架的手写公告不再出现在首页")
-    void selectLatest_excludesDeleted() {
+    @DisplayName("下架的手写公告不再出现在用户端列表里")
+    void selectPageForUser_excludesDeleted() {
         Notice kept = newManualNotice("还在的", null);
         Notice removed = newManualNotice("已下架的", null);
         noticeMapper.insert(kept);
@@ -148,7 +179,8 @@ class NoticeMapperIntegrationTests {
 
         noticeMapper.deleteById(removed.getId());
 
-        List<Long> ids = noticeMapper.selectLatest(10).stream().map(Notice::getId).toList();
+        Page<Notice> page = (Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 10));
+        List<Long> ids = page.getRecords().stream().map(Notice::getId).toList();
         assertTrue(ids.contains(kept.getId()));
         assertTrue(!ids.contains(removed.getId()),
                 "手写 SQL 里的 deleted = 0 漏了的话，删掉的公告还挂在首页上，界面上看不出来");
@@ -237,7 +269,7 @@ class NoticeMapperIntegrationTests {
         Notice notice = newManualNotice("原标题", "原正文");
         noticeMapper.insert(notice);
 
-        int affected = noticeMapper.updateManualFields(notice.getId(), "新标题", null);
+        int affected = noticeMapper.updateManualFields(notice.getId(), "新标题", null, 0);
 
         assertEquals(1, affected);
         Notice loaded = noticeMapper.selectById(notice.getId());
@@ -253,7 +285,7 @@ class NoticeMapperIntegrationTests {
         Notice auto = newAutoNotice("拍拍机 1 号 转为维护中");
         noticeMapper.insert(auto);
 
-        int affected = noticeMapper.updateManualFields(auto.getId(), "被人改过的标题", "被人补的正文");
+        int affected = noticeMapper.updateManualFields(auto.getId(), "被人改过的标题", "被人补的正文", 1);
 
         assertEquals(0, affected,
                 "WHERE 里的 publish_mode = 'MANUAL' 是数据库侧的第二道保险，Service 先查过也不能省它");
@@ -270,7 +302,7 @@ class NoticeMapperIntegrationTests {
         noticeMapper.insert(notice);
         noticeMapper.deleteById(notice.getId());
 
-        int affected = noticeMapper.updateManualFields(notice.getId(), "改已删的", null);
+        int affected = noticeMapper.updateManualFields(notice.getId(), "改已删的", null, 0);
 
         assertEquals(0, affected, "改一条已经下架的公告没有意义，改到了反而说明 deleted 条件漏了");
     }

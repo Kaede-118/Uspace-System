@@ -16,6 +16,10 @@ import java.util.Arrays;
  *          │                            时段结束
  *          │                                  ↓
  *          └──管理员取消──> CANCELLED       CLOSED 已结束
+ *                                             │
+ *                                  管理员撤销并退款
+ *                                             ↓
+ *                                        REFUNDED 已退款
  * </pre>
  *
  * <p>付款相关的流转（{@code PENDING_PAYMENT → PAID}）属于模块 8，
@@ -29,8 +33,20 @@ public enum BookingStatus {
     /** 已付款。包场生效，包场人与被邀请者可凭链接进入 */
     PAID,
 
-    /** 已取消。管理员取消了这场包场 */
+    /** 已取消。管理员取消了这场包场（<b>尚未付款</b>时就取消，没有钱的事） */
     CANCELLED,
+
+    /**
+     * 已退款。管理员撤销了一场<b>已经付过款</b>的包场，并把钱退了回去。
+     *
+     * <p><b>为什么不复用 {@link #CANCELLED}</b>：两者在账上完全不同 ——
+     * 取消是「这单没成」，退款是「钱收过又退回去了」。合成一个状态的话，
+     * 列表上分不清那场到底有没有产生过资金流水，对账时要一条条翻详情。
+     *
+     * <p>撤销后时段<b>重新释放</b>（{@link #occupiesSlot} 不含本状态），
+     * 邀请令牌也随之失效 —— 令牌本身还在行上，但准入与邀请页都只认 {@code PAID}。
+     */
+    REFUNDED,
 
     /** 已结束。包场时段已过，归档状态 */
     CLOSED;
@@ -54,6 +70,8 @@ public enum BookingStatus {
      * <p>{@code PENDING_PAYMENT} 与 {@code PAID} 都算「占着这个时段」——
      * 前者虽未付款，但管理员排期时已经把它许出去了，
      * 若此时再排一场重叠的包场，付款后会撞车。
+     * <b>已退款（{@code REFUNDED}）不算</b>：撤销就是把时段还回来，
+     * 那一段时间要能重新排给别人。
      *
      * <p><b>刻意不写成 {@code Set.of(...).contains(name)}</b>：JDK 的不可变集合
      * 对 {@code null} 查询会抛 {@link NullPointerException}（它们用

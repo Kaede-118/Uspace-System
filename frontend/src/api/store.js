@@ -30,17 +30,26 @@ export function getStoreStatus() {
 }
 
 /**
- * 查公告（消息流）。
+ * 分页查公告（消息流）。
  *
  * <p><b>公告是一条消息，不是一份状态</b>：自动公告只增不改，机台修好不会把
- * 「转为维护中」那条改掉，而是再产生一条「转为良好」。所以首页读起来是一段历史，
+ * 「转为维护中」那条改掉，而是再产生一条「转为良好」。所以读起来是一段历史，
  * 而不是当前状态 —— 这与「状态投影」式的设计是反的，别按惯性去「去重」。
  *
- * @param {number} [limit] 取最近几条，1–20
- * @returns {Promise<{data:Array<{id, title, content, publishMode, createdAt}>}>}
+ * <p>⚠️ <b>置顶的排在最前</b>（后端 `ORDER BY pinned DESC, id DESC`），
+ * 其余按时间倒序 —— 前端不要自己再排一遍，那会把这个次序打乱。
+ *
+ * <p>首页公告栏与「全部公告」页共用这一个接口：首页传 `size = 4`，
+ * 全部页往下翻页。
+ *
+ * @param {object} [params]
+ * @param {number} [params.page] 页码，从 1 开始
+ * @param {number} [params.size] 每页条数，1–20
+ * @returns {Promise<{data:{total, current, size, records}}>}
+ *   每条含 {@code id, title, content, publishMode, publishModeText, createdAt, pinned}
  */
-export function getNotices(limit) {
-  return http.get('/api/store/notices', { params: { limit } })
+export function getNotices(params = {}) {
+  return http.get('/api/store/notices', { params })
 }
 
 /**

@@ -60,6 +60,23 @@ public class BookingVo {
     /** 创建时间 */
     private LocalDateTime createdAt;
 
+    /* ---------------- 退款（撤销已付款的包场）---------------- */
+
+    /** 退款方式：{@code MANUAL}（人工退）/ {@code ONLINE}（原路退回）；未退款时为空 */
+    private String refundMode;
+
+    /** 退款金额（元）；未退款时为空 */
+    private BigDecimal refundAmount;
+
+    /** 退款完成时刻；未退款时为空 */
+    private LocalDateTime refundedAt;
+
+    /** 操作退款的管理员用户 ID；未退款时为空 */
+    private Long refundedBy;
+
+    /** 原路退回的退款单号；人工退为空 */
+    private String refundNo;
+
     /**
      * 由实体构造 VO。
      *
@@ -98,5 +115,10 @@ public class BookingVo {
         setRemark(booking.getRemark());
         setCreatedBy(booking.getCreatedBy());
         setCreatedAt(booking.getCreatedAt());
+        setRefundMode(booking.getRefundMode());
+        setRefundAmount(booking.getRefundAmount());
+        setRefundedAt(booking.getRefundedAt());
+        setRefundedBy(booking.getRefundedBy());
+        setRefundNo(booking.getRefundNo());
     }
 }

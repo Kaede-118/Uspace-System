@@ -156,6 +156,8 @@ public class FakeBookingMapper implements InvocationHandler {
             case "selectHostBookingsInRange" -> selectHostBookingsInRange(args);
             case "selectByInviteToken" -> selectByInviteToken((String) args[0]);
             case "markPaid" -> markPaid(args);
+            case "markRefunded" -> markRefunded(args);
+            case "revertRefund" -> revertRefund((Long) args[0]);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -433,6 +435,50 @@ public class FakeBookingMapper implements InvocationHandler {
         booking.setPaymentNo((String) args[2]);
         booking.setPaidAt((LocalDateTime) args[3]);
         booking.setInviteToken((String) args[4]);
+        return 1;
+    }
+
+    /**
+     * 撤销并记退款。对应真 SQL 的 {@code WHERE status = 'PAID'} 守卫。
+     *
+     * <p>⚠️ 真 SQL 里状态与退款字段是同一条 UPDATE 写下去的，
+     * 这里也必须一起改 —— 分成两步的话，假 Mapper 上跑得通、
+     * 真库上却可能出现「状态已退款、退款字段还是空」的中间态。
+     *
+     * @param args 依次为包场 ID、退款方式、退款金额、退款时刻、操作人、退款单号
+     * @return 受影响行数；0 表示该场不是已付款状态（含已被撤销过）
+     */
+    private int markRefunded(Object[] args) {
+        Booking booking = selectById((Long) args[0]);
+        if (booking == null || !BookingStatus.PAID.name().equals(booking.getStatus())) {
+            return 0;
+        }
+        booking.setStatus(BookingStatus.REFUNDED.name());
+        booking.setRefundMode((String) args[1]);
+        booking.setRefundAmount((BigDecimal) args[2]);
+        booking.setRefundedAt((LocalDateTime) args[3]);
+        booking.setRefundedBy((Long) args[4]);
+        booking.setRefundNo((String) args[5]);
+        return 1;
+    }
+
+    /**
+     * 退款失败时把状态退回已付款。对应真 SQL 的 {@code WHERE status = 'REFUNDED'} 守卫。
+     *
+     * @param id 包场 ID
+     * @return 受影响行数；0 表示状态已被改动过
+     */
+    private int revertRefund(Long id) {
+        Booking booking = selectById(id);
+        if (booking == null || !BookingStatus.REFUNDED.name().equals(booking.getStatus())) {
+            return 0;
+        }
+        booking.setStatus(BookingStatus.PAID.name());
+        booking.setRefundMode(null);
+        booking.setRefundAmount(null);
+        booking.setRefundedAt(null);
+        booking.setRefundedBy(null);
+        booking.setRefundNo(null);
         return 1;
     }
 

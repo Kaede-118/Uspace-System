@@ -163,12 +163,16 @@ public class FakeProductMapper implements InvocationHandler {
     }
 
     /**
-     * 分页查询商品。对应真 SQL 的两个可空筛选条件。
+     * 分页查询商品。对应真 SQL 的两个可空筛选条件与两种排序。
      *
      * <p>直接在被传入的 {@code IPage} 上写总数与当前页记录 ——
      * 真实环境下这件事是分页插件替你做的，内存实现里得自己来。
      *
-     * @param args 依次为分页对象、名称关键词、上架状态
+     * <p>⚠️ <b>两种排序的次序要与 SQL 逐字一致</b>：默认 {@code sort_no ASC, id DESC}，
+     * 按库存时 {@code stock ASC, id ASC}。不一致的话，单测与真库会得出相反的结论，
+     * 而两边都「通过」—— 这正是本项目反复提醒的那类静默错误。
+     *
+     * @param args 依次为分页对象、名称关键词、上架状态、是否按库存升序
      * @return 填好结果的分页对象
      */
     @SuppressWarnings("unchecked")
@@ -176,15 +180,22 @@ public class FakeProductMapper implements InvocationHandler {
         IPage<Product> page = (IPage<Product>) args[0];
         String keyword = (String) args[1];
         Integer enabled = (Integer) args[2];
+        boolean stockAsc = (Boolean) args[3];
+
+        Comparator<Product> order = stockAsc
+                ? Comparator.comparing(Product::getStock,
+                                Comparator.nullsFirst(Comparator.naturalOrder()))
+                        .thenComparing(Product::getId)
+                : Comparator.comparing(Product::getSortNo,
+                                Comparator.nullsFirst(Comparator.naturalOrder()))
+                        .thenComparing(Product::getId, Comparator.reverseOrder());
 
         List<Product> matched = rows.values().stream()
                 .filter(FakeProductMapper::isAlive)
                 .filter(p -> keyword == null || keyword.isEmpty()
                         || (p.getName() != null && p.getName().contains(keyword)))
                 .filter(p -> enabled == null || enabled.equals(p.getEnabled()))
-                .sorted(Comparator.comparing(Product::getSortNo,
-                                Comparator.nullsFirst(Comparator.naturalOrder()))
-                        .thenComparing(Product::getId, Comparator.reverseOrder()))
+                .sorted(order)
                 .toList();
 
         page.setTotal(matched.size());

@@ -1,14 +1,17 @@
 package com.kaede.uspace.notice;
 
 import com.kaede.uspace.common.result.ApiResult;
+import com.kaede.uspace.common.result.PageResult;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import com.kaede.uspace.notice.dto.NoticeVo;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
 
-import java.util.List;
 
 /**
  * 用户端公告接口。
@@ -31,6 +34,7 @@ import java.util.List;
  */
 @RestController
 @RequestMapping("/api/store/notices")
+@Validated
 public class UserNoticeController {
 
     private final NoticeService noticeService;
@@ -40,18 +44,25 @@ public class UserNoticeController {
     }
 
     /**
-     * 查询门店公告。
+     * 分页查询门店公告。
      *
-     * <p>按发布先后倒序（最新的在最上面），<b>没有时间窗</b> ——
-     * 公告是消息流，发出来就是可见的，不存在「到点才显示」或「过期自动隐藏」。
-     * 要走完整条历史请用后台的分页接口。
+     * <p><b>置顶的在最前</b>，其余按发布先后倒序（最新的在最上面），
+     * <b>没有时间窗</b> —— 公告是消息流，发出来就是可见的，
+     * 不存在「到点才显示」或「过期自动隐藏」。
      *
-     * @param limit 最多几条，默认 5，最大 20；超范围时自动截到边界值而不报错
-     * @return 公告列表，没有时返回空列表
+     * <p>首页公告栏与「全部公告」页共用这一个接口：
+     * 首页传 {@code size=4}，全部页翻页往下看。
+     *
+     * @param page 页码，从 1 开始
+     * @param size 每页条数，上限见 {@code NoticeService#MAX_USER_PAGE_SIZE}
+     * @return 分页结果，没有时 {@code records} 为空列表
      */
     @GetMapping
-    public ResponseEntity<ApiResult<List<NoticeVo>>> list(
-            @RequestParam(required = false) Integer limit) {
-        return ApiResult.of(noticeService.listForUser(limit));
+    public ResponseEntity<ApiResult<PageResult<NoticeVo>>> list(
+            @RequestParam(defaultValue = "1") @Min(value = 1, message = "页码从 1 开始") long page,
+            @RequestParam(defaultValue = "4")
+            @Min(value = 1, message = "每页至少 1 条")
+            @Max(value = NoticeService.MAX_USER_PAGE_SIZE, message = "每页最多 20 条") long size) {
+        return ApiResult.of(noticeService.listForUser(page, size));
     }
 }

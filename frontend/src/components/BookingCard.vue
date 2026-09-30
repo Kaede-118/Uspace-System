@@ -3,11 +3,12 @@
  * 包场列表里的一张卡片。
  *
  * <p>⚠️ {@code BookingVo} <b>没有 {@code statusText}</b>（订单有，包场没有），
- * 所以状态中文要在这里映射。映射表放在这一个文件里，
- * 「我发起的」与「我参与的」两个列表共用它，不会出现两处文案不一致。
+ * 所以状态中文要映射 —— 表在 {@code utils/labels.js}，
+ * 与运营后台的包场页共用同一份（两处各写一份的话，改文案时必然只改一处）。
  */
 import { computed } from 'vue'
 import { formatDateTime, formatTime, formatMoney } from '@/utils/format'
+import { bookingStatusOf } from '@/utils/labels'
 
 const props = defineProps({
   /** BookingVo */
@@ -18,20 +19,8 @@ const props = defineProps({
 
 defineEmits(['click'])
 
-/**
- * 包场状态的中文与配色。
- *
- * <p>四种状态：待付款 / 已付款 / 已取消 / 已结束。
- * 「已付款」与「已结束」都是业务上的正常终态，不是异常。
- */
-const STATUS = {
-  PENDING_PAYMENT: { label: '待付款', cls: 'tag tag-warning' },
-  PAID: { label: '已付款', cls: 'tag tag-success' },
-  CANCELLED: { label: '已取消', cls: 'tag' },
-  CLOSED: { label: '已结束', cls: 'tag' }
-}
-
-const status = computed(() => STATUS[props.booking.status] || { label: props.booking.status, cls: 'tag' })
+/** 包场状态的中文与配色，来自共用的映射表。 */
+const status = computed(() => bookingStatusOf(props.booking.status))
 
 /** 时段：「9/30 14:00 – 18:00」（同一天时省略后半段的日期）。 */
 const timeRange = computed(() => {

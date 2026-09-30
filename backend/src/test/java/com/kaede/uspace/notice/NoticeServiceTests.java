@@ -66,7 +66,7 @@ class NoticeServiceTests {
         noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "第二条");
         noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "第三条");
 
-        List<NoticeVo> notices = noticeService.listForUser(null).getData();
+        List<NoticeVo> notices = noticeService.listForUser(1, 5).getData().getRecords();
 
         assertEquals(List.of("第三条", "第二条", "第一条"),
                 notices.stream().map(NoticeVo::getTitle).toList(),
@@ -79,7 +79,7 @@ class NoticeServiceTests {
         Notice seeded = noticeMapper.seed(auto("很久以前的一条"));
         seeded.setCreatedAt(LocalDateTime.now().minusYears(1));
 
-        assertEquals(1, noticeService.listForUser(null).getData().size(),
+        assertEquals(1, noticeService.listForUser(1, 5).getData().getRecords().size(),
                 "公告没有「有效期」—— 一条消息不会到点自己消失。"
                         + "首页只展示最近几条，更早的留在表里");
     }
@@ -103,17 +103,49 @@ class NoticeServiceTests {
     }
 
     @Test
-    @DisplayName("消息流：条数上限生效，超范围的值被截到边界而不是报错")
-    void listForUser_respectsLimit() {
-        for (int i = 0; i < 30; i++) {
+    @DisplayName("消息流：分页生效，第二页接着第一页往下翻")
+    void listForUser_pages() {
+        for (int i = 0; i < 12; i++) {
             noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "消息 " + i);
         }
 
-        assertEquals(5, noticeService.listForUser(null).getData().size(), "不传时取默认 5 条");
-        assertEquals(20, noticeService.listForUser(999).getData().size(),
-                "超上限时截到 20，而不是报错 —— 前端把条数传错不该让首页整个挂掉");
-        assertEquals(5, noticeService.listForUser(0).getData().size(), "小于 1 的值回落到默认值");
-        assertEquals(5, noticeService.listForUser(-1).getData().size());
+        List<NoticeVo> first = noticeService.listForUser(1, 5).getData().getRecords();
+        List<NoticeVo> second = noticeService.listForUser(2, 5).getData().getRecords();
+
+        assertEquals(5, first.size(), "首页那几条");
+        assertEquals(5, second.size(), "第二页接着往下");
+        assertEquals(12, noticeService.listForUser(1, 5).getData().getTotal());
+        // 第一页最后一条是「消息 7」（12 条里倒序第 5 条），第二页第一条应当是「消息 6」
+        assertEquals("消息 7", first.get(4).getTitle());
+        assertEquals("消息 6", second.get(0).getTitle(), "两页之间不能有重叠或跳条");
+    }
+
+    @Test
+    @DisplayName("置顶：钉住的排在最前，其余仍按时间倒序")
+    void listForUser_pinnedFirst() {
+        noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "最先发生的");
+        noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "后来发生的");
+
+        // 钉住最早那条
+        Notice pinned = noticeMapper.seed(manual("请务必看到这条", null));
+        pinned.setPinned(1);
+
+        List<NoticeVo> notices = noticeService.listForUser(1, 5).getData().getRecords();
+
+        assertEquals("请务必看到这条", notices.get(0).getTitle(),
+                "置顶的排在最前 —— 首页前几条就那么点位置，"
+                        + "「今天临时调整营业时间」这类消息必须挤得进去");
+        assertTrue(notices.get(0).getPinned(), "视图里要带上置顶标记，前端才好画个角标");
+        assertEquals("后来发生的", notices.get(1).getTitle(), "其余仍按时间倒序");
+    }
+
+    @Test
+    @DisplayName("置顶：只有手写公告钉得住，自动公告恒为不置顶")
+    void pinned_isAlwaysFalseForAutoNotices() {
+        noticeService.publishAuto(NoticeSourceType.DEVICE, 1L, "机台变了一下");
+
+        assertFalse(noticeMapper.last().getPinned() != null && noticeMapper.last().getPinned() == 1,
+                "置顶是运营的意图，自动公告是系统记录 —— 让机台故障能占满首页前几条是说不过去的");
     }
 
     @Test
@@ -121,7 +153,7 @@ class NoticeServiceTests {
     void listForUser_exposesOnlySafeFields() {
         noticeService.publishAuto(NoticeSourceType.DEVICE, 42L, "拍拍机 1 号 由 良好 转为 维护中");
 
-        NoticeVo vo = noticeService.listForUser(null).getData().get(0);
+        NoticeVo vo = noticeService.listForUser(1, 5).getData().getRecords().get(0);
 
         assertEquals("拍拍机 1 号 由 良好 转为 维护中", vo.getTitle());
         assertEquals(NoticePublishMode.AUTO.name(), vo.getPublishMode());
@@ -177,7 +209,7 @@ class NoticeServiceTests {
 
         assertTrue(result.isSuccess());
         assertEquals(1, noticeMapper.get(seeded.getId()).getDeleted(), "走逻辑删除，不是物理删除");
-        assertTrue(noticeService.listForUser(null).getData().isEmpty());
+        assertTrue(noticeService.listForUser(1, 5).getData().getRecords().isEmpty());
     }
 
     @Test

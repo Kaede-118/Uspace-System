@@ -36,4 +36,13 @@ public class CreateNoticeRequest {
      */
     @Size(max = 500, message = "公告正文不能超过 500 个字符")
     private String content;
+
+    /**
+     * 是否置顶：1 置顶 / 0 不置顶。不传按 0 处理。
+     *
+     * <p>置顶的公告排在首页最前面，用来放「今天临时调整营业时间」这类
+     * 必须让顾客先看到的消息。
+     */
+    private Integer pinned;
+
 }
