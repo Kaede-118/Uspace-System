@@ -136,6 +136,8 @@ public class InstoreService {
         vo.setUserId(order.getUserId());
         if (user != null) {
             vo.setNickname(user.getNickname());
+            // 仅用于前端在昵称前挂 STAFF 徽章，不承载任何权限判断
+            vo.setRole(user.getRole());
             vo.setAvatar(user.getAvatar());
             vo.setBanner(user.getBanner());
             vo.setPreference(user.getPreference());

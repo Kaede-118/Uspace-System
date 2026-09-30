@@ -31,6 +31,18 @@ public class InstoreUserVo {
     /** 昵称。用户记录查不到时为 null —— 见 {@code InstoreService} 的说明 */
     private String nickname;
 
+    /**
+     * 用户角色：{@code USER} 普通用户 / {@code ADMIN} 管理员。用户记录查不到时为 null。
+     *
+     * <p>给前端在昵称前挂一个 STAFF 徽章用。名册上既有顾客也有店员，
+     * 没有标识就分不清谁是来玩的、谁是来盯店的。
+     *
+     * <p><b>它不承载任何权限判断</b> —— 权限只认服务端每个请求重新读取的
+     * {@code sys_user.role}。这里返回的只是个展示用的标记，
+     * 前端拿它做不了任何越权的事。
+     */
+    private String role;
+
     /** 头像地址（站内相对路径），可为空。前端 {@code <img :src>} 直接用，为空时回落默认头像 */
     private String avatar;
 

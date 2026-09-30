@@ -310,12 +310,13 @@ CREATE TABLE `biz_equipment_type` (
   KEY `idx_enabled_sort` (`enabled`, `sort`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '设备类型字典';
 
--- 初始数据：当前场馆已知的两类机器。后续由运营在后台增删
+-- 初始数据：当前场馆已知的三类机器。后续由运营在后台增删
 -- 注意显式给出 created_at / updated_at —— 这两列是 NOT NULL 且无默认值
 -- （业务表里它们由 MyBatis-Plus 自动填充，但建表脚本的 INSERT 得自己带上）
 INSERT INTO `biz_equipment_type` (`code`, `name`, `sort`, `created_at`, `updated_at`) VALUES
   ('PAIPAI',  '拍拍机', 10, NOW(), NOW()),
-  ('TAISHOU', '抬手乐', 20, NOW(), NOW());
+  ('TAISHOU', '抬手乐', 20, NOW(), NOW()),
+  ('RIMA',    '日麻',   30, NOW(), NOW());
 
 
 -- ============================================================================
