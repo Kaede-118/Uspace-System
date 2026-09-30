@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      viewport-fit=cover 是安全区适配的前提 ——
+      少了它，CSS 里的 env(safe-area-inset-bottom) 恒为 0，
+      TabBar 在刘海屏与手势条下会被遮挡，而样式表本身看不出任何问题。
+
+      user-scalable=no 禁掉双指缩放：移动端 Web 的界面按 375px 宽设计，
+      放大后布局会错位。这是移动端 Web 的通行做法。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#6B4FA8" />
+    <title>共享娱乐空间</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多比例预览 · 共享娱乐空间</title>
+    <style>
+      /*
+       * 这是一个【开发用的对照页】，不是应用的一部分。
+       * 把应用同时嵌进几种屏幕比例的 iframe 里，用来横向比较布局。
+       * 与主应用同源，所以 iframe 里共用同一份 localStorage ——
+       * 你在这台浏览器上登录过，这里打开就是登录态。
+       */
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #16161b;
+        color: #e8e8ef;
+        font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        font-size: 14px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 6px;
+      }
+      .sub {
+        color: #8b8b9a;
+        font-size: 13px;
+        margin-bottom: 24px;
+        line-height: 1.7;
+      }
+      h2 {
+        font-size: 13px;
+        font-weight: 600;
+        color: #a9a9bb;
+        margin: 28px 0 12px;
+        letter-spacing: 1px;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+        align-items: flex-start;
+      }
+      figure {
+        margin: 0;
+      }
+      figcaption {
+        font-size: 12px;
+        color: #9a9aab;
+        margin-bottom: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      iframe {
+        display: block;
+        border: 1px solid #33333d;
+        border-radius: 10px;
+        background: #faf9fd;
+        /* 关掉 iframe 自己的滚动条样式差异，让它更像一个设备屏幕 */
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+      }
+      .tip {
+        margin-top: 28px;
+        padding: 12px 16px;
+        border-radius: 10px;
+        background: #1f1f27;
+        color: #8b8b9a;
+        font-size: 12px;
+        line-height: 1.8;
+      }
+      code {
+        color: #c9b6f5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>多比例预览</h1>
+    <p class="sub">
+      同一个页面在 6 种屏幕下的样子。iframe 与主应用同源，<b>共用登录态</b> —— 直接就能看到内容。<br />
+      滚动条在各窗口内部独立，可以分别滚。
+    </p>
+
+    <h2>竖屏（手机竖持）</h2>
+    <div class="row">
+      <figure>
+        <figcaption>4:3 · 375 × 500</figcaption>
+        <iframe src="/" width="375" height="500" title="4:3 竖屏"></iframe>
+      </figure>
+      <figure>
+        <figcaption>16:9 · 375 × 667</figcaption>
+        <iframe src="/" width="375" height="667" title="16:9 竖屏"></iframe>
+      </figure>
+      <figure>
+        <figcaption>18:9 · 375 × 750（全面屏）</figcaption>
+        <iframe src="/" width="375" height="750" title="18:9 竖屏"></iframe>
+      </figure>
+    </div>
+
+    <h2>横屏（手机横持）</h2>
+    <div class="row">
+      <figure>
+        <figcaption>4:3 · 640 × 480</figcaption>
+        <iframe src="/" width="640" height="480" title="4:3 横屏"></iframe>
+      </figure>
+      <figure>
+        <figcaption>16:9 · 640 × 360</figcaption>
+        <iframe src="/" width="640" height="360" title="16:9 横屏"></iframe>
+      </figure>
+      <figure>
+        <figcaption>18:9 · 640 × 320</figcaption>
+        <iframe src="/" width="640" height="320" title="18:9 横屏"></iframe>
+      </figure>
+    </div>
+
+    <div class="tip">
+      每个窗口的高度就是这块屏幕的<b>可视高度</b> —— 内容超出时窗口内可滚动，与真机一致。<br />
+      要单独看某一页，把 iframe 的 <code>src="/"</code> 换成 <code>src="/#/mine"</code> 这类带路由的地址；<br />
+      或在任意一个窗口里正常点击导航，其余窗口不受影响（各自独立的会话）。
+    </div>
+  </body>
+</html>

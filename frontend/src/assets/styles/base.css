@@ -1,0 +1,296 @@
+/**
+ * 基础样式：reset + 通用布局类 + 通用组件类。
+ *
+ * 这里只放【跨页面复用】的东西。单个页面自己的样式写在各自 <style scoped> 里 ——
+ * 全塞进这个文件的话，改一处样式要先在几百行里找它属于哪个类。
+ */
+@import './tokens.css';
+
+/* ---------- reset ---------- */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-size: 14px;
+  line-height: 1.5;
+  /*
+   * 系统字体栈：不引入 Web 字体。中文字体文件动辄几 MB，
+   * 而各平台的系统字体（苹方 / 思源黑体）本来就足够好，
+   * 答辩演示时也不会因为字体没加载完而闪一下。
+   */
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* 移动端点击时不出现灰色高亮块 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+a {
+  color: var(--c-primary);
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+/* ---------- 页面容器 ---------- */
+
+/**
+ * 页面主体。
+ *
+ * ⚠️ <b>必须有 max-width</b>。本项目是移动端优先的设计（字号 14px、
+ * 卡片圆角 16px、单列堆叠），在 1440px 的电脑屏幕上不限宽的话，
+ * 一张卡片会横跨整个屏幕 —— 一行字从左到右要走很远才读完，
+ * 而卡片本身被拉成一条扁平的色块，既不好读也不好看。
+ *
+ * 限宽之后两端留白居中，读起来与手机上一致，桌面上也不至于散架。
+ * 宽度取 900px：够放下两列卡片（每列约 430px），又不会宽到需要左右转头。
+ */
+:root {
+  --page-max: 900px;
+}
+
+.page {
+  min-height: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: var(--sp-4);
+  /* 顶部安全区：全屏时内容不会被刘海挡住 */
+  padding-top: calc(var(--sp-4) + var(--safe-top));
+}
+
+/**
+ * 带底部 TabBar 的页面。
+ *
+ * 不留出这段 padding 的话，最后一个卡片会被固定定位的 TabBar 盖住 ——
+ * 而页面本身没有任何报错，只是底部内容看不见。
+ * 高度必须把安全区一起 calc 进来，口径与 .tabbar 严格一致。
+ */
+.page-with-tabbar {
+  padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom) + var(--sp-4));
+}
+
+/* ---------- 卡片 ---------- */
+
+.card {
+  background: var(--c-card);
+  border-radius: var(--r-card);
+  padding: var(--sp-4);
+}
+
+.card + .card {
+  margin-top: var(--sp-3);
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-text);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.card-sub {
+  font-size: 12px;
+  color: var(--c-text-muted);
+  font-weight: 400;
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 46px;
+  border-radius: var(--r-btn);
+  font-size: 15px;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+
+.btn:active {
+  opacity: 0.75;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--c-primary);
+  color: #fff;
+}
+
+.btn-ghost {
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
+}
+
+.btn-danger {
+  background: var(--c-danger);
+  color: #fff;
+}
+
+/* ---------- 表单 ---------- */
+
+.field {
+  margin-bottom: var(--sp-4);
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  color: var(--c-text-sub);
+  margin-bottom: var(--sp-2);
+}
+
+.field-input {
+  width: 100%;
+  height: 46px;
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-btn);
+  background: #fff;
+  color: var(--c-text);
+  outline: none;
+}
+
+.field-input:focus {
+  border-color: var(--c-primary);
+}
+
+.field-input::placeholder {
+  color: var(--c-text-muted);
+}
+
+textarea.field-input {
+  height: auto;
+  padding: var(--sp-3) var(--sp-4);
+  resize: vertical;
+}
+
+/* ---------- 文字工具类 ---------- */
+
+.text-sub {
+  color: var(--c-text-sub);
+}
+
+.text-muted {
+  color: var(--c-text-muted);
+}
+
+.text-primary {
+  color: var(--c-primary);
+}
+
+.text-danger {
+  color: var(--c-danger);
+}
+
+.text-sm {
+  font-size: 12px;
+}
+
+.text-center {
+  text-align: center;
+}
+
+/* ---------- 标签 ---------- */
+
+/**
+ * 小胶囊标签（月卡状态、游玩偏好、订单状态都用它）。
+ *
+ * ⚠️ <b>底色一律用实色，不用低透明度的主题色。</b>
+ * 原先写的是 `rgba(主题色, 0.15)` 这类半透明底 —— 压在淡紫的卡片背景上
+ * 几乎看不出形状，文字也糊成一片（这些标签的字号只有 11px）。
+ * 半透明色看着「轻盈」，但前提是底下得有个对比明显的背景，
+ * 而这里卡片本身就是浅色的。
+ *
+ * 每对配色都按 11px 小字取过对比度，四个都在 4.5:1 以上。
+ */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 500;
+  background: #e3daf7;
+  color: #533a8f;
+}
+
+.tag-success {
+  background: #cdead9;
+  color: #2b7d52;
+}
+
+.tag-warning {
+  background: #fbe7c8;
+  color: #9a6212;
+}
+
+.tag-danger {
+  background: #f8d7d5;
+  color: #a33a36;
+}
+
+/* ---------- 分割线 ---------- */
+
+.divider {
+  height: 1px;
+  background: var(--c-border);
+  margin: var(--sp-3) 0;
+}

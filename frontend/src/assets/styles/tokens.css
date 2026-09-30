@@ -1,0 +1,53 @@
+/**
+ * 设计 token —— 全站唯一的颜色、圆角、间距、安全区取值来源。
+ *
+ * 改配色只改这一个文件。组件里【禁止】写死颜色值 ——
+ * 写死之后换主题要全仓库搜 #xxxxxx，而搜出来的结果分不清哪个是「主题色」
+ * 哪个是「某个图标自带的颜色」。
+ *
+ * 色板是淡紫体系：底色带一点紫而不是纯白（纯白在手机上偏刺眼），
+ * 文字用深紫灰而不是纯黑（纯黑压在紫调底色上显得生硬）。
+ */
+:root {
+  /* ---- 颜色 ---- */
+  --c-bg: #faf9fd; /* 页面底色 */
+  --c-card: #f2effb; /* 卡片背景 */
+  --c-icon-bg: #e4def6; /* 图标圆圈，比卡片深一档 */
+  --c-primary: #6b4fa8;
+  --c-primary-pale: #ede7f9; /* 主色的浅色版，用于选中态、标签底 */
+  --c-text: #2b2340;
+  --c-text-sub: #6e6685;
+  --c-text-muted: #a49db8;
+  --c-border: #e8e3f3;
+
+  --c-success: #4caf7d;
+  --c-warning: #e8a33d;
+  --c-danger: #d9534f;
+
+  /* ---- 圆角 ---- */
+  --r-card: 16px;
+  --r-btn: 12px;
+  --r-pill: 999px;
+
+  /* ---- 间距 ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ---- 布局 ---- */
+  --tabbar-h: 50px;
+  --navbar-h: 44px;
+
+  /*
+   * 安全区（刘海屏、手势条）。
+   *
+   * ⚠️ 兜底值 0px 不能省：不支持 env() 的浏览器上，
+   * var(--safe-bottom) 指向的整条声明会失效，TabBar 会贴到最底被手势条遮住。
+   * 而 env() 生效的前提是 index.html 里写了 viewport-fit=cover —— 两处缺一不可。
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
