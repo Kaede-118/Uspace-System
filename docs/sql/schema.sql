@@ -275,6 +275,72 @@ INSERT INTO `biz_equipment_type` (`code`, `name`, `sort`, `created_at`, `updated
 
 
 -- ============================================================================
+-- 模块 4：设备管理 —— 机台台账
+--
+-- 本表回答的是「店里有哪些机器、每台什么状况」，即一份【资产台账】，
+-- 每台指向 biz_equipment_type 的一个类型。
+--
+-- ⚠️ 本表【不进主链路】：不参与计费，也不绑定订单。
+--    系统是共享模式，用户下单时既不选机台，计费也不看他玩了哪台 ——
+--    所以这里的 status 是「这台还能不能玩」，【不是】「谁正占着」。
+--    要做到「谁在玩哪台」需要设备级使用记录，当前明确不做，理由见
+--    docs/开发约定与设计说明.md 的「待定事项」。
+--
+-- ⚠️ 机台状况【不影响准入】：能不能进店只由停业（biz_closure）与包场
+--    （biz_booking）决定。哪怕全店机器都标成「维护中」，系统照样放人进门 ——
+--    真想拦住要排一条停业区间，而不是改机台状态。
+--
+-- ⚠️ 「维护中」的机台【照样陈列】、不隐藏：陈列的目的就是让顾客看到
+--    「这台在修」，隐藏反而会让人以为机器搬走了。
+--
+-- uk_store_device_no 里的 device_no 允许为空，且 MySQL 的唯一索引
+-- 【允许多行为 NULL】（NULL 不等于 NULL）—— 所以「几台机器都还没贴编号」
+-- 不会互相冲突，编号只在填了的时候才要求不重复。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_device`;
+CREATE TABLE `biz_device` (
+  `id`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `store_id`   BIGINT       NOT NULL                COMMENT '所属门店 ID',
+  `name`       VARCHAR(50)  NOT NULL                COMMENT '机台名称，如「拍拍机 1 号」',
+  `device_no`  VARCHAR(32)  DEFAULT NULL            COMMENT '资产编号，如 PP-01。现场贴纸编号，便于核对。可空',
+  `type_id`    BIGINT       NOT NULL                COMMENT '设备类型 ID，指向 biz_equipment_type',
+  `location`   VARCHAR(64)  DEFAULT NULL            COMMENT '位置描述，如「靠窗第二台」',
+  `status`     VARCHAR(20)  NOT NULL DEFAULT 'NORMAL' COMMENT '状况：NORMAL 良好 / NEEDS_REPAIR 待维护 / MAINTAINING 维护中',
+  `sort`       INT          NOT NULL DEFAULT 0      COMMENT '展示顺序，越小越靠前',
+  `remark`     VARCHAR(255) DEFAULT NULL            COMMENT '备注，仅运营可见（如「等屏幕配件到货」）',
+  `created_at` DATETIME     NOT NULL                COMMENT '创建时间',
+  `updated_at` DATETIME     NOT NULL                COMMENT '更新时间',
+  `deleted`    TINYINT      NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_store_device_no` (`store_id`, `device_no`),
+  KEY `idx_store_status` (`store_id`, `status`),
+  KEY `idx_store_sort` (`store_id`, `sort`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '机台台账';
+
+-- 初始数据：4 台拍拍机 + 2 台抬手乐，覆盖全部三种状况 ——
+-- 演示时一屏就能看到「良好 / 待维护 / 维护中」三种标签长什么样。
+--
+-- 写法说明：门店 ID 与类型 ID 都用子查询取，而不是写死 1 / 2 ——
+-- 自增值取决于脚本各段 INSERT 的先后，写死会在脚本顺序调整后静默错位。
+-- 若 biz_store 为空，本 INSERT 不插入任何行（JOIN 空表），这是有意的：
+-- 门店都没有时，机台无处归属。
+--
+-- 同 biz_equipment_type，注意显式给出 created_at / updated_at。
+INSERT INTO `biz_device` (`store_id`, `name`, `device_no`, `type_id`, `location`, `status`, `sort`, `created_at`, `updated_at`)
+SELECT s.id, v.name, v.device_no, t.id, v.location, v.status, v.sort, NOW(), NOW()
+  FROM (SELECT id FROM biz_store WHERE deleted = 0 ORDER BY id LIMIT 1) s
+  JOIN (
+                 SELECT '拍拍机 1 号' AS name, 'PP-01' AS device_no, 'PAIPAI'  AS type_code, '靠窗第一台' AS location, 'NORMAL'       AS status, 10 AS sort
+       UNION ALL SELECT '拍拍机 2 号',        'PP-02',              'PAIPAI',                '靠窗第二台',          'NORMAL',              20
+       UNION ALL SELECT '拍拍机 3 号',        'PP-03',              'PAIPAI',                '靠墙第三台',          'NORMAL',              30
+       UNION ALL SELECT '拍拍机 4 号',        'PP-04',              'PAIPAI',                '靠墙第四台',          'NEEDS_REPAIR',        40
+       UNION ALL SELECT '抬手乐 1 号',        'TS-01',              'TAISHOU',               '进门左手边',          'NORMAL',              50
+       UNION ALL SELECT '抬手乐 2 号',        'TS-02',              'TAISHOU',               '进门右手边',          'MAINTAINING',         60
+       ) v
+  JOIN `biz_equipment_type` t ON t.code = v.type_code AND t.deleted = 0;
+
+
+-- ============================================================================
 -- 模块 5：门禁管理
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_lock`;
@@ -354,15 +420,17 @@ CREATE TABLE `biz_order` (
   `end_time`        DATETIME      DEFAULT NULL            COMMENT '离场时刻，进行中为 NULL',
 
   -- 计费结果（分段存储，供账单分类展示与事后追溯）
-  -- ⚠️ 三个金额列的口径：段金额与合计都是【实收】（已封顶、已含优惠），
-  --    discount_amount 只是说明性字段，不可再用「合计 − 优惠」减第二次
-  `day_minutes`     INT           DEFAULT NULL            COMMENT '日场时长（分钟）',
-  `day_amount`      DECIMAL(10,2) DEFAULT NULL            COMMENT '日场费用（实收，已封顶、已含优惠）',
-  `night_minutes`   INT           DEFAULT NULL            COMMENT '夜场时长（分钟）',
-  `night_amount`    DECIMAL(10,2) DEFAULT NULL            COMMENT '夜场费用（实收，已封顶、已含优惠）',
-  `total_amount`    DECIMAL(10,2) DEFAULT NULL            COMMENT '实收合计 = 日场 + 夜场',
-  `discount_amount` DECIMAL(10,2) NOT NULL DEFAULT 0.00   COMMENT '本单优惠金额，说明性字段，已包含在 total_amount 中',
-  `payable_amount`  DECIMAL(10,2) DEFAULT NULL            COMMENT '应付 = total_amount（预留独立列，供将来优惠券、押金等非计费项）',
+  -- ⚠️ 金额列的口径：段金额与合计都是【实收】（已封顶、已含优惠），
+  --    discount_amount（月度累计优惠）与 card_free_amount（月卡免除）都只是说明性字段、
+  --    互不重叠，也都不可再用「合计 − 优惠」减第二次
+  `day_minutes`      INT           DEFAULT NULL            COMMENT '日场时长（分钟）',
+  `day_amount`       DECIMAL(10,2) DEFAULT NULL            COMMENT '日场费用（实收，已封顶、已含优惠）',
+  `night_minutes`    INT           DEFAULT NULL            COMMENT '夜场时长（分钟）',
+  `night_amount`     DECIMAL(10,2) DEFAULT NULL            COMMENT '夜场费用（实收，已封顶、已含优惠）',
+  `total_amount`     DECIMAL(10,2) DEFAULT NULL            COMMENT '实收合计 = 日场 + 夜场',
+  `discount_amount`  DECIMAL(10,2) NOT NULL DEFAULT 0.00   COMMENT '月度累计优惠为本单省下的金额，说明性字段，已包含在 total_amount 中',
+  `card_free_amount` DECIMAL(10,2) NOT NULL DEFAULT 0.00   COMMENT '月卡为本单免掉的金额（不持卡时本单应付的金额，已含月度优惠价），说明性字段，已从 total_amount 中扣除',
+  `payable_amount`   DECIMAL(10,2) DEFAULT NULL            COMMENT '应付 = total_amount（预留独立列，供将来优惠券、押金等非计费项）',
 
   -- 状态
   -- 默认值刻意保留 'CREATED' 而不是改成 'IN_USE'：正常业务里这一列总是被显式赋值，
@@ -437,6 +505,17 @@ CREATE TABLE `biz_access_record` (
 --           **按购买日起 30 天计**（含首尾），不按自然月 ——
 --           否则月末几天买卡的用户只买到两三天，同样的钱买到的东西差一大截。
 --
+-- 【为什么是两张表：卡 + 购买单】
+--   卡是**资产**（有有效期、可查卡包），购买是**交易**（有支付流水、可能放弃）。
+--   两者生命周期不同，所以拆开：
+--     · 本表只放**真正生效过**的卡 —— start_date / end_date 是这一列 NOT NULL 的原因
+--     · 待支付、已关闭的购买尝试留在 biz_monthly_card_order，不污染本表
+--   若合成一张表，就必须把 start_date / end_date 放开为可空（未支付的卡没有生效日期），
+--   而那是「卡」的核心属性 —— 让核心属性可空，说明表里混进了不是卡的东西。
+--
+--   （包场 biz_booking 反过来是单表：包场是**一场活动**，排期与付款是同一件事的
+--     两个阶段，待支付的包场已经占住了那个时段，不存在「先有付款才有活动」。）
+--
 -- 与「月度累计消费优惠」的关系（两处口径不同，实现时勿混）：
 --   · 月卡期间订单金额为 0，其卡费【不计入】月度累计消费的优惠门槛
 --     （月卡本身就是独立优惠政策，不再叠加）
@@ -447,20 +526,21 @@ CREATE TABLE `biz_access_record` (
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_monthly_card`;
 CREATE TABLE `biz_monthly_card` (
-  `id`           BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `card_no`      VARCHAR(32)   NOT NULL                COMMENT '卡号，对外展示',
-  `user_id`      BIGINT        NOT NULL                COMMENT '持卡用户 ID，月卡绑定本人使用',
-  `card_type`    VARCHAR(20)   NOT NULL                COMMENT '卡类型：ALL_DAY 全天 / NIGHT 夜间（仅 22:00–10:00 免费）',
-  `price`        DECIMAL(10,2) NOT NULL                COMMENT '购买价格（元）',
-  `start_date`   DATE          NOT NULL                COMMENT '生效日期（购买当日）',
-  `end_date`     DATE          NOT NULL                COMMENT '失效日期（含当日）= start_date + 29 天',
-  `status`       VARCHAR(20)   NOT NULL DEFAULT 'ACTIVE'
-                 COMMENT '状态：ACTIVE 生效中 / EXPIRED 已过期 / REFUNDED 已退款',
-  `pay_order_no` VARCHAR(32)   DEFAULT NULL            COMMENT '购买时的支付单号，复用模块 8 的支付服务',
-  `paid_at`      DATETIME      DEFAULT NULL            COMMENT '支付时刻，支付成功即生效',
-  `created_at`   DATETIME      NOT NULL                COMMENT '创建时间',
-  `updated_at`   DATETIME      NOT NULL                COMMENT '更新时间',
-  `deleted`      TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  `id`             BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `card_no`        VARCHAR(32)   NOT NULL                COMMENT '卡号，对外展示',
+  `user_id`        BIGINT        NOT NULL                COMMENT '持卡用户 ID，月卡绑定本人使用',
+  `card_type`      VARCHAR(20)   NOT NULL                COMMENT '卡类型：ALL_DAY 全天 / NIGHT 夜间（夜间仅 22:00–次日 10:00 免费）',
+  `price`          DECIMAL(10,2) NOT NULL                COMMENT '购买价格（元），支付时快照，事后调价不影响已售出的卡',
+  `start_date`     DATE          NOT NULL                COMMENT '生效日期（= 支付当日）',
+  `end_date`       DATE          NOT NULL                COMMENT '失效日期（含当日）= start_date + 29 天',
+  `status`         VARCHAR(20)   NOT NULL DEFAULT 'ACTIVE'
+                   COMMENT '状态：ACTIVE 生效中 / EXPIRED 已过期 / REFUNDED 已退款',
+  `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
+  `pay_order_no`   VARCHAR(32)   DEFAULT NULL            COMMENT '产生本卡的购买单号（biz_monthly_card_order.order_no）',
+  `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付时刻，精确到时刻，供对账',
+  `created_at`     DATETIME      NOT NULL                COMMENT '创建时间',
+  `updated_at`     DATETIME      NOT NULL                COMMENT '更新时间',
+  `deleted`        TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_card_no` (`card_no`),
   KEY `idx_user_status` (`user_id`, `status`),
@@ -468,14 +548,108 @@ CREATE TABLE `biz_monthly_card` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '月卡';
 
 
+-- ============================================================================
+-- 模块 9：优惠管理 —— 月卡购买单
+--
+-- 记录「用户想买一张月卡」这件事，从发起到支付成功或关闭。
+-- 支付目标是**本表**而非月卡本身：支付回调按商户订单号反查，要求目标先落库，
+-- 而「还没付钱的卡」不该出现在月卡表里（见上方「为什么是两张表」）。
+--
+--   POST /api/cards/purchases  →  本表落一条 PENDING_PAYMENT（order_no 即 out_trade_no）
+--          │
+--     支付回调（同一事务两跳）
+--          ├─ ① 本表 → PAID（带 status 守卫，幂等第一道）
+--          └─ ② 往 biz_monthly_card 插一张 ACTIVE 卡（start_date = 支付当日）
+--
+-- 三张收款表（biz_order / biz_booking / 本表）的支付字段口径保持一致。
+-- 卡费计入 sys_user.card_paid，不计入月度累计消费的优惠门槛。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_monthly_card_order`;
+CREATE TABLE `biz_monthly_card_order` (
+  `id`             BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `order_no`       VARCHAR(32)   NOT NULL                COMMENT '购买单号，同时是商户订单号 out_trade_no',
+  `user_id`        BIGINT        NOT NULL                COMMENT '购买人用户 ID',
+  `card_type`      VARCHAR(20)   NOT NULL                COMMENT '卡类型：ALL_DAY 全天 / NIGHT 夜间',
+  `price`          DECIMAL(10,2) NOT NULL                COMMENT '应付金额（元），下单时快照',
+  `status`         VARCHAR(20)   NOT NULL DEFAULT 'PENDING_PAYMENT'
+                   COMMENT '状态：PENDING_PAYMENT 待支付 / PAID 已支付 / CLOSED 已关闭（用户取消或超时未付）',
+  `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
+  `payment_no`     VARCHAR(64)   DEFAULT NULL            COMMENT '支付平台交易号：微信 transaction_id / 支付宝 trade_no',
+  `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付完成时刻',
+  `created_at`     DATETIME      NOT NULL                COMMENT '创建时间',
+  `updated_at`     DATETIME      NOT NULL                COMMENT '更新时间',
+  `deleted`        TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_order_no` (`order_no`),
+  KEY `idx_user_status` (`user_id`, `status`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '月卡购买单';
+
+
+-- ============================================================================
+-- 公告（不对应论文某一章，与 common 公共层同性质）
+--
+-- ⚠️ 这是一条【消息流】，不是一份【状态快照】。这一点决定了本表几乎所有的设计：
+--
+--   · 只增不改 —— 机台每次状况变化各产生一条。修好不会把「转为维护中」那条
+--     改掉或删掉，而是再产生一条「转为良好」。首页公告栏读起来是一段历史。
+--   · 没有生效/失效时刻 —— 一条消息的「有效期」是说不通的。
+--     「3 号机转维护中」发生在那一刻，它不需要「从明天起生效」，也不会
+--     「下周三自动失效」。发生时刻就是 created_at。
+--   · 没有唯一键约束 —— 同一台机台可以反复出现在公告里，
+--     幂等在这里恰恰是要避免的行为。
+--   · 最新的在最上面，靠 id 倒序。没有置顶、权重、排序值那一套——
+--     消息流里「我想让这条排前面」不是一个真实需求。
+--
+-- 两类公告靠 publish_mode 区分：
+--   MANUAL 管理员手写 —— source_type / source_id 为 NULL，可改可删
+--   AUTO   系统自动   —— 记录已发生的事实，只读（改了等于篡改历史）
+--
+-- ⚠️ 包场【不在这里】：包场是「未来的安排」，公告是「已发生的事」。
+--    两者混在一条流里，用户分不清哪条是通知、哪条是日程；而且日程会随改期变动，
+--    消息流只增不改，改期后旧的那条永远对不上。包场走 GET /api/store/bookings
+--    的「包场时间表」，直接查 biz_booking，不落本表。
+--
+-- ⚠️ 也不建「停业公告」：停业已有 StoreStatusVo 在管（STATUS_CLOSED），
+--    那条路径的措辞边界定好了（只说「暂停营业」，不说原因），不在这里另开一条。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_notice`;
+CREATE TABLE `biz_notice` (
+  `id`           BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `title`        VARCHAR(100)  NOT NULL                COMMENT '公告标题，一句话。首页公告栏显示的就是它',
+  `content`      VARCHAR(500)  DEFAULT NULL            COMMENT '公告正文，可为空。自动公告恒为 NULL，只有手写公告才有',
+  `publish_mode` VARCHAR(20)   NOT NULL                COMMENT '发布方式：AUTO 系统自动 / MANUAL 管理员手写。见 NoticePublishMode',
+  `source_type`  VARCHAR(20)   DEFAULT NULL            COMMENT '自动公告的来源类型：DEVICE 机台；手写公告为 NULL。见 NoticeSourceType',
+  `source_id`    BIGINT        DEFAULT NULL            COMMENT '自动公告的来源记录 ID（机台 ID）；手写公告为 NULL。用来追溯「这条是哪台机器产生的」',
+  `created_by`   BIGINT        DEFAULT NULL            COMMENT '发布人（管理员 ID）；自动公告为 NULL',
+  `created_at`   DATETIME      NOT NULL                COMMENT '创建时间，同时也是这条消息的发生时刻',
+  `updated_at`   DATETIME      NOT NULL                COMMENT '更新时间',
+  `deleted`      TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删。只有手写公告会被删',
+  PRIMARY KEY (`id`),
+  -- 用户端取最新几条就是 ORDER BY id DESC LIMIT n，主键索引直接服务。
+  -- 这条二级索引给后台按来源追溯用（「这台机器都发生过什么」），
+  -- 注意它是【普通索引】不是唯一索引 —— 同一台机台会有很多条
+  KEY `idx_source` (`source_type`, `source_id`),
+  -- 结构上钉住「手写无来源、自动必有来源」：两个来源列要么全空、要么全不空。
+  -- 应用层已经这样保证（Service 方法体里硬编码），这里是数据库侧的第二道防线 ——
+  -- 将来新增第二条写入路径时，绕过应用层也绕不过这里
+  CONSTRAINT `ck_notice_source` CHECK (
+      (`publish_mode` = 'MANUAL' AND `source_type` IS NULL     AND `source_id` IS NULL)
+   OR (`publish_mode` = 'AUTO'   AND `source_type` IS NOT NULL AND `source_id` IS NOT NULL)
+  )
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '公告（消息流）';
+
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ============================================================================
 -- 后续模块建表时追加于此：
---   模块 4  设备管理     biz_device（具体某台机器，每台指向 biz_equipment_type）
---                        —— biz_equipment_type 字典表已建，见上方
---   模块 9  优惠管理     biz_promotion_rule
---                        （优惠规则表，视需要而定 —— 当前计费与优惠参数
---                          已外置在 application.properties，不必再落库）
 --   模块 12 系统日志     sys_log
+--
+-- 模块 9 不建优惠规则表：月卡已由 biz_monthly_card + biz_monthly_card_order 承载，
+-- 「满 200 元后按优惠价」的门槛与两套单价外置在 application.properties
+-- （uspace.billing.monthly-discount.*），改活动不必改表、也不必发版。
+--
+-- 公告（biz_notice）不对应论文某一章，与 common 公共层同性质 ——
+-- 它是横跨设备、包场、门店三条线的统一信息出口，独立成包正是为了不被任何一条线绑住。
+-- 详见上面建表处与 backend 的 notice 包说明。
 -- ============================================================================

@@ -98,6 +98,13 @@ public class PaymentService {
         PaymentTarget target = loaded.getData();
         PaymentChannel channel = request.getChannel();
 
+        // 有些收款方式没有人工核销的降级路径（月卡就是），而那条路径不调网关，
+        // 会返回一个「成功」却没有任何支付参数 —— 用户以为付得了款，
+        // 单据却永远停在待支付，且线上没有任何报错。宁可在这一步就拒掉
+        if (!handler.supportsChannel(channel)) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "该支付方式暂不支持此类收款，请选择线上支付");
+        }
+
         PaymentCreateVo vo = new PaymentCreateVo();
         vo.setOutTradeNo(target.getOutTradeNo());
         vo.setTargetType(target.getType());
@@ -321,12 +328,33 @@ public class PaymentService {
             return true;
         }
 
-        // 累加用户的终生消费额。用相对更新（order_paid = order_paid + x），
-        // 并发下不会丢更新 —— 这是幂等的第三道防线
-        userMapper.addOrderPaidAmount(target.getUserId(), target.getAmount());
-        log.info("[支付] 支付完成并已累加用户消费 outTradeNo={} userId={} 金额={}",
-                notify.getOutTradeNo(), target.getUserId(), target.getAmount());
+        // 累加用户的终生消费额。用相对更新（xxx_paid = xxx_paid + x），
+        // 并发下不会丢更新 —— 这是幂等的第三道防线。
+        //
+        // 累加到哪一列由处理器声明：订单与包场记 order_paid，月卡卡费记 card_paid。
+        // 这里是唯一一处「所有收款共用」的写库点，写错列不会有任何报错，
+        // 只会让两个累计口径悄悄错位
+        accumulatePaid(handler, target);
+        log.info("[支付] 支付完成并已累加用户{} outTradeNo={} userId={} 金额={}",
+                handler.paidCategory().getLabel(), notify.getOutTradeNo(),
+                target.getUserId(), target.getAmount());
         return true;
+    }
+
+    /**
+     * 按处理器声明的品类累加用户的累计消费。
+     *
+     * <p>用穷尽 switch：将来新增品类时漏处理会<b>编译不过</b>，
+     * 而不是静默地什么都不记（那意味着用户的钱花了、累计却没涨）。
+     *
+     * @param handler 处理本次收款的处理器
+     * @param target  支付目标
+     */
+    private void accumulatePaid(PaymentTargetHandler handler, PaymentTarget target) {
+        switch (handler.paidCategory()) {
+            case CARD -> userMapper.addCardPaidAmount(target.getUserId(), target.getAmount());
+            case ORDER -> userMapper.addOrderPaidAmount(target.getUserId(), target.getAmount());
+        }
     }
 
     // ==================================================================
@@ -372,7 +400,10 @@ public class PaymentService {
         boolean changed = handler.markPaid(target, PaymentChannel.QR_UPLOAD, paymentNo,
                 LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS), adminId);
         if (changed) {
-            userMapper.addOrderPaidAmount(target.getUserId(), target.getAmount());
+            // 走与线上回调同一套分派，而不是直接写死累加到订单列 ——
+            // 人工核销目前只支持订单，但把口径收在一处，
+            // 将来要支持别的收款时不必回头找这里
+            accumulatePaid(handler, target);
         }
         log.info("[支付] 管理员人工核销 orderNo={} 管理员={} 交易号={}",
                 order.getOrderNo(), adminId, paymentNo);

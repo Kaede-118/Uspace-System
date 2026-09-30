@@ -222,14 +222,14 @@ class OrderMapperIntegrationTests {
 
         int affected = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(),
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
-                new BigDecimal("16.00"), BigDecimal.ZERO, new BigDecimal("16.00"),
+                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
                 OrderStatus.PENDING_PAYMENT.name());
         assertEquals(1, affected, "使用中的订单应当能被结算");
 
         // 再结算一次 —— 模拟用户重复点击
         int again = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(),
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
-                new BigDecimal("16.00"), BigDecimal.ZERO, new BigDecimal("16.00"),
+                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
                 OrderStatus.PENDING_PAYMENT.name());
         assertEquals(0, again, "第二次应当拿到 0 行，而不是把账单重算一遍");
     }
@@ -244,13 +244,13 @@ class OrderMapperIntegrationTests {
 
         int adjusted = orderMapper.updateAdjustment(pending.getId(),
                 LocalDateTime.now().minusHours(1), 90, new BigDecimal("12.00"),
-                0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO,
+                0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
                 new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
         assertEquals(1, adjusted, "待支付的订单可以调整");
 
         int rejected = orderMapper.updateAdjustment(paid.getId(),
                 LocalDateTime.now().minusHours(1), 90, new BigDecimal("12.00"),
-                0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO,
+                0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
                 new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
         assertEquals(0, rejected,
                 "已支付的不允许调整 —— 那必然涉及退款，属于人工运营流程");

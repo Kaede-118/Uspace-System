@@ -337,7 +337,7 @@ public class FakeOrderMapper implements InvocationHandler {
      * 写入结算结果。带「使用中」状态守卫。
      *
      * @param args 依次为 id、endTime、日场分钟、日场金额、夜场分钟、夜场金额、
-     *             合计、优惠额、应付、目标状态
+     *             合计、优惠额、月卡免单额、应付、目标状态
      * @return 受影响行数
      */
     private int updateSettlement(Object[] args) {
@@ -346,7 +346,7 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[9]);
+        order.setStatus((String) args[10]);
         return 1;
     }
 
@@ -354,7 +354,7 @@ public class FakeOrderMapper implements InvocationHandler {
      * 人工调整时长与金额。带「未付款」状态守卫，并写下四个调整字段。
      *
      * @param args 依次为 id、endTime、日场分钟、日场金额、夜场分钟、夜场金额、
-     *             合计、优惠额、应付、目标状态、调整人、调整原因
+     *             合计、优惠额、月卡免单额、应付、目标状态、调整人、调整原因
      * @return 受影响行数
      */
     private int updateAdjustment(Object[] args) {
@@ -363,10 +363,10 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[9]);
+        order.setStatus((String) args[10]);
         order.setAdjusted(1);
-        order.setAdjustedBy((Long) args[10]);
-        order.setAdjustReason((String) args[11]);
+        order.setAdjustedBy((Long) args[11]);
+        order.setAdjustReason((String) args[12]);
         order.setAdjustedAt(LocalDateTime.now());
         return 1;
     }
@@ -440,7 +440,8 @@ public class FakeOrderMapper implements InvocationHandler {
         order.setNightAmount((BigDecimal) args[offset + 4]);
         order.setTotalAmount((BigDecimal) args[offset + 5]);
         order.setDiscountAmount((BigDecimal) args[offset + 6]);
-        order.setPayableAmount((BigDecimal) args[offset + 7]);
+        order.setCardFreeAmount((BigDecimal) args[offset + 7]);
+        order.setPayableAmount((BigDecimal) args[offset + 8]);
     }
 
     /**

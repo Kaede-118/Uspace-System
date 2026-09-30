@@ -54,8 +54,18 @@ public class OrderVo {
     /** 实收合计。各段已分别封顶、已含优惠 */
     private BigDecimal totalAmount;
 
-    /** 本单优惠金额（说明性字段，已含在合计中，展示时不要从合计里再减一次） */
+    /** 月度优惠为本单省下的金额（说明性字段，已含在合计中，展示时不要从合计里再减一次） */
     private BigDecimal discountAmount;
+
+    /**
+     * 月卡为本单免掉的金额。
+     *
+     * <p>说明性字段，<b>已从合计中扣除</b>，同样不要从合计里再减一次。
+     * 它与 {@link #discountAmount} 是两回事 —— 后者是月度累计优惠省下的钱。
+     * 一笔订单可能两者都有（夜间卡用户当月又已达标：日场段走优惠价、夜场段免费），
+     * 所以两个数要分开给，合成一个的话账就没法解释了。
+     */
+    private BigDecimal cardFreeAmount;
 
     /** 应付金额。发起支付时用它 */
     private BigDecimal payableAmount;
@@ -108,6 +118,7 @@ public class OrderVo {
         vo.setNightAmount(order.getNightAmount());
         vo.setTotalAmount(order.getTotalAmount());
         vo.setDiscountAmount(order.getDiscountAmount());
+        vo.setCardFreeAmount(order.getCardFreeAmount());
         vo.setPayableAmount(order.getPayableAmount());
         vo.setStatus(order.getStatus());
         vo.setStatusText(OrderStatus.labelOf(order.getStatus()));

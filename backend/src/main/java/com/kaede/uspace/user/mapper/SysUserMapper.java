@@ -182,6 +182,31 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
     int addOrderPaidAmount(@Param("id") Long id, @Param("amount") BigDecimal amount);
 
     /**
+     * 累加用户的月卡充值额。
+     *
+     * <p>供模块 8 的支付回调在<b>月卡付款成功</b>时调用。
+     *
+     * <p>与 {@link #addOrderPaidAmount} 严格对称：一条 SQL 里同时累加
+     * {@code card_paid} 与 {@code total_paid}，用相对更新防并发丢更新。
+     * 两列同源，分成两条 SQL 就可能出现「卡费加了、总额没加」的不一致，
+     * 且不会有任何报错。同理，本方法<b>绝不能</b>去动 {@code order_paid} ——
+     * 那样两个累计口径就错位了，而前台展示与老客回馈筛选都建立在这个区分上。
+     *
+     * @param id     用户 ID
+     * @param amount 本次实付金额（元）
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    @Update("""
+            UPDATE sys_user
+               SET card_paid  = card_paid + #{amount},
+                   total_paid = total_paid + #{amount},
+                   updated_at = NOW()
+             WHERE id = #{id}
+               AND deleted = 0
+            """)
+    int addCardPaidAmount(@Param("id") Long id, @Param("amount") BigDecimal amount);
+
+    /**
      * 按关键字分页查询用户，供运营后台的用户列表使用。
      *
      * <p>关键字同时匹配登录名、昵称与 QQ 号 —— 运营通常记得住其中一个，

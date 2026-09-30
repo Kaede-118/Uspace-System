@@ -53,6 +53,11 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
         return PaymentTargetType.BOOKING;
     }
 
+    @Override
+    public PaidCategory paidCategory() {
+        return PaidCategory.ORDER;
+    }
+
     /**
      * {@inheritDoc}
      *

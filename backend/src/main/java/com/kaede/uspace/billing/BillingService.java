@@ -45,6 +45,11 @@ import java.util.List;
  * 使得同长的跨时段订单与不跨时段订单价格可能不同 —— 这是已确认接受的规则形态，
  * 详见 CLAUDE.md。
  *
+ * <p>2026-09-29 加入<b>月卡段级免费</b>：被月卡覆盖的段金额置 0，
+ * 覆盖范围由调用方以 {@link CardCoverage} 传入。计费侧只认识「哪些段免费」，
+ * 不认识「月卡」这个业务名词 —— 于是加卡种、改覆盖范围这类促销形态的变化
+ * 不会波及计价规则本身，而日夜场的边界也仍然只有本类一处定义。
+ *
  * <p><b>本类为纯计算，不访问数据库、不依赖其他模块</b>，因此可直接单元测试。
  * 月度优惠所需的「当月累计实付额」由调用方查好后经参数传入 ——
  * 这样 Web 结算与 QQ 机器人两条链路能复用同一份计费逻辑，
@@ -96,7 +101,9 @@ public class BillingService {
     }
 
     /**
-     * 计算一次消费的费用，并判定是否适用月度累计优惠。
+     * 计算一次消费的费用，并判定是否适用月度累计优惠（不含月卡）。
+     *
+     * <p>等价于 {@code calculate(startTime, endTime, monthSpent, null)}。
      *
      * @param startTime  开始使用时间（用户点击「开门」的时刻）
      * @param endTime    结束使用时间（用户离场或订单结算时刻）
@@ -108,6 +115,31 @@ public class BillingService {
      */
     public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
                                    BigDecimal monthSpent) {
+        return calculate(startTime, endTime, monthSpent, null);
+    }
+
+    /**
+     * 计算一次消费的费用，含月度累计优惠与月卡免费。
+     *
+     * <p><b>两种优惠并行存在、互不重叠，各自管各自的范围</b>：
+     * <ul>
+     *   <li><b>月度优惠</b>是整单粒度的 —— 门槛达到了，未免费的段整段走优惠价</li>
+     *   <li><b>月卡</b>是段粒度的 —— 被覆盖的段直接免费，没覆盖的段照常计费。
+     *       夜间卡用户的日场段因此仍参与月度优惠判定（那是正常付费消费），
+     *       而不是「有卡就整单不打折」</li>
+     * </ul>
+     * 这样安排还有一个实际好处：账单上「日场段按优惠价收 7 元、夜场段月卡免费」
+     * 是算得出来的，而不是把两者混成一个说不清的数字。
+     *
+     * @param startTime    开始使用时间（用户点击「开门」的时刻）
+     * @param endTime      结束使用时间（用户离场或订单结算时刻）
+     * @param monthSpent   该用户本月已支付订单的实付额之和（元），null 视同 0
+     * @param cardCoverage 月卡的时段覆盖范围；无卡传 null
+     * @return 含分段明细、总金额与两种优惠金额的计费结果
+     * @throws IllegalArgumentException 当时间为空、或结束时间早于开始时间时抛出
+     */
+    public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
+                                   BigDecimal monthSpent, CardCoverage cardCoverage) {
         if (startTime == null || endTime == null) {
             throw new IllegalArgumentException("计费的开始时间与结束时间不能为空");
         }
@@ -122,17 +154,25 @@ public class BillingService {
         List<SegmentBill> segments = new ArrayList<>();
         BigDecimal totalAmount = BigDecimal.ZERO;
         BigDecimal originalTotal = BigDecimal.ZERO;
+        BigDecimal cardFreeAmount = BigDecimal.ZERO;
 
         for (TimeSegment segment : splitByPeriod(startTime, endTime)) {
-            SegmentBill bill = billSegment(segment, discounted);
+            SegmentBill bill = billSegment(segment, discounted, cardCoverage);
             segments.add(bill);
             totalAmount = totalAmount.add(bill.getAmount());
+            cardFreeAmount = cardFreeAmount.add(bill.getCardFreeAmount());
 
             if (discounted) {
                 // 优惠单额外按原价再算一遍，用于得出「本单省了多少」。
                 // 相比在 billSegment 里同时维护两套金额，重算一遍的路径更短、
                 // 更不容易算错；计费是纯计算，多跑一遍的代价可以忽略。
-                originalTotal = originalTotal.add(billSegment(segment, false).getAmount());
+                //
+                // ⚠️ cardCoverage 必须一起传下去。漏传的话，被月卡覆盖的段
+                // 在重算里会算出一份并不存在的原价，差额全部落进 discountAmount ——
+                // 一笔「月卡免了 40 元」的单会被记成「月度优惠省了 40 元」，
+                // 不报任何错，统计报表还会把它当成优惠活动的效果。
+                originalTotal = originalTotal.add(
+                        billSegment(segment, false, cardCoverage).getAmount());
             }
         }
 
@@ -147,11 +187,14 @@ public class BillingService {
         result.setDiscountAmount(discounted
                 ? originalTotal.subtract(totalAmount)
                 : BigDecimal.ZERO);
+        result.setCardFreeAmount(cardFreeAmount);
 
-        log.info("[计费] {} ~ {}，共 {} 分钟，合计 {} 元，分 {} 段{}",
+        log.info("[计费] {} ~ {}，共 {} 分钟，合计 {} 元，分 {} 段{}{}",
                 startTime, endTime, result.getTotalMinutes(), totalAmount, segments.size(),
                 discounted ? "，已享月度优惠（结算前当月累计 " + result.getMonthSpentBefore()
-                        + " 元，本单省 " + result.getDiscountAmount() + " 元）" : "");
+                        + " 元，本单省 " + result.getDiscountAmount() + " 元）" : "",
+                cardCoverage == null ? ""
+                        : "，月卡覆盖 " + cardCoverage.getLabel() + "（免 " + cardFreeAmount + " 元）");
         return result;
     }
 
@@ -160,21 +203,37 @@ public class BillingService {
     // ==================================================================
 
     /**
-     * 判断本单是否适用月度累计优惠。
+     * 判断某个累计消费额是否已达到月度优惠门槛。
      *
      * <p>判定口径：当月<b>已支付</b>订单的实付额之和达到门槛。
      * 本单自身不计入（结算时尚未支付），因此不存在「本单算完把自己顶过门槛」
      * 的循环依赖；已经结算过的订单也不因为后来达标而追溯退款。
      *
-     * @param monthSpent 结算前的当月累计实付额，可为 null
-     * @return true 表示本单整单按优惠价计费
+     * <p><b>公开出来供模块 9 查询用户的优惠资格</b>（「还差多少才能享优惠价」），
+     * 免得那个接口自己再写一遍门槛比较 —— 两处实现迟早会在某个边界上分岔，
+     * 而分岔的表现是「页面说已达标、结算却没优惠」这种说不清的问题。
+     *
+     * @param monthSpent 结算前的当月累计实付额，可为 null（视同未达标）
+     * @return true 表示按优惠价计费
      */
-    private boolean isDiscounted(BigDecimal monthSpent) {
+    public boolean isDiscounted(BigDecimal monthSpent) {
         BillingProperties.MonthlyDiscount discount = properties.getMonthlyDiscount();
         if (!discount.isEnabled() || monthSpent == null) {
             return false;
         }
         return monthSpent.compareTo(discount.getThreshold()) >= 0;
+    }
+
+    /**
+     * 取月度优惠的门槛金额（元）。
+     *
+     * <p>供模块 9 在「本月累计消费」接口里展示「还差多少」，
+     * 与 {@link #isDiscounted} 读的是同一个配置项。
+     *
+     * @return 门槛金额
+     */
+    public BigDecimal discountThreshold() {
+        return properties.getMonthlyDiscount().getThreshold();
     }
 
     /**
@@ -248,11 +307,18 @@ public class BillingService {
      * 避免浮点运算。可计费分钟为「段时长 − 宽限」，非正数时档数直接为 0 ——
      * 「首 N 分钟内免费出场」正是由此自然得出，无需单独判断。
      *
-     * @param segment    时段片段
-     * @param discounted 本单是否按月度优惠价计费（影响单价与封顶）
+     * <p><b>月卡覆盖的段照常算档数、单价、封顶与封顶前金额，只把实收置 0。</b>
+     * 这几个中间结果正是账单页解释「这段为什么免费」的依据 ——
+     * 用户看到的是「夜场 1.5 小时 · 原价 10.5 元 · 月卡免费」，
+     * 而不是一个没有来由的 0 元。
+     *
+     * @param segment      时段片段
+     * @param discounted   本单是否按月度优惠价计费（影响单价与封顶）
+     * @param cardCoverage 月卡的时段覆盖范围，null 表示无卡
      * @return 该段的计费明细
      */
-    private SegmentBill billSegment(TimeSegment segment, boolean discounted) {
+    private SegmentBill billSegment(TimeSegment segment, boolean discounted,
+                                    CardCoverage cardCoverage) {
         long minutes = Duration.between(segment.start(), segment.end()).toMinutes();
 
         long billableMinutes = minutes - properties.getGraceMinutes();
@@ -267,6 +333,10 @@ public class BillingService {
         BigDecimal cap = capOf(segment.period(), discounted);
         BigDecimal amount = rawAmount.min(cap);
 
+        // 免费判定：全天卡覆盖所有段；夜间卡只覆盖夜场段，日场段照常收费
+        boolean freeByCard = cardCoverage == CardCoverage.ALL
+                || (cardCoverage == CardCoverage.NIGHT && segment.period() == BillingPeriod.NIGHT);
+
         SegmentBill bill = new SegmentBill();
         bill.setPeriod(segment.period());
         bill.setStartTime(segment.start());
@@ -276,8 +346,10 @@ public class BillingService {
         bill.setUnitPrice(unitPrice);
         bill.setCapAmount(cap);
         bill.setRawAmount(rawAmount);
-        bill.setAmount(amount);
+        bill.setAmount(freeByCard ? BigDecimal.ZERO : amount);
         bill.setCapped(rawAmount.compareTo(cap) > 0);
+        bill.setFreeByCard(freeByCard);
+        bill.setCardFreeAmount(freeByCard ? amount : BigDecimal.ZERO);
         return bill;
     }
 

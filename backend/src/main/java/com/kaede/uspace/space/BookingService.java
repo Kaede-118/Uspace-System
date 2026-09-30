@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.space.dto.BookingScheduleVo;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.CreateBookingRequest;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
@@ -20,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -51,6 +54,12 @@ public class BookingService {
     /** 包场单号前缀，便于在日志与对账文件里一眼认出这是包场而非普通订单 */
     private static final String NO_PREFIX = "BK";
 
+    /** 用户端时间表一次最多取几条，防止调用方传一个很大的 limit 把整表拉出来 */
+    private static final int MAX_SCHEDULE_LIMIT = 20;
+
+    /** 用户端时间表默认取几条 */
+    private static final int DEFAULT_SCHEDULE_LIMIT = 10;
+
     private final BookingMapper bookingMapper;
     private final StoreMapper storeMapper;
     private final ClosureService closureService;
@@ -78,6 +87,28 @@ public class BookingService {
     // ==================================================================
     // 查询
     // ==================================================================
+
+    /**
+     * 取门店的包场时间表：尚未结束的已付款包场。
+     *
+     * <p>给用户端首页的「近期包场安排」卡片用。它取代了早先「包场发一条公告」的做法 ——
+     * 包场是<b>未来的安排</b>，公告是<b>已发生的事</b>，两者混在一条消息流里，
+     * 用户分不清哪条是通知、哪条是日程；而且日程会随改期变动，
+     * 而消息流是只增不改的，改期后旧公告就永远对不上了。
+     *
+     * <p><b>不披露包场人</b>：返回的 {@link BookingScheduleVo} 里根本没有那个字段，
+     * 与 {@code StoreStatusVo}「包场时也不披露包场人是谁」是同一条边界。
+     *
+     * @param limit 最多几条；为 null 或非正时取默认值，超出上限则截到上限
+     * @return 时间表，按开始时间升序（从近到远）
+     */
+    public BizResult<List<BookingScheduleVo>> listSchedule(Integer limit) {
+        int size = normalizeScheduleLimit(limit);
+        LocalDateTime now = LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS);
+        return BizResult.ok(bookingMapper.selectUpcoming(now, size).stream()
+                .map(booking -> BookingScheduleVo.from(booking, now))
+                .toList());
+    }
 
     /**
      * 分页查询包场记录。
@@ -303,6 +334,23 @@ public class BookingService {
     // ==================================================================
     // 内部工具
     // ==================================================================
+
+    /**
+     * 归一化的时间表条数上限。
+     *
+     * <p>与公告模块同一套做法：不合法时<b>回落而不是报错</b> ——
+     * 传错（负数、超大值）的后果只是多取或少取几条日程，
+     * 没有让整个首页接口失败的必要。
+     *
+     * @param limit 原始值，可为 null
+     * @return 1 到 {@value #MAX_SCHEDULE_LIMIT} 之间的条数
+     */
+    private static int normalizeScheduleLimit(Integer limit) {
+        if (limit == null || limit < 1) {
+            return DEFAULT_SCHEDULE_LIMIT;
+        }
+        return Math.min(limit, MAX_SCHEDULE_LIMIT);
+    }
 
     /**
      * 生成包场单号。

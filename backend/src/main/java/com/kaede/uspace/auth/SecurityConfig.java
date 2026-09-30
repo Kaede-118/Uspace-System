@@ -54,7 +54,8 @@ public class SecurityConfig {
     /**
      * 允许匿名访问的路径。
      *
-     * <p>五个：注册、登录、门店营业状态，以及两个支付回调。其余接口一律要求已认证 ——
+     * <p>七个：注册、登录、门店营业状态、机台陈列与类型列表，以及两个支付回调。
+     * 其余接口一律要求已认证 ——
      * 这是「默认拒绝」的写法，新增接口时忘了配权限的后果是「访问不了」，
      * 而不是「所有人都能访问」。后者的代价大得多。
      *
@@ -62,6 +63,17 @@ public class SecurityConfig {
      * 是面向公众的信息，相当于店门口挂的牌子 —— 要求先注册才能知道店在哪、
      * 开没开门，是把新顾客挡在门外。响应体里不含停业原因与包场人信息，
      * 那道边界在 {@code StoreStatusVo} 上。
+     *
+     * <p>{@code /api/store/notices} 同理，且更需要放行：<b>店门口的告示牌
+     * 不需要注册才能看</b>。而未注册的人恰恰更需要它 —— 看到「今晚 19:00–21:00
+     * 已被包场」才知道要错峰；要求先注册再看，等于让第一次来的人白跑一趟。
+     * 响应体里不含包场人是谁、也不含任何运营内务（那道边界在
+     * {@code NoticeContents} 与 {@code NoticeVo} 上）。
+     *
+     * <p>{@code /api/devices} 与 {@code /api/devices/types} 同理：店里有什么机器、
+     * 每台是不是在维护，是顾客走进店门就能亲眼看到的事，没有理由要求先注册。
+     * 响应体里不含运营备注（那道边界在 {@code DeviceDisplayVo} 上），
+     * 也不含任何「谁正在用」的信息 —— 本系统不做设备级使用记录。
      *
      * <p><b>两个支付回调放行的理由，以及它为什么不等于是个口子</b>：
      * 微信与支付宝的服务器发起回调时当然不带本系统的 JWT，不放行就收不到支付结果。
@@ -77,6 +89,10 @@ public class SecurityConfig {
             "/api/user/register",
             "/api/auth/login",
             "/api/store/status",
+            "/api/store/notices",
+            "/api/store/bookings",
+            "/api/devices",
+            "/api/devices/types",
             "/api/payments/notify/wxpay",
             "/api/payments/notify/alipay",
     };

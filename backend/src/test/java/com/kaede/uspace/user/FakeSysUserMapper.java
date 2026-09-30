@@ -108,6 +108,7 @@ public class FakeSysUserMapper implements InvocationHandler {
             case "updateRole" -> updateRole(args);
             case "selectPageByKeyword" -> selectPageByKeyword(args);
             case "addOrderPaidAmount" -> addOrderPaidAmount(args);
+            case "addCardPaidAmount" -> addCardPaidAmount(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -154,6 +155,27 @@ public class FakeSysUserMapper implements InvocationHandler {
         }
         BigDecimal amount = (BigDecimal) args[1];
         user.setOrderPaid(nullToZero(user.getOrderPaid()).add(amount));
+        user.setTotalPaid(nullToZero(user.getTotalPaid()).add(amount));
+        return 1;
+    }
+
+    /**
+     * 累加月卡充值额。
+     *
+     * <p>与 {@link #addOrderPaidAmount} 分开实现，且<b>刻意不去动 {@code orderPaid}</b> ——
+     * 两个累计口径的区别（房间消费 vs 卡费）正是这两个方法存在的理由，
+     * 假实现若图省事复用同一段，支付侧的「按品类分派」就测不出来了。
+     *
+     * @param args 依次为用户 ID、金额
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    private int addCardPaidAmount(Object[] args) {
+        SysUser user = selectById((Long) args[0]);
+        if (user == null) {
+            return 0;
+        }
+        BigDecimal amount = (BigDecimal) args[1];
+        user.setCardPaid(nullToZero(user.getCardPaid()).add(amount));
         user.setTotalPaid(nullToZero(user.getTotalPaid()).add(amount));
         return 1;
     }

@@ -39,7 +39,7 @@ public class BillingResult {
      */
     private List<SegmentBill> segments;
 
-    /** 总金额 = 各段金额之和（各段均已各自封顶） */
+    /** 总金额 = 各段金额之和（各段均已各自封顶，已扣除月卡免除的部分） */
     private BigDecimal totalAmount;
 
     /**
@@ -58,6 +58,19 @@ public class BillingResult {
      *
      * <p>对应订单表的 {@code discount_amount} 列，由计费服务直接给出，
      * 免得订单、统计、QQ 机器人各处重复实现一遍优惠金额的算法。
+     *
+     * <p>注意它<b>不含</b>月卡免掉的部分（那是 {@link #cardFreeAmount}）——
+     * 两种优惠并行存在、互不重叠，混在一起的话，
+     * 统计口径里「优惠活动的效果」会虚高，且事后无法拆开。
      */
     private BigDecimal discountAmount;
+
+    /**
+     * 本单因月卡免掉的金额（元）。无卡或卡未覆盖任何段时为 0。
+     *
+     * <p>对应订单表的 {@code card_free_amount} 列。它由各段的
+     * {@link SegmentBill#getCardFreeAmount()} 相加得出，逐段累加而非反推 ——
+     * 理由见该字段的说明。
+     */
+    private BigDecimal cardFreeAmount;
 }

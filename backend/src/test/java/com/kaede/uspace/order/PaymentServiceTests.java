@@ -10,6 +10,15 @@ import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
 import com.kaede.uspace.order.dto.PaymentStatusVo;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.promotion.CardOrderStatus;
+import com.kaede.uspace.promotion.FakeMonthlyCardMapper;
+import com.kaede.uspace.promotion.FakeMonthlyCardOrderMapper;
+import com.kaede.uspace.promotion.MonthlyCardNo;
+import com.kaede.uspace.promotion.MonthlyCardStatus;
+import com.kaede.uspace.promotion.MonthlyCardType;
+import com.kaede.uspace.promotion.PromotionProperties;
+import com.kaede.uspace.promotion.entity.MonthlyCard;
+import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.FakeBookingMapper;
 import com.kaede.uspace.space.entity.Booking;
@@ -20,6 +29,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -53,11 +63,19 @@ class PaymentServiceTests {
     private static final Long STORE_ID = 1L;
     private static final BigDecimal AMOUNT = new BigDecimal("22.00");
 
+    /** 全天月卡的售价，与默认配置一致 */
+    private static final BigDecimal CARD_PRICE = new BigDecimal("600.00");
+
     private final FakeOrderMapper orderMapper = new FakeOrderMapper();
     private final FakeBookingMapper bookingMapper = new FakeBookingMapper();
     private final FakeSysUserMapper userMapper = new FakeSysUserMapper();
     private final FakePaymentGateway gateway = new FakePaymentGateway();
     private final InviteTokenService inviteTokenService = new InviteTokenService(bookingMapper.asMapper());
+
+    /** 月卡的两张表与配置，供月卡处理器使用 */
+    private final FakeMonthlyCardMapper cardMapper = new FakeMonthlyCardMapper();
+    private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
+    private final PromotionProperties promotionProperties = new PromotionProperties();
 
     private PaymentService service;
 
@@ -65,7 +83,9 @@ class PaymentServiceTests {
     void setUp() {
         service = new PaymentService(gateway,
                 List.of(new OrderPaymentTargetHandler(orderMapper.asMapper()),
-                        new BookingPaymentTargetHandler(bookingMapper.asMapper(), inviteTokenService)),
+                        new BookingPaymentTargetHandler(bookingMapper.asMapper(), inviteTokenService),
+                        new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
+                                cardMapper.asMapper(), promotionProperties)),
                 orderMapper.asMapper(), userMapper.asMapper());
     }
 
@@ -258,6 +278,88 @@ class PaymentServiceTests {
         boolean handled = service.handleWxpayNotify(new PaymentNotifyRequest());
 
         assertFalse(handled, "钱收了但单据状态不对，属于「钱与单不一致」，必须让人看见");
+    }
+
+    // ==================================================================
+    // 月卡：记账口径与发卡
+    // ==================================================================
+
+    @Test
+    @DisplayName("月卡：卡费记进 card_paid 而非 order_paid，并同时发一张卡")
+    void monthCard_recordsAsCardPaidAndIssuesCard() {
+        MonthlyCardOrder order = seedPendingCardOrder();
+        seedUser(USER_ID, BigDecimal.ZERO);
+        gateway.withNotifyResult(notify(order.getOrderNo(), CARD_PRICE));
+
+        boolean handled = service.handleWxpayNotify(new PaymentNotifyRequest());
+
+        assertTrue(handled, "月卡回调应当处理成功");
+
+        SysUser user = userMapper.get(USER_ID);
+        assertEquals(0, CARD_PRICE.compareTo(user.getCardPaid()), "卡费记进 card_paid");
+        assertEquals(0, BigDecimal.ZERO.compareTo(user.getOrderPaid()),
+                "关键：绝不能记进 order_paid —— 那是房间消费的口径。"
+                        + "写错不会报任何错，只会让两个累计口径悄悄错位");
+        assertEquals(0, CARD_PRICE.compareTo(user.getTotalPaid()), "总额是两类之和");
+
+        assertEquals(1, cardMapper.size(), "付款成功要发一张卡");
+        // 假 Mapper 的自增主键从 1 开始，且本用例只发了一张卡
+        MonthlyCard card = cardMapper.get(1L);
+        assertNotNull(card, "卡要落库");
+        assertEquals(MonthlyCardStatus.ACTIVE.name(), card.getStatus());
+        assertEquals(LocalDate.now(), card.getStartDate(), "生效日 = 支付当日");
+        assertEquals(LocalDate.now().plusDays(29), card.getEndDate(),
+                "含首尾共 30 天：30 → start + 29");
+        assertEquals(order.getOrderNo(), card.getPayOrderNo(), "卡要记下是哪笔购买产生的");
+        assertEquals(0, CARD_PRICE.compareTo(card.getPrice()), "卡价取下单时的快照");
+    }
+
+    @Test
+    @DisplayName("月卡：重复回调只记一次账，也只发一张卡")
+    void monthCard_duplicateNotifyIsIdempotent() {
+        MonthlyCardOrder order = seedPendingCardOrder();
+        seedUser(USER_ID, BigDecimal.ZERO);
+        gateway.withNotifyResult(notify(order.getOrderNo(), CARD_PRICE));
+
+        service.handleWxpayNotify(new PaymentNotifyRequest());
+        service.handleWxpayNotify(new PaymentNotifyRequest());
+
+        assertEquals(0, CARD_PRICE.compareTo(userMapper.get(USER_ID).getCardPaid()),
+                "第二次回调不该再记一次卡费");
+        assertEquals(1, cardMapper.size(),
+                "更不能发第二张卡 —— 用户付一次钱拿到两张，是最典型的静默多发");
+    }
+
+    @Test
+    @DisplayName("前缀：任意两个单号前缀互不为前缀，否则回调会被静默路由错")
+    void targetTypePrefixes_areNotPrefixesOfEachOther() {
+        for (PaymentTargetType outer : PaymentTargetType.values()) {
+            for (PaymentTargetType inner : PaymentTargetType.values()) {
+                if (outer == inner) {
+                    continue;
+                }
+                assertFalse(inner.getOrderNoPrefix().startsWith(outer.getOrderNoPrefix()),
+                        inner + " 的前缀 " + inner.getOrderNoPrefix()
+                                + " 以 " + outer + " 的前缀 " + outer.getOrderNoPrefix()
+                                + " 开头 —— 回调路由用的是 startsWith，"
+                                + "这会让 " + inner + " 的回调被路由到 " + outer);
+            }
+        }
+    }
+
+    /**
+     * 造一笔待支付的月卡购买单。
+     *
+     * @return 已落库的购买单（主键已分配）
+     */
+    private MonthlyCardOrder seedPendingCardOrder() {
+        MonthlyCardOrder order = new MonthlyCardOrder();
+        order.setOrderNo(MonthlyCardNo.generate());
+        order.setUserId(USER_ID);
+        order.setCardType(MonthlyCardType.ALL_DAY.name());
+        order.setPrice(CARD_PRICE);
+        order.setStatus(CardOrderStatus.PENDING_PAYMENT.name());
+        return cardOrderMapper.seed(order);
     }
 
     @Test

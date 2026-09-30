@@ -29,6 +29,20 @@ public interface PaymentTargetHandler {
     PaymentTargetType type();
 
     /**
+     * 本处理器收的钱算哪一类累计消费。
+     *
+     * <p>{@code ORDER}（订单、包场）累加进 {@code sys_user.order_paid}，
+     * {@code CARD}（月卡）累加进 {@code card_paid}。
+     *
+     * <p><b>刻意声明成抽象方法而不是给 {@link PaymentTarget} 加一个可空字段</b>：
+     * 漏实现会编译不过，而漏设字段只会在运行期静默按订单口径累加 ——
+     * 卡费被永久记进 {@code order_paid}，没有任何报错。
+     *
+     * @return 记账品类
+     */
+    PaidCategory paidCategory();
+
+    /**
      * 载入待支付的目标，并校验它属于该用户。
      *
      * <p>供发起支付时使用。校验归属是<b>必须的</b>：少了它，
@@ -73,4 +87,22 @@ public interface PaymentTargetHandler {
      */
     boolean markPaid(PaymentTarget target, PaymentChannel channel,
                      String transactionNo, LocalDateTime paidAt, Long confirmedBy);
+
+    /**
+     * 本处理器是否受理某个支付通道。
+     *
+     * <p>默认全部受理 —— 订单与包场的行为一字不变。需要另作限制的是月卡：
+     * 它没有「上传凭证 + 管理员核销」这条降级路径（人工核销接口是订单专用的），
+     * 用户若对月卡选了 {@link PaymentChannel#QR_UPLOAD}，发起支付会返回一个
+     * 没有任何支付参数的「成功」，卡永远停在待支付 ——
+     * 表现为「买不了卡」，且线上没有任何报错。
+     *
+     * <p>有了这道校验，那种情形会在发起支付时就被拒绝并说清原因。
+     *
+     * @param channel 待校验的支付通道
+     * @return 受理返回 true
+     */
+    default boolean supportsChannel(PaymentChannel channel) {
+        return true;
+    }
 }

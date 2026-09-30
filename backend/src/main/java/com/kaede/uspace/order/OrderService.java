@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.billing.BillingPeriod;
 import com.kaede.uspace.billing.BillingService;
+import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.SegmentBill;
 import com.kaede.uspace.common.result.BizResult;
@@ -16,6 +17,7 @@ import com.kaede.uspace.lock.dto.PasscodeResult;
 import com.kaede.uspace.lock.mapper.LockMapper;
 import com.kaede.uspace.order.dto.AdjustOrderRequest;
 import com.kaede.uspace.order.dto.CreateOrderRequest;
+import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
@@ -23,6 +25,7 @@ import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.order.dto.PaymentProofRequest;
 import com.kaede.uspace.order.entity.Order;
 import com.kaede.uspace.order.mapper.OrderMapper;
+import com.kaede.uspace.promotion.MonthlyCardService;
 import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.ClosureService;
@@ -34,6 +37,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -91,6 +95,7 @@ public class OrderService {
     private final ClosureService closureService;
     private final BookingService bookingService;
     private final BillingService billingService;
+    private final MonthlyCardService monthlyCardService;
     private final LockService lockService;
     private final InviteTokenService inviteTokenService;
     private final OrderProperties orderProperties;
@@ -103,6 +108,7 @@ public class OrderService {
                         ClosureService closureService,
                         BookingService bookingService,
                         BillingService billingService,
+                        MonthlyCardService monthlyCardService,
                         LockService lockService,
                         InviteTokenService inviteTokenService,
                         OrderProperties orderProperties,
@@ -114,6 +120,7 @@ public class OrderService {
         this.closureService = closureService;
         this.bookingService = bookingService;
         this.billingService = billingService;
+        this.monthlyCardService = monthlyCardService;
         this.lockService = lockService;
         this.inviteTokenService = inviteTokenService;
         this.orderProperties = orderProperties;
@@ -558,13 +565,15 @@ public class OrderService {
         BigDecimal dayAmount = amountOf(bill, BillingPeriod.DAY);
         BigDecimal nightAmount = amountOf(bill, BillingPeriod.NIGHT);
 
+        BigDecimal cardFree = bill.getCardFreeAmount();
         if (operatorId == null) {
             orderMapper.updateSettlement(order.getId(), endTime, dayMinutes, dayAmount,
-                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), total, targetStatus);
+                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), cardFree,
+                    total, targetStatus);
         } else {
             orderMapper.updateAdjustment(order.getId(), endTime, dayMinutes, dayAmount,
-                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), total,
-                    targetStatus, operatorId, adjustReason);
+                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), cardFree,
+                    total, targetStatus, operatorId, adjustReason);
         }
 
         // 同步内存对象，供视图构造使用
@@ -573,6 +582,7 @@ public class OrderService {
         order.setTotalAmount(total);
         order.setPayableAmount(total);
         order.setDiscountAmount(bill.getDiscountAmount());
+        order.setCardFreeAmount(cardFree);
         if (free) {
             order.setPaidAt(endTime);
         }
@@ -621,6 +631,38 @@ public class OrderService {
         IPage<Order> page = orderMapper.selectPageByUser(
                 new Page<>(pageNum, pageSize), userId, trimToNull(status));
         return BizResult.ok(PageResult.of(page, OrderVo::from));
+    }
+
+    /**
+     * 查询本月的累计消费与优惠资格。
+     *
+     * <p>与结算用的是同一套口径：只算本月<b>已支付</b>订单的实付额、
+     * 不含月卡卡费、按订单开始时间归集。判定则直接调
+     * {@link BillingService#isDiscounted}，不在别处重写一遍门槛比较。
+     *
+     * <p>月份取<b>当前自然月</b>（而不是某一单的月份）—— 这个接口回答的是
+     * 「我现在算什么状态、下一单要花多少钱」，本来就是看当下。
+     * 而结算时的判定仍按各单自己的开始时间，两者用途不同、口径不冲突。
+     *
+     * @param userId 当前登录用户
+     * @return 本月累计额、门槛、是否已享优惠、还差多少
+     */
+    public BizResult<MonthSpentVo> monthSpent(Long userId) {
+        LocalDateTime monthStart = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        BigDecimal spent = orderMapper.selectMonthPaidAmount(
+                userId, monthStart, monthStart.plusMonths(1));
+        BigDecimal actual = spent == null ? BigDecimal.ZERO : spent;
+
+        BigDecimal threshold = billingService.discountThreshold();
+        BigDecimal remaining = threshold.subtract(actual);
+
+        MonthSpentVo vo = new MonthSpentVo();
+        vo.setMonthStart(monthStart.toLocalDate());
+        vo.setMonthSpent(actual);
+        vo.setThreshold(threshold);
+        vo.setDiscounted(billingService.isDiscounted(actual));
+        vo.setRemaining(remaining.compareTo(BigDecimal.ZERO) > 0 ? remaining : BigDecimal.ZERO);
+        return BizResult.ok(vo);
     }
 
     /**
@@ -786,6 +828,7 @@ public class OrderService {
     private BillingResult calculateBill(Order order, LocalDateTime endTime, List<Booking> bookings) {
         List<TimeRange> ranges = billableRanges(order.getStartTime(), endTime, bookings);
         BigDecimal monthSpent = queryMonthSpent(order);
+        CardCoverage coverage = queryCardCoverage(order);
 
         if (ranges.isEmpty()) {
             // 整段被包场覆盖：把计费起止都落在离场时刻，表示「这段没有任何计费」。
@@ -796,7 +839,7 @@ public class OrderService {
 
         List<BillingResult> parts = new ArrayList<>();
         for (TimeRange range : ranges) {
-            parts.add(billingService.calculate(range.from(), range.to(), monthSpent));
+            parts.add(billingService.calculate(range.from(), range.to(), monthSpent, coverage));
         }
         // 起点取【实际计费起点】（第一段的开始），不是订单的开门时刻 ——
         // 包场人提前到店时两者相差几小时，返回开门时刻会让前端展示出
@@ -905,6 +948,24 @@ public class OrderService {
     }
 
     /**
+     * 查询本单适用的月卡覆盖范围。
+     *
+     * <p><b>日期由订单的 {@code startTime} 推出，不是 {@code now}</b> ——
+     * 与 {@link #queryMonthSpent} 同一套口径：用户 23:00 进场时卡还有效，
+     * 这一单就该按有卡算；管理员事后修正时长，也不会让历史订单的免单结论漂移。
+     *
+     * <p>解析放在这里而不是由调用方传入，是为了让「结账预览」与「实际结算」
+     * 不可能各判一套 —— 两者都走 {@link #calculateBill}。
+     *
+     * @param order 订单
+     * @return 覆盖范围；无卡时返回 null
+     */
+    private CardCoverage queryCardCoverage(Order order) {
+        return monthlyCardService.findCoverageAt(
+                order.getUserId(), order.getStartTime().toLocalDate());
+    }
+
+    /**
      * 合并多段的计费结果为一份账单。
      *
      * <p>整单属性（是否优惠、结算前累计额）取第一段的 —— 各段传入的
@@ -924,6 +985,7 @@ public class OrderService {
         merged.setSegments(parts.stream().flatMap(p -> p.getSegments().stream()).toList());
         merged.setTotalAmount(sumOf(parts, BillingResult::getTotalAmount));
         merged.setDiscountAmount(sumOf(parts, BillingResult::getDiscountAmount));
+        merged.setCardFreeAmount(sumOf(parts, BillingResult::getCardFreeAmount));
         merged.setMonthSpentBefore(parts.get(0).getMonthSpentBefore());
         merged.setDiscounted(parts.get(0).isDiscounted());
         return merged;
@@ -949,6 +1011,7 @@ public class OrderService {
         bill.setSegments(List.of());
         bill.setTotalAmount(BigDecimal.ZERO);
         bill.setDiscountAmount(BigDecimal.ZERO);
+        bill.setCardFreeAmount(BigDecimal.ZERO);
         bill.setMonthSpentBefore(monthSpent);
         bill.setDiscounted(false);
         return bill;

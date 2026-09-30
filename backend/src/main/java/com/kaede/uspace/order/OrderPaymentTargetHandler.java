@@ -37,6 +37,11 @@ public class OrderPaymentTargetHandler implements PaymentTargetHandler {
         return PaymentTargetType.ORDER;
     }
 
+    @Override
+    public PaidCategory paidCategory() {
+        return PaidCategory.ORDER;
+    }
+
     /**
      * {@inheritDoc}
      *

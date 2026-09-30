@@ -15,10 +15,11 @@ import java.time.LocalDateTime;
  * <p>一条订单 = 某人一次到店。它同时承担三件事：<b>准入凭证</b>（下发的限时密码）、
  * <b>计费区间</b>（{@code startTime} 到 {@code endTime}）、<b>收款依据</b>（各项金额）。
  *
- * <p><b>⚠️ 三个金额列的口径</b>：{@code dayAmount} / {@code nightAmount} 与
- * {@code totalAmount} 存的都是<b>实收</b>（已按分段封顶、已含优惠），
- * {@code discountAmount} <b>只是说明性字段</b>，已包含在 {@code totalAmount} 里 ——
- * 不可再用「合计 − 优惠」减第二次。这条在建表脚本里也有标注。
+ * <p><b>⚠️ 金额列的口径</b>：{@code dayAmount} / {@code nightAmount} 与
+ * {@code totalAmount} 存的都是<b>实收</b>（已按分段封顶、已含优惠、已扣月卡免除），
+ * {@code discountAmount} 与 {@code cardFreeAmount} <b>都只是说明性字段</b> ——
+ * 前者已包含在 {@code totalAmount} 里，后者已从中扣除，
+ * 两者都不可再用「合计 − 优惠」减第二次。这条在建表脚本里也有标注。
  *
  * <p>{@code payableAmount} 目前恒等于 {@code totalAmount}，是预留的独立列 ——
  * 将来若有优惠券、押金这类不进入计费规则的费用，加在这里而不污染计费结果。
@@ -93,8 +94,21 @@ public class Order extends BaseEntity {
     /** 实收合计 = 日场 + 夜场。各段已分别封顶 */
     private BigDecimal totalAmount;
 
-    /** 本单优惠金额。说明性字段，已包含在 {@link #totalAmount} 中，不可再减第二次 */
+    /** 本单优惠金额（月度累计优惠）。说明性字段，已包含在 {@link #totalAmount} 中，不可再减第二次 */
     private BigDecimal discountAmount;
+
+    /**
+     * 本单因月卡免掉的金额。说明性字段，<b>已从 {@link #totalAmount} 中扣除</b>，
+     * 同样不可再减第二次。
+     *
+     * <p>与 {@link #discountAmount} 是两回事：那是月度累计优惠为本单省下的钱，
+     * 这是月卡覆盖的时段本来要收的钱。两种优惠并行存在、互不重叠 ——
+     * 混在一起记的话，统计里「优惠活动的效果」会虚高，且事后拆不开。
+     *
+     * <p>口径是「<b>不持卡时本单应付的金额</b>」，已含月度优惠价。
+     * 无卡或卡未覆盖任何段时为 0。
+     */
+    private BigDecimal cardFreeAmount;
 
     /** 应付金额。当前等于 {@link #totalAmount}，预留独立列供将来的优惠券、押金等 */
     private BigDecimal payableAmount;

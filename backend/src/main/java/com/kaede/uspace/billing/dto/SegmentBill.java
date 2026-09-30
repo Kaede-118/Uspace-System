@@ -52,9 +52,34 @@ public class SegmentBill {
     /** 封顶前的原始金额 = 档数 × 单价 */
     private BigDecimal rawAmount;
 
-    /** 该段最终金额 = min(原始金额, 该时段该优惠状态下的封顶) */
+    /**
+     * 该段最终金额 = min(原始金额, 该时段该优惠状态下的封顶)。
+     *
+     * <p>被月卡覆盖的段此值为 0，但 {@code units}、{@code unitPrice}、
+     * {@code rawAmount}、{@code capAmount} 仍是照常算出来的值 ——
+     * 它们是账单页解释「这段为什么免费」的依据，全部归零就只剩一个没有来由的 0。
+     */
     private BigDecimal amount;
 
     /** 是否触发了封顶。为 true 时说明原始金额已超过该时段的封顶金额 */
     private boolean capped;
+
+    /** 本段是否被月卡覆盖（免费）。为 true 时 {@link #amount} 为 0 */
+    private boolean freeByCard;
+
+    /**
+     * 本段因月卡而免掉的金额（元）。未被覆盖时为 0。
+     *
+     * <p>口径是「<b>不持卡时本段应付的金额</b>」= min(封顶前金额, 封顶)，
+     * 已经含了月度优惠价 —— 也就是说，一个已享月度优惠的用户拿卡免掉的
+     * 是按优惠价算的钱，不会把两种优惠重复算一遍（两者互不重叠）。
+     *
+     * <p>注意它与 {@link #amount} 的关系：{@code amount + cardFreeAmount}
+     * 等于「不持卡时本段应付的金额」。
+     *
+     * <p>由计费侧逐段给出而不是事后用「原价总额 − 实收」反推 ——
+     * 包场时段会被调用方从计费区间里剪掉、根本不产生分段，
+     * 反推会把包场免掉的钱一并算进月卡的口径里。
+     */
+    private BigDecimal cardFreeAmount;
 }

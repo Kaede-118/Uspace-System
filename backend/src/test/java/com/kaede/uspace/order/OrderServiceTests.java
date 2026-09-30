@@ -18,6 +18,14 @@ import com.kaede.uspace.order.dto.OrderSettleVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.order.dto.PaymentProofRequest;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.promotion.FakeMonthlyCardMapper;
+import com.kaede.uspace.promotion.FakeMonthlyCardOrderMapper;
+import com.kaede.uspace.promotion.MonthlyCardNo;
+import com.kaede.uspace.promotion.MonthlyCardService;
+import com.kaede.uspace.promotion.MonthlyCardStatus;
+import com.kaede.uspace.promotion.MonthlyCardType;
+import com.kaede.uspace.promotion.PromotionProperties;
+import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.ClosureService;
@@ -79,6 +87,13 @@ class OrderServiceTests {
     private final FakeLockService lockService = new FakeLockService();
     private final FakeLockMapper lockMapper = new FakeLockMapper();
     private final CountingBillingService billingService = new CountingBillingService(new BillingProperties());
+
+    /** 月卡的两张表。默认没有任何卡，即绝大多数既有用例的场景 */
+    private final FakeMonthlyCardMapper cardMapper = new FakeMonthlyCardMapper();
+    private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
+    private final MonthlyCardService monthlyCardService = new MonthlyCardService(
+            cardMapper.asMapper(), cardOrderMapper.asMapper(),
+            new PromotionProperties(), new BillingProperties());
 
     private final OrderProperties orderProperties = new OrderProperties();
     private final LockProperties lockProperties = new LockProperties();
@@ -312,7 +327,8 @@ class OrderServiceTests {
                 new BookingService(bookingMapper.asMapper(), new FakeStoreMapper().asMapper(),
                         new ClosureService(closureMapper.asMapper(), new FakeStoreMapper().asMapper()),
                         userMapper.asMapper()),
-                billingService, lockService, new InviteTokenService(bookingMapper.asMapper()),
+                billingService, monthlyCardService, lockService,
+                new InviteTokenService(bookingMapper.asMapper()),
                 orderProperties, lockProperties);
 
         BizResult<OrderOpenVo> result = empty.createOrder(USER_ID, new CreateOrderRequest());
@@ -330,7 +346,8 @@ class OrderServiceTests {
                 new BookingService(bookingMapper.asMapper(), storeMapper.asMapper(),
                         new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
                         userMapper.asMapper()),
-                billingService, lockService, new InviteTokenService(bookingMapper.asMapper()),
+                billingService, monthlyCardService, lockService,
+                new InviteTokenService(bookingMapper.asMapper()),
                 orderProperties, lockProperties);
 
         BizResult<OrderOpenVo> result = noLock.createOrder(USER_ID, new CreateOrderRequest());
@@ -518,6 +535,44 @@ class OrderServiceTests {
                 "0 元单没有可支付的通道，卡在待支付只会让用户看到一个「0 元去支付」的按钮");
         assertNotNull(orderMapper.get(order.getId()).getPaidAt(),
                 "0 元结清也要记支付时刻，对账时要能区分「不用付」与「没记录」");
+    }
+
+    @Test
+    @DisplayName("结算：月卡覆盖的时段免费，账单金额为 0 并直接结清")
+    void settleOrder_freesTimeCoveredByCard() {
+        seedCard(MonthlyCardType.ALL_DAY, LocalDate.now());
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                LocalDateTime.now().minusHours(2), null);
+
+        BizResult<OrderSettleVo> result = service.settleOrder(USER_ID, order.getId());
+
+        assertTrue(result.isSuccess(), "有月卡时结算应当成功");
+        assertEquals(0, BigDecimal.ZERO.compareTo(result.getData().getBill().getTotalAmount()),
+                "全天卡覆盖所有时段 —— 这条走通即说明覆盖范围确实被传进了计费");
+        assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "0 元单没有可支付的通道，直通已支付");
+
+        Order saved = orderMapper.get(order.getId());
+        assertTrue(saved.getCardFreeAmount().compareTo(BigDecimal.ZERO) > 0,
+                "免掉的金额要落库，否则事后说不清「这单为什么是 0 元」");
+        assertEquals(0, BigDecimal.ZERO.compareTo(saved.getDiscountAmount()),
+                "月卡免掉的金额不能混进 discount_amount —— 那是月度优惠的口径，"
+                        + "混进去不会报错，只会让统计里「优惠活动的效果」虚高");
+    }
+
+    @Test
+    @DisplayName("结算：卡的生效日在订单之后时不免费（判定按订单开始日）")
+    void settleOrder_ignoresCardNotYetEffective() {
+        // 卡明天才生效，而这一单是今天开的
+        seedCard(MonthlyCardType.ALL_DAY, LocalDate.now().plusDays(1));
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                LocalDateTime.now().minusHours(2), null);
+
+        BizResult<OrderSettleVo> result = service.settleOrder(USER_ID, order.getId());
+
+        assertTrue(result.getData().getBill().getTotalAmount().compareTo(BigDecimal.ZERO) > 0,
+                "判定用的是订单的开始日期而非「现在」—— 否则历史订单的免单结论"
+                        + "会随当前时间漂移，事后重算还会变");
     }
 
     @Test
@@ -1149,7 +1204,8 @@ class OrderServiceTests {
                 new BookingService(bookingMapper.asMapper(), storeMapper.asMapper(),
                         new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
                         userMapper.asMapper()),
-                billingService, lockService, new InviteTokenService(bookingMapper.asMapper()),
+                billingService, monthlyCardService, lockService,
+                new InviteTokenService(bookingMapper.asMapper()),
                 orderProperties, lockProperties);
     }
 
@@ -1168,6 +1224,24 @@ class OrderServiceTests {
                         new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
                         userMapper.asMapper()),
                 service);
+    }
+
+    /**
+     * 预置一张生效中的月卡。
+     *
+     * @param type  卡种
+     * @param start 生效日期。失效日按配置的 30 天（含首尾）推算
+     */
+    private void seedCard(MonthlyCardType type, LocalDate start) {
+        MonthlyCard card = new MonthlyCard();
+        card.setCardNo(MonthlyCardNo.generate());
+        card.setUserId(USER_ID);
+        card.setCardType(type.name());
+        card.setPrice(new BigDecimal("600"));
+        card.setStartDate(start);
+        card.setEndDate(start.plusDays(29));
+        card.setStatus(MonthlyCardStatus.ACTIVE.name());
+        cardMapper.seed(card);
     }
 
     /**

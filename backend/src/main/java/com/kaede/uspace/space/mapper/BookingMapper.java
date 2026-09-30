@@ -315,4 +315,41 @@ public interface BookingMapper extends BaseMapper<Booking> {
                                             @Param("hostUserId") Long hostUserId,
                                             @Param("from") LocalDateTime from,
                                             @Param("to") LocalDateTime to);
+
+    /**
+     * 查询门店的包场时间表：尚未结束的已付款包场。
+     *
+     * <p><b>{@code end_at > now} 一条条件同时覆盖了「进行中」与「将来」</b>：
+     * 进行中的那场 {@code start_at <= now < end_at}，将来的那场 {@code start_at > now}，
+     * 两者都满足 {@code end_at > now}。不写成
+     * {@code start_at > now OR (start_at <= now AND end_at > now)}，
+     * 是因为那等于把同一个判断写两遍，而这两遍迟早会分岔。
+     * 「这一场是不是进行中」由 {@code BookingScheduleVo} 用同一对边界算，
+     * 不在这里重复。
+     *
+     * <p><b>只查 {@code PAID}</b>：待付款的包场随时可能被取消或改期，
+     * 公示出去等于让顾客白记一个日子。付款那一刻才是「确定要办」。
+     *
+     * <p><b>不查门店</b>：当前是单门店运营，而全项目其余几处查询
+     * （{@code selectCoveringAt}、{@code selectPageForAdmin}）也都没带 store_id。
+     * 要开分店时统一加，不在这一条上单独破例 —— 半套多门店比没有更糟。
+     *
+     * <p>按开始时间<b>升序</b>：时间表是从近到远读的，
+     * 与公告那种「最新在最上面」的倒序正好相反，因为两者一个是日程、一个是历史。
+     *
+     * @param now   当前时刻，由调用方传入（不写 {@code NOW()}，便于测试构造任意时刻）
+     * @param limit 最多返回几条
+     * @return 未结束的已付款包场，按开始时间升序；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_booking
+             WHERE deleted = 0
+               AND status  = 'PAID'
+               AND end_at  > #{now}
+             ORDER BY start_at
+             LIMIT #{limit}
+            """)
+    List<Booking> selectUpcoming(@Param("now") LocalDateTime now,
+                                 @Param("limit") int limit);
 }

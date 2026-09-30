@@ -245,24 +245,26 @@ public interface OrderMapper extends BaseMapper<Order> {
      * @param dayAmount      日场实收
      * @param nightMinutes   夜场时长（分钟）
      * @param nightAmount    夜场实收
-     * @param totalAmount    实收合计
-     * @param discountAmount 本单优惠金额（说明性，已含在合计中）
+     * @param totalAmount    实收合计（已扣月卡免除）
+     * @param discountAmount 月度优惠金额（说明性，已含在合计中）
+     * @param cardFreeAmount 月卡免掉的金额（说明性，已从合计中扣除）
      * @param payableAmount  应付金额
      * @param status         目标状态名
      * @return 受影响行数；0 表示订单不是使用中状态，或记录不存在
      */
     @Update("""
             UPDATE biz_order
-               SET end_time        = #{endTime},
-                   day_minutes     = #{dayMinutes},
-                   day_amount      = #{dayAmount},
-                   night_minutes   = #{nightMinutes},
-                   night_amount    = #{nightAmount},
-                   total_amount    = #{totalAmount},
-                   discount_amount = #{discountAmount},
-                   payable_amount  = #{payableAmount},
-                   status          = #{status},
-                   updated_at      = NOW()
+               SET end_time         = #{endTime},
+                   day_minutes      = #{dayMinutes},
+                   day_amount       = #{dayAmount},
+                   night_minutes    = #{nightMinutes},
+                   night_amount     = #{nightAmount},
+                   total_amount     = #{totalAmount},
+                   discount_amount  = #{discountAmount},
+                   card_free_amount = #{cardFreeAmount},
+                   payable_amount   = #{payableAmount},
+                   status           = #{status},
+                   updated_at       = NOW()
              WHERE id = #{id}
                AND status = 'IN_USE'
                AND deleted = 0
@@ -275,6 +277,7 @@ public interface OrderMapper extends BaseMapper<Order> {
                          @Param("nightAmount") BigDecimal nightAmount,
                          @Param("totalAmount") BigDecimal totalAmount,
                          @Param("discountAmount") BigDecimal discountAmount,
+                         @Param("cardFreeAmount") BigDecimal cardFreeAmount,
                          @Param("payableAmount") BigDecimal payableAmount,
                          @Param("status") String status);
 
@@ -297,8 +300,9 @@ public interface OrderMapper extends BaseMapper<Order> {
      * @param dayAmount      日场实收
      * @param nightMinutes   夜场时长（分钟）
      * @param nightAmount    夜场实收
-     * @param totalAmount    实收合计
-     * @param discountAmount 本单优惠金额
+     * @param totalAmount    实收合计（已扣月卡免除）
+     * @param discountAmount 月度优惠金额
+     * @param cardFreeAmount 月卡免掉的金额
      * @param payableAmount  应付金额
      * @param status         目标状态名
      * @param adjustedBy     调整人（管理员 ID）
@@ -307,20 +311,21 @@ public interface OrderMapper extends BaseMapper<Order> {
      */
     @Update("""
             UPDATE biz_order
-               SET end_time        = #{endTime},
-                   day_minutes     = #{dayMinutes},
-                   day_amount      = #{dayAmount},
-                   night_minutes   = #{nightMinutes},
-                   night_amount    = #{nightAmount},
-                   total_amount    = #{totalAmount},
-                   discount_amount = #{discountAmount},
-                   payable_amount  = #{payableAmount},
-                   status          = #{status},
-                   adjusted        = 1,
-                   adjusted_by     = #{adjustedBy},
-                   adjusted_at     = NOW(),
-                   adjust_reason   = #{adjustReason},
-                   updated_at      = NOW()
+               SET end_time         = #{endTime},
+                   day_minutes      = #{dayMinutes},
+                   day_amount       = #{dayAmount},
+                   night_minutes    = #{nightMinutes},
+                   night_amount     = #{nightAmount},
+                   total_amount     = #{totalAmount},
+                   discount_amount  = #{discountAmount},
+                   card_free_amount = #{cardFreeAmount},
+                   payable_amount   = #{payableAmount},
+                   status           = #{status},
+                   adjusted         = 1,
+                   adjusted_by      = #{adjustedBy},
+                   adjusted_at      = NOW(),
+                   adjust_reason    = #{adjustReason},
+                   updated_at       = NOW()
              WHERE id = #{id}
                AND status IN ('IN_USE', 'PENDING_PAYMENT')
                AND deleted = 0
@@ -333,6 +338,7 @@ public interface OrderMapper extends BaseMapper<Order> {
                          @Param("nightAmount") BigDecimal nightAmount,
                          @Param("totalAmount") BigDecimal totalAmount,
                          @Param("discountAmount") BigDecimal discountAmount,
+                         @Param("cardFreeAmount") BigDecimal cardFreeAmount,
                          @Param("payableAmount") BigDecimal payableAmount,
                          @Param("status") String status,
                          @Param("adjustedBy") Long adjustedBy,

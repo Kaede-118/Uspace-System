@@ -1,5 +1,7 @@
 package com.kaede.uspace.order;
 
+import com.kaede.uspace.promotion.MonthlyCardNo;
+
 import java.util.Arrays;
 
 /**
@@ -26,11 +28,21 @@ public enum PaymentTargetType {
     ORDER("OD"),
 
     /** 包场（{@code biz_booking}）。商户订单号 = {@code booking_no}，前缀 {@code BK} */
-    BOOKING("BK");
+    BOOKING("BK"),
 
-    // 模块 9 的月卡（biz_monthly_card）将在此追加 MONTHLY_CARD ——
-    // 月卡购买是独立的一笔支付，复用同一套支付服务，但不生成 biz_order。
-    // 届时只需加一个枚举值与一个 PaymentTargetHandler 实现，接口路径不变。
+    /**
+     * 月卡购买单（{@code biz_monthly_card_order}）。商户订单号 = {@code order_no}，
+     * 前缀引用自 {@link com.kaede.uspace.promotion.MonthlyCardNo#PREFIX}。
+     *
+     * <p>支付目标是<b>购买单</b>而不是月卡本身：回调按单号反查，要求目标先落库，
+     * 而还没付钱的卡不该出现在月卡表里。付款成功时会同时生成一张卡。
+     *
+     * <p><b>前缀常量为什么定义在 promotion 包</b>：本枚举所在的 order 包要引用
+     * promotion 的 {@code MonthlyCardService} 查月卡覆盖，若前缀反过来定义在这里，
+     * 就成了 {@code promotion → order} 与 {@code order → promotion} 同时成立的
+     * 包级循环。字面量仍然只有一处，只是放在被引用方 —— 别把它挪回来。
+     */
+    MONTHLY_CARD(MonthlyCardNo.PREFIX);
 
     /**
      * 单号前缀。

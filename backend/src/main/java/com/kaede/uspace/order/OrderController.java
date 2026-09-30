@@ -4,6 +4,7 @@ import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.order.dto.CreateOrderRequest;
+import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
@@ -42,6 +43,24 @@ public class OrderController {
 
     public OrderController(OrderService orderService) {
         this.orderService = orderService;
+    }
+
+    /**
+     * 查询本月的累计消费与优惠资格。
+     *
+     * <p>回答的是「我这个月花了多少、还差多少能享优惠价、下一单按哪个价算」——
+     * 门槛是 200 元这种规则用户猜不到，而它直接决定下一单要花多少钱。
+     *
+     * <p>口径与结算一致（只算已支付的、不含月卡卡费），判定也直接复用计费服务，
+     * 不在别处重算一遍。
+     *
+     * @param me 当前登录用户
+     * @return 本月累计额、门槛、是否已享优惠、还差多少
+     */
+    @GetMapping("/me/month-spent")
+    public ResponseEntity<ApiResult<MonthSpentVo>> monthSpent(
+            @AuthenticationPrincipal UserPrincipal me) {
+        return ApiResult.of(orderService.monthSpent(me.id()));
     }
 
     /**

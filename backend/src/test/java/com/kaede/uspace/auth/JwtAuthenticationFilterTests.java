@@ -134,8 +134,13 @@ class JwtAuthenticationFilterTests {
     void doFilter_rejectsTamperedToken() throws Exception {
         Long userId = registerUser(USERNAME);
         String token = currentTokenOf(userId);
-        String tampered = token.substring(0, token.length() - 1)
-                + (token.endsWith("A") ? "B" : "A");
+        // 篡改签名【中段】的字符，不能改最后一个：HMAC-SHA256 签名是 32 字节，
+        // Base64URL 编码后末位字符只有 4 个有效 bit，低 2 位是编码填充 ——
+        // 只改那 2 位时解码结果一模一样，签名照样验得过，
+        // 于是用例变成「有时通过、有时失败」的假通过（此前修过一次，改的仍是末位）
+        int at = token.length() - 5;
+        char replacement = token.charAt(at) == 'A' ? 'B' : 'A';
+        String tampered = token.substring(0, at) + replacement + token.substring(at + 1);
         MockHttpServletRequest request = requestWithToken(tampered);
 
         filter.doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
