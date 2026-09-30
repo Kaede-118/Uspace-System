@@ -1,7 +1,9 @@
 package com.kaede.uspace.promotion;
 
+import com.kaede.uspace.billing.BillingPeriod;
 import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.billing.CardCoverage;
+import com.kaede.uspace.billing.CardScope;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
@@ -17,6 +19,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -204,10 +207,31 @@ class MonthlyCardServiceTests {
         assertNull(service.findCoverageAt(USER_ID, TODAY), "没买卡的人应当是 null");
 
         cardMapper.seed(activeCard(USER_ID, MonthlyCardType.ALL_DAY, TODAY, TODAY.plusDays(29)));
-        assertEquals(CardCoverage.ALL, service.findCoverageAt(USER_ID, TODAY));
+        assertEquals(CardScope.ALL, service.findCoverageAt(USER_ID, TODAY).getScope());
 
         cardMapper.seed(activeCard(OTHER_USER_ID, MonthlyCardType.NIGHT, TODAY, TODAY.plusDays(29)));
-        assertEquals(CardCoverage.NIGHT, service.findCoverageAt(OTHER_USER_ID, TODAY));
+        assertEquals(CardScope.NIGHT, service.findCoverageAt(OTHER_USER_ID, TODAY).getScope());
+    }
+
+    @Test
+    @DisplayName("覆盖判定：带回的是卡的完整有效期，不是一个日期")
+    void findCoverageAt_carriesWholeValidity() {
+        // 计费侧要靠这两个端点切段，跨过零点的订单才能被切成
+        // 「卡内免费」与「卡外收费」两段。只给「有没有卡」的话，
+        // 卡最后一天 23:00 进店、次日 01:00 离场会被整单免掉
+        cardMapper.seed(activeCard(USER_ID, MonthlyCardType.ALL_DAY, TODAY, TODAY.plusDays(29)));
+
+        CardCoverage coverage = service.findCoverageAt(USER_ID, TODAY);
+
+        assertEquals(TODAY, coverage.getStartDate(), "生效日");
+        assertEquals(TODAY.plusDays(29), coverage.getEndDate(), "失效日");
+        assertEquals(TODAY.atStartOfDay(), coverage.getValidFrom(), "生效时刻是生效日零点");
+        assertEquals(TODAY.plusDays(30).atStartOfDay(), coverage.getValidUntil(),
+                "失效时刻是失效日次日零点 —— 半开区间的上界，失效日整天仍然算数");
+        assertTrue(coverage.covers(BillingPeriod.DAY, TODAY.atStartOfDay().plusHours(23)),
+                "失效日当天深夜仍在覆盖范围内");
+        assertFalse(coverage.covers(BillingPeriod.DAY, TODAY.plusDays(30).atStartOfDay()),
+                "到了次日零点就不再覆盖");
     }
 
     @Test

@@ -54,7 +54,8 @@ public class SecurityConfig {
     /**
      * 允许匿名访问的路径。
      *
-     * <p>七个：注册、登录、门店营业状态、机台陈列与类型列表，以及两个支付回调。
+     * <p>注册、登录、门店营业状态、公告、包场时间表、机台陈列与类型列表、
+     * 用户上传的图片，以及两个支付回调。
      * 其余接口一律要求已认证 ——
      * 这是「默认拒绝」的写法，新增接口时忘了配权限的后果是「访问不了」，
      * 而不是「所有人都能访问」。后者的代价大得多。
@@ -81,9 +82,14 @@ public class SecurityConfig {
      * <b>签名验证</b>承担：回调报文里带着平台私钥签出的签名，验签不过一律拒绝处理。
      * 也就是说，匿名可达的是这个<b>端点</b>，而不是「谁都能伪造一笔支付成功」。
      *
-     * <p>注意 {@code requestMatchers(String...)} 是<b>精确匹配</b>，
-     * 放行这两个路径不会顺带放行 {@code /api/payments} 本身。
-     * 将来新增回调端点（如模块 9 月卡的通道）时，记得同步加到这里。
+     * <p><b>关于这里的匹配规则，有一个容易被人误解的地方</b>：
+     * 写完 {@code /api/payments/notify/wxpay} 并不会顺带放行 {@code /api/payments} ——
+     * 一个<b>字面路径只匹配它自己</b>，没有前缀语义。
+     * 但这<b>不等于</b>「{@code String...} 这个重载不支持通配符」：
+     * 它走的是 Ant 风格匹配，{@code *} 与 {@code **} 都能用（下面
+     * {@code /uploads/**} 那条就依赖它）。两件事不矛盾，别因为前半句而不敢写通配符。
+     *
+     * <p>将来新增回调端点（如模块 9 月卡的通道）时，记得同步加到这里。
      */
     private static final String[] PUBLIC_PATHS = {
             "/api/user/register",
@@ -93,6 +99,12 @@ public class SecurityConfig {
             "/api/store/bookings",
             "/api/devices",
             "/api/devices/types",
+            // 用户上传的头像与背景图。图是 <img src> 加载的，
+            // 浏览器不会为图片请求带 Authorization 头 —— 不放行的话，
+            // 页面上所有头像与背景图都会裂，而后端日志里一行都看不到。
+            // 这一条必须与 WebMvcConfig 里注册的资源处理器成对出现：
+            // 少了这边是 401，少了那边是 404，症状不同但都是「全裂」。
+            "/uploads/**",
             "/api/payments/notify/wxpay",
             "/api/payments/notify/alipay",
     };

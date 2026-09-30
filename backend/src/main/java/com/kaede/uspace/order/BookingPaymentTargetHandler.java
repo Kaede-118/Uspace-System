@@ -3,14 +3,18 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.space.BookingParticipantRole;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.entity.Booking;
+import com.kaede.uspace.space.entity.BookingParticipant;
 import com.kaede.uspace.space.mapper.BookingMapper;
+import com.kaede.uspace.space.mapper.BookingParticipantMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 
 /**
  * 包场的支付目标处理器。
@@ -41,11 +45,14 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
 
     private final BookingMapper bookingMapper;
     private final InviteTokenService inviteTokenService;
+    private final BookingParticipantMapper participantMapper;
 
     public BookingPaymentTargetHandler(BookingMapper bookingMapper,
-                                       InviteTokenService inviteTokenService) {
+                                       InviteTokenService inviteTokenService,
+                                       BookingParticipantMapper participantMapper) {
         this.bookingMapper = bookingMapper;
         this.inviteTokenService = inviteTokenService;
+        this.participantMapper = participantMapper;
     }
 
     @Override
@@ -88,6 +95,11 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
      * 重新生成令牌重试。重试的是整个 UPDATE 而不只是写令牌 ——
      * 因为状态守卫（{@code AND status = 'PENDING_PAYMENT'}）与令牌写入
      * 在同一条 SQL 里，分成两步就失去了原子性。
+     *
+     * <p>付款成功之后还要多写一行：<b>把包场人记进参与者表</b>（{@code HOST} 行）。
+     * 参与者表是「谁在这场包场里」的权威来源，被邀请者的准入判定要从它出发；
+     * 包场人虽然另有 {@code host_user_id} 可认，但让他在表里也占一行，
+     * 名单与「我参与的」列表才能把发起人一并列出来。
      */
     @Override
     public boolean markPaid(PaymentTarget target, PaymentChannel channel,
@@ -102,6 +114,9 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
                             target.getOutTradeNo());
                     return false;
                 }
+                // 放在 affected > 0 之后：重复回调在上一行就已经 return 了，
+                // 走不到这里，所以不必额外判断「是不是第一次付成功」
+                ensureHostParticipant(target.getId(), target.getUserId(), paidAt);
                 log.info("[支付] 包场付款成功 bookingNo={} 通道={} 交易号={} 金额={}（已生成邀请令牌）",
                         target.getOutTradeNo(), channel, transactionNo, target.getAmount());
                 return true;
@@ -113,6 +128,42 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
         // 抛异常让回调事务回滚、平台继续重推 —— 这是「钱收了但记录不了」，必须让人看见
         throw new IllegalStateException(
                 "邀请令牌连续 " + MAX_TOKEN_ATTEMPTS + " 次冲突，包场付款未能落库：" + target.getOutTradeNo());
+    }
+
+    /**
+     * 把包场人写进参与者表（{@code HOST} 行）。
+     *
+     * <p>时机是付款成功的那一刻，与「转已付款 + 生成邀请令牌」同一个事务 ——
+     * 那是包场从「安排」变成「事实」的唯一时刻。所以待付款的包场没有这一行，
+     * 「我创建的包场」列表也因此仍按 {@code biz_booking.host_user_id} 查。
+     *
+     * <p><b>本方法自己吞掉唯一键冲突，绝不让它冒泡。</b>外层那个
+     * {@code catch (DuplicateKeyException)} 是给「邀请令牌撞唯一索引 → 换一个重试」
+     * 用的：异常一旦冒到那里，整条 UPDATE 会重试一遍，而那时状态已经不是
+     * {@code PENDING_PAYMENT} 了 —— {@code affected} 为 0，整笔付款被当作
+     * 「已处理」返回，<b>而 HOST 行永远没插上，且不报任何错</b>。
+     * 撞键只可能来自重复回调（第一次已经插过），那时什么都不用做。
+     *
+     * @param bookingId  包场 ID
+     * @param hostUserId 包场人用户 ID
+     * @param joinedAt   加入时刻，取付款时刻；为 null 时回落到当前时刻
+     */
+    private void ensureHostParticipant(Long bookingId, Long hostUserId, LocalDateTime joinedAt) {
+        BookingParticipant row = new BookingParticipant();
+        row.setBookingId(bookingId);
+        row.setUserId(hostUserId);
+        row.setRole(BookingParticipantRole.HOST.name());
+        // paidAt 正常一定非空（PaymentService 已兜过底），这里再兜一次是因为
+        // joined_at 是 NOT NULL 列：真传了 null，插入会失败、整个回调事务回滚，
+        // 而平台会一直重推这笔已经收到钱的支付 —— 比记错一个时刻严重得多
+        row.setJoinedAt(joinedAt == null
+                ? LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS)
+                : joinedAt);
+        try {
+            participantMapper.insert(row);
+        } catch (DuplicateKeyException e) {
+            log.info("[支付] 包场人已在参与者表中，跳过 bookingId={} userId={}", bookingId, hostUserId);
+        }
     }
 
     /**

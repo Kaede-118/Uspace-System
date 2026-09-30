@@ -1,7 +1,6 @@
 package com.kaede.uspace.space;
 
 import java.util.Arrays;
-import java.util.Set;
 
 /**
  * 包场状态。
@@ -56,10 +55,19 @@ public enum BookingStatus {
      * 前者虽未付款，但管理员排期时已经把它许出去了，
      * 若此时再排一场重叠的包场，付款后会撞车。
      *
-     * @param name 状态名
-     * @return 占时段返回 true
+     * <p><b>刻意不写成 {@code Set.of(...).contains(name)}</b>：JDK 的不可变集合
+     * 对 {@code null} 查询会抛 {@link NullPointerException}（它们用
+     * {@code requireNonNull} 挡住 null），而本方法的契约是「认不出就返回 false」。
+     * 用 {@code equals} 逐个比则天生安全 —— 状态名来自数据库的 {@code VARCHAR} 列，
+     * 为 null 是完全可能的情形（手工改库、老数据），
+     * 不该让「排一场包场会不会撞车」的校验直接崩掉。
+     *
+     * <p>与 {@code DeviceStatus.isUsable} 是同一套写法，改动时两处一起改。
+     *
+     * @param name 状态名，可为 null
+     * @return 占时段返回 true；null 或认不出的取值返回 false
      */
     public static boolean occupiesSlot(String name) {
-        return Set.of(PENDING_PAYMENT.name(), PAID.name()).contains(name);
+        return PENDING_PAYMENT.name().equals(name) || PAID.name().equals(name);
     }
 }

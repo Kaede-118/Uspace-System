@@ -1,5 +1,6 @@
 package com.kaede.uspace.order;
 
+import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.ConfirmPaymentRequest;
@@ -19,8 +20,13 @@ import com.kaede.uspace.promotion.MonthlyCardType;
 import com.kaede.uspace.promotion.PromotionProperties;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
+import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.BookingStatus;
+import com.kaede.uspace.space.ClosureService;
 import com.kaede.uspace.space.FakeBookingMapper;
+import com.kaede.uspace.space.FakeBookingParticipantMapper;
+import com.kaede.uspace.space.FakeClosureMapper;
+import com.kaede.uspace.space.FakeStoreMapper;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.user.FakeSysUserMapper;
 import com.kaede.uspace.user.entity.SysUser;
@@ -70,7 +76,30 @@ class PaymentServiceTests {
     private final FakeBookingMapper bookingMapper = new FakeBookingMapper();
     private final FakeSysUserMapper userMapper = new FakeSysUserMapper();
     private final FakePaymentGateway gateway = new FakePaymentGateway();
-    private final InviteTokenService inviteTokenService = new InviteTokenService(bookingMapper.asMapper());
+
+    /**
+     * 参与者表。与 {@code bookingMapper} 共享数据 —— 包场付款成功时
+     * {@code BookingPaymentTargetHandler} 会往里写一行 HOST，下面的用例要断言它。
+     */
+    private final FakeBookingParticipantMapper participantMapper =
+            new FakeBookingParticipantMapper(bookingMapper);
+
+    /**
+     * 邀请令牌服务靠它组装参与者名单。
+     *
+     * <p>本测试只用得到 {@code generate()}（处理器付款时生成令牌），
+     * 用不到名单与加入那两条路径 —— 这里的 BookingService 是为了满足构造，
+     * 依赖是真的，不是替身。
+     */
+    private final FakeStoreMapper storeMapper = new FakeStoreMapper();
+    private final ClosureService closureService =
+            new ClosureService(new FakeClosureMapper().asMapper(), storeMapper.asMapper());
+    private final BookingService bookingService = new BookingService(
+            bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
+            userMapper.asMapper(), participantMapper.asMapper());
+
+    private final InviteTokenService inviteTokenService = new InviteTokenService(
+            bookingMapper.asMapper(), bookingService, new WebProperties());
 
     /** 月卡的两张表与配置，供月卡处理器使用 */
     private final FakeMonthlyCardMapper cardMapper = new FakeMonthlyCardMapper();
@@ -83,7 +112,8 @@ class PaymentServiceTests {
     void setUp() {
         service = new PaymentService(gateway,
                 List.of(new OrderPaymentTargetHandler(orderMapper.asMapper()),
-                        new BookingPaymentTargetHandler(bookingMapper.asMapper(), inviteTokenService),
+                        new BookingPaymentTargetHandler(bookingMapper.asMapper(),
+                                inviteTokenService, participantMapper.asMapper()),
                         new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
                                 cardMapper.asMapper(), promotionProperties)),
                 orderMapper.asMapper(), userMapper.asMapper());
@@ -422,6 +452,26 @@ class PaymentServiceTests {
         assertNotNull(saved.getInviteToken(),
                 "付款必须与令牌生成一起完成 —— 少了令牌，包场生效了但没人拿得到邀请链接");
         assertEquals(43, saved.getInviteToken().length(), "令牌是 32 字节随机数的 URL-safe Base64");
+        assertEquals(1, participantMapper.size(),
+                "付款那一刻要把包场人写进参与者表 —— 少了这一行，"
+                        + "「我参与的」列表与邀请页的名单里都不会出现发起人");
+    }
+
+    @Test
+    @DisplayName("回调：重复回调不会给参与者表插第二行")
+    void handleNotify_doesNotDuplicateHostParticipant() {
+        Booking booking = seedPendingBooking(USER_ID);
+        seedUser(USER_ID, BigDecimal.ZERO);
+        PaymentNotifyResult result = notify(booking.getBookingNo(), new BigDecimal("500.00"));
+        result.setChannel(PaymentChannel.WXPAY_JSAPI);
+        gateway.withNotifyResult(result);
+
+        service.handleWxpayNotify(new PaymentNotifyRequest());
+        service.handleWxpayNotify(new PaymentNotifyRequest()); // 平台重推同一笔
+
+        assertEquals(1, participantMapper.size(),
+                "回调会重推，参与者行不能跟着多插一行 —— 第一道防线是"
+                        + "「状态没被本次回调改动就直接返回」，第二道是唯一键");
     }
 
     @Test

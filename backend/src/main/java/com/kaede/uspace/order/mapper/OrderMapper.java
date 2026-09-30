@@ -50,9 +50,14 @@ public interface OrderMapper extends BaseMapper<Order> {
     /**
      * 查询某人当前进行中的订单（{@code IN_USE}）。
      *
-     * <p><b>这个方法挡的是「连点两下开门」</b>：点一次开门就会创建订单并开始计费，
-     * 少了这道校验，手指抖一下就会产生两个密码、两条并行计费的订单，
-     * 用户要付两份钱。同时它也供用户端首页判断「当前有没有在玩」。
+     * <p><b>只给 {@code GET /api/orders/current} 用</b> —— 用户端首页靠它判断
+     * 「当前有没有在玩」，进而决定按钮是「开门」还是「查看密码」。
+     * 正因为这个用途，它<b>只认 {@code IN_USE}</b>：把已结算的 {@code PENDING_PAYMENT}
+     * 也塞进来的话，用户会看到一个「查看密码」，而那时密码早随结算撤销了。
+     *
+     * <p><b>下单前的防连点不再用它，改用 {@link #selectUnsettledByUser}</b> ——
+     * 那个要连欠费的订单一起拦。两个方法不要合并：
+     * 合并后无论迁就哪一边，另一边都是错的，而且错得不报任何错。
      *
      * <p>理论上一个用户同时只该有一条 {@code IN_USE} 订单（下单时已挡住），
      * 这里仍取 {@code ORDER BY id DESC LIMIT 1} 兜底 —— 万一历史数据里有两条，
@@ -71,6 +76,41 @@ public interface OrderMapper extends BaseMapper<Order> {
              LIMIT 1
             """)
     Order selectActiveByUser(@Param("userId") Long userId);
+
+    /**
+     * 查询某人最近一条「尚未结清」的订单（{@code IN_USE} 或 {@code PENDING_PAYMENT}）。
+     *
+     * <p><b>这个方法挡的是两件事</b>，它们的共同点是「上一单还没了结，就别开新单」：
+     * <ol>
+     *   <li><b>连点两下开门</b> —— 手指抖一下就会产生两个密码、两条并行计费的订单，
+     *       用户要付两份钱（这是 {@link #selectActiveByUser} 原先挡的那件）</li>
+     *   <li><b>欠费再进场</b> —— 结算了但不付款的账号可以再开一单，欠着费接着玩。
+     *       早先只查 {@code IN_USE}，这条路是通的</li>
+     * </ol>
+     * 调用方（{@code OrderService#createOrder}）按返回订单的状态分辨是哪种情形，
+     * 给出各自的错误码与提示 —— 一个引导去「结束使用」，一个引导去「去支付」。
+     *
+     * <p><b>只认这两种状态</b>：{@code PAID} 是已经了结的，不拦；
+     * 库表注释里那两个保留值（{@code CREATED} / {@code CANCELLED}）当前流程不产生，
+     * 真出现了也不该拦着用户不让玩。
+     *
+     * <p>取 {@code ORDER BY id DESC LIMIT 1} 而不是要求至多一条：
+     * 历史上可能同时存在一笔使用中与一笔待支付的（正是本次修复前的漏洞造成的），
+     * 返回最新的那条即可，抛异常反而会让用户彻底下不了单。
+     *
+     * @param userId 用户 ID
+     * @return 最近一条未结清的订单；都没有则返回 null
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND user_id = #{userId}
+               AND status IN ('IN_USE', 'PENDING_PAYMENT')
+             ORDER BY id DESC
+             LIMIT 1
+            """)
+    Order selectUnsettledByUser(@Param("userId") Long userId);
 
     /**
      * 查询某门店当前所有进行中的订单（{@code IN_USE}）。
@@ -136,6 +176,64 @@ public interface OrderMapper extends BaseMapper<Order> {
     BigDecimal selectMonthPaidAmount(@Param("userId") Long userId,
                                      @Param("from") LocalDateTime from,
                                      @Param("to") LocalDateTime to);
+
+    /**
+     * 统计某人的累计在店时长（分钟），含全部历史。
+     *
+     * <p>与 {@link #selectMonthPaidAmount} 并列的另一半口径：那个答「花了多少钱」，
+     * 本方法答「玩了多久」。「我的」页把两个数字并排显示。
+     *
+     * <p><b>只算 {@code PAID}</b>，与消费口径一致。把 {@code IN_USE} 那一单算进去的话，
+     * 数字每次刷新都会往上跳，而且它还没定局（用户随时可能结束使用）。
+     *
+     * <p><b>用 {@code stay_minutes} 而不是 {@code day_minutes + night_minutes}</b>：
+     * 后两者是计费时长，包场时段被剪掉了、宽限的 5 分钟也不计入 ——
+     * 包场用户会看到「累计时长 0 分钟」。两个口径的差别见
+     * {@link Order#getStayMinutes()}。
+     *
+     * <p>COALESCE 让没有任何记录时返回 0 而不是 null，前者可以直接参与算术。
+     *
+     * @param userId 用户 ID
+     * @return 累计在店分钟数；无记录时返回 0
+     */
+    @Select("""
+            SELECT COALESCE(SUM(stay_minutes), 0)
+              FROM biz_order
+             WHERE deleted = 0
+               AND user_id = #{userId}
+               AND status  = 'PAID'
+            """)
+    Long selectTotalStayMinutes(@Param("userId") Long userId);
+
+    /**
+     * 统计某人某月的在店时长（分钟）。
+     *
+     * <p><b>归月字段与 {@link #selectMonthPaidAmount} 逐字一致</b>（同样是
+     * {@code start_time} 的<b>半开</b>区间 {@code [from, to)}）——
+     * 两个数字在「我的」页并排显示，归月口径一旦有出入，跨月那一刻就会出现
+     * 「消费算上月、时长算本月」的错位，而且不报任何错。
+     * 调用方传「月初」与「下月初」，与那个方法共用同一处区间计算。
+     *
+     * <p>按 {@code start_time} 而不是 {@code end_time} 归月：跨零点结算的夜单
+     * 不该跳到下个月，这与月度优惠的归集口径也是同一条。
+     *
+     * @param userId 用户 ID
+     * @param from   区间起点（含），通常是当月 1 日 00:00
+     * @param to     区间终点（不含），通常是次月 1 日 00:00
+     * @return 该月累计在店分钟数；无记录时返回 0
+     */
+    @Select("""
+            SELECT COALESCE(SUM(stay_minutes), 0)
+              FROM biz_order
+             WHERE deleted = 0
+               AND user_id    = #{userId}
+               AND status     = 'PAID'
+               AND start_time >= #{from}
+               AND start_time <  #{to}
+            """)
+    Long selectMonthStayMinutes(@Param("userId") Long userId,
+                                @Param("from") LocalDateTime from,
+                                @Param("to") LocalDateTime to);
 
     /**
      * 分页查询某人的订单。
@@ -241,6 +339,7 @@ public interface OrderMapper extends BaseMapper<Order> {
      *
      * @param id             订单 ID
      * @param endTime        离场时刻
+     * @param stayMinutes    在店时长（分钟），见 {@link Order#getStayMinutes()}
      * @param dayMinutes     日场时长（分钟）
      * @param dayAmount      日场实收
      * @param nightMinutes   夜场时长（分钟）
@@ -255,6 +354,7 @@ public interface OrderMapper extends BaseMapper<Order> {
     @Update("""
             UPDATE biz_order
                SET end_time         = #{endTime},
+                   stay_minutes     = #{stayMinutes},
                    day_minutes      = #{dayMinutes},
                    day_amount       = #{dayAmount},
                    night_minutes    = #{nightMinutes},
@@ -271,6 +371,7 @@ public interface OrderMapper extends BaseMapper<Order> {
             """)
     int updateSettlement(@Param("id") Long id,
                          @Param("endTime") LocalDateTime endTime,
+                         @Param("stayMinutes") Integer stayMinutes,
                          @Param("dayMinutes") Integer dayMinutes,
                          @Param("dayAmount") BigDecimal dayAmount,
                          @Param("nightMinutes") Integer nightMinutes,
@@ -296,6 +397,7 @@ public interface OrderMapper extends BaseMapper<Order> {
      *
      * @param id             订单 ID
      * @param endTime        核实后的离场时刻
+     * @param stayMinutes    在店时长（分钟），按调整后的离场时刻重算
      * @param dayMinutes     日场时长（分钟）
      * @param dayAmount      日场实收
      * @param nightMinutes   夜场时长（分钟）
@@ -312,6 +414,7 @@ public interface OrderMapper extends BaseMapper<Order> {
     @Update("""
             UPDATE biz_order
                SET end_time         = #{endTime},
+                   stay_minutes     = #{stayMinutes},
                    day_minutes      = #{dayMinutes},
                    day_amount       = #{dayAmount},
                    night_minutes    = #{nightMinutes},
@@ -332,6 +435,7 @@ public interface OrderMapper extends BaseMapper<Order> {
             """)
     int updateAdjustment(@Param("id") Long id,
                          @Param("endTime") LocalDateTime endTime,
+                         @Param("stayMinutes") Integer stayMinutes,
                          @Param("dayMinutes") Integer dayMinutes,
                          @Param("dayAmount") BigDecimal dayAmount,
                          @Param("nightMinutes") Integer nightMinutes,

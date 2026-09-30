@@ -5,6 +5,7 @@ import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.billing.BillingService;
 import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.SegmentBill;
+import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.lock.LockProperties;
@@ -12,9 +13,11 @@ import com.kaede.uspace.lock.dto.AddPasscodeRequest;
 import com.kaede.uspace.lock.mapper.FakeLockMapper;
 import com.kaede.uspace.order.dto.AdjustOrderRequest;
 import com.kaede.uspace.order.dto.CreateOrderRequest;
+import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
+import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.order.dto.PaymentProofRequest;
 import com.kaede.uspace.order.entity.Order;
@@ -26,10 +29,12 @@ import com.kaede.uspace.promotion.MonthlyCardStatus;
 import com.kaede.uspace.promotion.MonthlyCardType;
 import com.kaede.uspace.promotion.PromotionProperties;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
+import com.kaede.uspace.space.BookingParticipantRole;
 import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.ClosureService;
 import com.kaede.uspace.space.FakeBookingMapper;
+import com.kaede.uspace.space.FakeBookingParticipantMapper;
 import com.kaede.uspace.space.FakeClosureMapper;
 import com.kaede.uspace.space.FakeStoreMapper;
 import com.kaede.uspace.space.entity.Booking;
@@ -49,6 +54,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -97,6 +103,26 @@ class OrderServiceTests {
 
     private final OrderProperties orderProperties = new OrderProperties();
     private final LockProperties lockProperties = new LockProperties();
+
+    /**
+     * 参与者表。与 {@code bookingMapper} 共享同一份包场数据 ——
+     * 它的「我参与的列表」与「下单时该挂哪一场」在真实 SQL 里都要连 {@code biz_booking}。
+     */
+    private final FakeBookingParticipantMapper participantMapper =
+            new FakeBookingParticipantMapper(bookingMapper);
+
+    /**
+     * 包场服务。<b>无状态</b>（只持有几个 Mapper 引用），整套用例共用一个即可 ——
+     * 背后那套假 Mapper 本就是同一份数据，多 new 几个也看不到不同的东西。
+     */
+    private final BookingService bookingService = new BookingService(
+            bookingMapper.asMapper(), storeMapper.asMapper(),
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
+            userMapper.asMapper(), participantMapper.asMapper());
+
+    /** 邀请令牌服务。同样无状态，供包场付款与准入判定使用 */
+    private final InviteTokenService inviteTokenService =
+            new InviteTokenService(bookingMapper.asMapper(), bookingService, new WebProperties());
 
     /** 被测服务，每个用例前重建 */
     private OrderService service;
@@ -166,6 +192,80 @@ class OrderServiceTests {
         assertTrue(result.isSuccess(), "持有效令牌的被邀请者应当被放行");
         Order saved = orderMapper.get(result.getData().getOrderId());
         assertEquals(booking.getId(), saved.getBookingId(), "被邀请者的订单也要挂上包场 ID");
+    }
+
+    @Test
+    @DisplayName("下单：在参与者表里的被邀请者，不带令牌也放行")
+    void createOrder_allowsParticipantFromTable() {
+        Booking booking = seedActiveBooking(USER_ID + 99, "token-abc");
+        participantMapper.seed(booking.getId(), USER_ID,
+                BookingParticipantRole.PARTICIPANT.name());
+
+        // 刻意不带令牌 —— 落地页加载后已经自动 join 过，下单时不必再带着它
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        assertTrue(result.isSuccess(),
+                "他点过邀请链接、已经在名单里，系统没有理由再要求他带上令牌");
+        Order saved = orderMapper.get(result.getData().getOrderId());
+        assertEquals(booking.getId(), saved.getBookingId(), "订单同样要挂上包场 ID");
+    }
+
+    @Test
+    @DisplayName("下单：比准入窗口更早到店的参与者，订单也要挂上那一场")
+    void createOrder_attachesUpcomingBookingForEarlyParticipant() {
+        // 包场三小时后才开始 —— 此刻还在准入窗口之外，谁都能进店
+        LocalDateTime start = LocalDateTime.now().plusHours(3);
+        Booking later = seedPaidBookingAt(USER_ID + 99, start, start.plusHours(4));
+        participantMapper.seed(later.getId(), USER_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        assertTrue(result.isSuccess(), "包场还没进窗口，他此刻就是个普通顾客，应当放行");
+        Order saved = orderMapper.get(result.getData().getOrderId());
+        assertEquals(later.getId(), saved.getBookingId(),
+                "订单要提前挂上他参与的那一场 —— 否则包场开始时他会被当散客清场，"
+                        + "结算时那个时段还会被重复计费（包场费已经付过一次）");
+    }
+
+    @Test
+    @DisplayName("下单：与包场无关的散客，订单不挂包场 ID")
+    void createOrder_leavesBookingIdNullWhenNotParticipant() {
+        LocalDateTime start = LocalDateTime.now().plusHours(3);
+        seedPaidBookingAt(USER_ID + 99, start, start.plusHours(4));
+
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        assertTrue(result.isSuccess(), "包场还没进窗口，散客照常进店");
+        Order saved = orderMapper.get(result.getData().getOrderId());
+        assertNull(saved.getBookingId(),
+                "他不是那场包场的人，订单不该凭空挂上一个与本次消费无关的包场 ID —— "
+                        + "那会让账单上多出一个说不清的包场出处");
+    }
+
+    @Test
+    @DisplayName("早到店的被邀请者：下单时就挂上包场，包场开始时因此不会被清场")
+    void earlyParticipant_isNotClearedAtBookingStart() {
+        LocalDateTime start = LocalDateTime.now().plusHours(3);
+        Booking later = seedPaidBookingAt(USER_ID + 99, start, start.plusHours(4));
+        participantMapper.seed(later.getId(), USER_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        // ① 包场还没进准入窗口，他先到店 —— 订单在这一步挂上了那一场
+        BizResult<OrderOpenVo> open = service.createOrder(USER_ID, new CreateOrderRequest());
+        Order order = orderMapper.get(open.getData().getOrderId());
+        assertEquals(later.getId(), order.getBookingId(), "前置条件：订单已挂上包场 ID");
+
+        // ② 把时间往前推：他已经玩了一会儿，包场也开始了
+        order.setStartTime(LocalDateTime.now().minusHours(1));
+        later.setStartAt(LocalDateTime.now().minusMinutes(1));
+        later.setEndAt(LocalDateTime.now().plusHours(4));
+
+        int settled = service.settleNonParticipants(later);
+
+        assertEquals(0, settled,
+                "他是这场包场的参与者，不该被自己的包场清出去 —— 而这靠的就是"
+                        + "下单时挂上的那个包场 ID，清场逻辑本身一行未改");
+        assertEquals(OrderStatus.IN_USE.name(), orderMapper.get(order.getId()).getStatus(),
+                "订单应当仍在进行中，密码也不该被撤销");
     }
 
     @Test
@@ -317,6 +417,51 @@ class OrderServiceTests {
     }
 
     @Test
+    @DisplayName("下单：有未支付的订单时拒绝 —— 欠着费不能接着玩")
+    void createOrder_rejectsWhenUnpaidOrderExists() {
+        // 另一个人也欠着费。挡的必须是「自己的」未付单，查漏了 user_id 会误伤所有人
+        seedOrder(OTHER_USER, OrderStatus.PENDING_PAYMENT,
+                LocalDateTime.now().minusHours(3), LocalDateTime.now().minusHours(2));
+        Order unpaid = seedOrder(USER_ID, OrderStatus.PENDING_PAYMENT,
+                LocalDateTime.now().minusHours(2), LocalDateTime.now().minusHours(1));
+
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        assertEquals(ErrorCode.ORDER_UNPAID_EXISTS, result.getError(),
+                "结算了但不付款就再开一单，等于欠着费接着玩 —— 这条原先没有拦");
+        assertEquals(0, lockService.addCalls(), "被拒绝的请求一次门锁云额度都不该花");
+        assertTrue(result.getMessage().contains(unpaid.getOrderNo()),
+                "提示里要带上那笔订单的订单号，用户才知道该去付哪一笔");
+    }
+
+    @Test
+    @DisplayName("下单：未支付的订单在错误码上与「进行中」区分开")
+    void createOrder_unpaidOrderUsesDistinctErrorCode() {
+        seedOrder(USER_ID, OrderStatus.PENDING_PAYMENT,
+                LocalDateTime.now().minusHours(2), LocalDateTime.now().minusHours(1));
+
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        // 两个码对应两个不同的可行动作：40919 去「结束使用」、本码去「去支付」。
+        // 合并成一个码的话，前端只能给一句模糊提示，用户不知道自己该点哪个
+        assertNotEquals(ErrorCode.ORDER_ALREADY_ACTIVE, result.getError(),
+                "人已经走了、密码也撤销了，再提示「去结束使用」会把他引到一个点不动的按钮上");
+        assertEquals(ErrorCode.ORDER_UNPAID_EXISTS, result.getError());
+    }
+
+    @Test
+    @DisplayName("下单：上一笔已结清时不拦，老顾客照常能开新单")
+    void createOrder_allowsWhenPreviousOrderPaid() {
+        seedOrder(USER_ID, OrderStatus.PAID,
+                LocalDateTime.now().minusDays(1), LocalDateTime.now().minusDays(1).plusHours(2));
+
+        BizResult<OrderOpenVo> result = service.createOrder(USER_ID, new CreateOrderRequest());
+
+        assertTrue(result.isSuccess(),
+                "付过的单是已经了结的 —— 把 PAID 也算进「未结清」会让所有老顾客都进不了门");
+    }
+
+    @Test
     @DisplayName("下单：门店不存在时拒绝")
     void createOrder_failsWhenStoreMissing() {
         // 换一个没有门店的假 Mapper
@@ -324,11 +469,9 @@ class OrderServiceTests {
                 new FakeStoreMapper().asMapper(), lockMapper.asMapper(),
                 bookingMapper.asMapper(),
                 new ClosureService(closureMapper.asMapper(), new FakeStoreMapper().asMapper()),
-                new BookingService(bookingMapper.asMapper(), new FakeStoreMapper().asMapper(),
-                        new ClosureService(closureMapper.asMapper(), new FakeStoreMapper().asMapper()),
-                        userMapper.asMapper()),
+                bookingService,
                 billingService, monthlyCardService, lockService,
-                new InviteTokenService(bookingMapper.asMapper()),
+                inviteTokenService,
                 orderProperties, lockProperties);
 
         BizResult<OrderOpenVo> result = empty.createOrder(USER_ID, new CreateOrderRequest());
@@ -343,11 +486,9 @@ class OrderServiceTests {
                 new FakeLockMapper().withoutLock().asMapper(),
                 bookingMapper.asMapper(),
                 new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-                new BookingService(bookingMapper.asMapper(), storeMapper.asMapper(),
-                        new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-                        userMapper.asMapper()),
+                bookingService,
                 billingService, monthlyCardService, lockService,
-                new InviteTokenService(bookingMapper.asMapper()),
+                inviteTokenService,
                 orderProperties, lockProperties);
 
         BizResult<OrderOpenVo> result = noLock.createOrder(USER_ID, new CreateOrderRequest());
@@ -794,6 +935,92 @@ class OrderServiceTests {
                 "上月的订单要按上月的累计额判定优惠，否则历史订单的优惠会随当前月份漂移");
     }
 
+    @Test
+    @DisplayName("在店时长：包场免掉的那几小时照样算在店里待着的时间")
+    void settle_recordsStayMinutesIncludingBookingTime() {
+        // 用人工调整把离场时刻钉死在过去，用例结果才不随运行时刻浮动
+        LocalDateTime day = LocalDateTime.now().minusDays(1).toLocalDate().atTime(10, 0);
+        LocalDateTime bookingStart = day.plusHours(4);
+        LocalDateTime bookingEnd = day.plusHours(8);
+        LocalDateTime leaveAt = day.plusHours(11);
+        Booking booking = seedPaidBookingAt(USER_ID, bookingStart, bookingEnd);
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, day, null);
+        order.setBookingId(booking.getId());
+
+        service.adjustOrder(order.getId(), adjustRequest(leaveAt), 9L);
+
+        Order saved = orderMapper.get(order.getId());
+        assertEquals(660, saved.getStayMinutes(),
+                "10:00 来、21:00 走，在店 11 小时 —— 包场那 4 小时他没离开过店");
+        assertEquals(420, saved.getDayMinutes() + saved.getNightMinutes(),
+                "计费只有 7 小时（10–14 与 18–21）—— 两个口径的差别正是这一列存在的理由，"
+                        + "拿计费时长冒充在店时长，包场用户会看到「在店 0 分钟」");
+    }
+
+    @Test
+    @DisplayName("在店时长：人工调整后按核实到的离场时刻重算")
+    void adjust_recomputesStayMinutesFromVerifiedEndTime() {
+        LocalDateTime start = LocalDateTime.now().minusHours(5).truncatedTo(ChronoUnit.SECONDS);
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, start, null);
+        // 场景就是这一列注释里写的那个：用户忘了点结束，监控核实 2.5 小时后已离场
+        LocalDateTime verified = start.plusMinutes(150);
+
+        service.adjustOrder(order.getId(), adjustRequest(verified), 9L);
+
+        assertEquals(150, orderMapper.get(order.getId()).getStayMinutes(),
+                "按核实后的离场时刻重算 —— 沿用原值的话，改过的订单在「我的」页里还是旧时长");
+    }
+
+    // ==================================================================
+    // 时长统计
+    // ==================================================================
+
+    @Test
+    @DisplayName("统计：只算已支付的订单，在店未结账的那一单不算")
+    void stats_countsOnlyPaidOrders() {
+        seedPaidOrder(USER_ID, BigDecimal.TEN, LocalDateTime.now().minusDays(1))
+                .setStayMinutes(90);
+        // 还在玩的这一单：算进去的话，数字每刷新一次就往上跳一次，而它还没定局
+        seedOrder(USER_ID, OrderStatus.IN_USE, LocalDateTime.now().minusHours(2), null)
+                .setStayMinutes(999);
+
+        BizResult<OrderStatsVo> result = service.stats(USER_ID);
+
+        assertTrue(result.isSuccess(), "统计应当成功");
+        assertEquals(90L, result.getData().getTotalMinutes(), "只认已支付");
+        assertEquals(90L, result.getData().getMonthMinutes(), "本月同理");
+    }
+
+    @Test
+    @DisplayName("统计：累计含全部历史，本月只含本月，归月口径与月累计消费一致")
+    void stats_splitsTotalAndMonthWithSameRangeAsMonthSpent() {
+        LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        // 紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
+        seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.plusMonths(1).minusSeconds(1))
+                .setStayMinutes(20);
+        seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.plusDays(1)).setStayMinutes(120);
+        seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.minusDays(5)).setStayMinutes(300);
+
+        OrderStatsVo stats = service.stats(USER_ID).getData();
+        MonthSpentVo spent = service.monthSpent(USER_ID).getData();
+
+        assertEquals(440L, stats.getTotalMinutes(), "累计是全部历史，不受月份影响");
+        assertEquals(140L, stats.getMonthMinutes(), "上月那单只进累计，不进本月");
+        assertEquals(spent.getMonthStart(), stats.getMonthStart(),
+                "两个数字在「我的」页并排显示，月份起点必须同源 —— "
+                        + "各自算一遍的话，跨月那一刻会出现「消费算上月、时长算本月」的错位");
+    }
+
+    @Test
+    @DisplayName("统计：没有任何订单时返回 0，不返回 null")
+    void stats_returnsZeroWhenNoOrders() {
+        OrderStatsVo stats = service.stats(USER_ID).getData();
+
+        assertEquals(0L, stats.getTotalMinutes(), "0 与 null 在前端是「暂无数据」与「查询失败」的区别");
+        assertEquals(0L, stats.getMonthMinutes());
+        assertNotNull(stats.getMonthStart(), "月份起点照给，前端才知道这个 0 是哪个月的");
+    }
+
     // ==================================================================
     // 结账预览
     // ==================================================================
@@ -974,6 +1201,55 @@ class OrderServiceTests {
         assertTrue(result.isSuccess(), "预览应当成功");
         assertFalse(result.getData().isCappedNow(),
                 "1 小时远未到封顶起点（4 小时 36 分），不该标成已到顶");
+    }
+
+    @Test
+    @DisplayName("预览：正在计费时给出「下一次账单变化」的预告")
+    void previewOrder_reportsNextChangeWhileBilling() {
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                LocalDateTime.now().truncatedTo(ChronoUnit.MINUTES).minusMinutes(2), null);
+
+        OrderPreviewVo vo = service.previewOrder(USER_ID, order.getId()).getData();
+
+        assertNotNull(vo.getNextChangeText(),
+                "用户看着计时器时最想知道的就是这个：现在停，还是再玩一会儿");
+        assertNotNull(vo.getNextChangeInSeconds(),
+                "刚开场 2 分钟，无论落在哪个档位都还有下一步（最近的是第 6 分钟那档）");
+        assertTrue(vo.getNextChangeInSeconds() > 0, "剩余秒数必须是正数");
+        assertTrue(vo.getNextChangeInSeconds() <= Duration.ofHours(12).toSeconds(),
+                "再远也超不过一个完整的时段 —— 日场与夜场各 12 小时");
+    }
+
+    @Test
+    @DisplayName("预览：全天卡覆盖时预告说的是「月卡免费」，而不是跳档")
+    void previewOrder_reportsCardFreeInsteadOfNextTier() {
+        seedCard(MonthlyCardType.ALL_DAY, LocalDate.now());
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                LocalDateTime.now().truncatedTo(ChronoUnit.MINUTES).minusMinutes(2), null);
+
+        OrderPreviewVo vo = service.previewOrder(USER_ID, order.getId()).getData();
+
+        assertEquals("当前时段月卡免费", vo.getNextChangeText(),
+                "被月卡覆盖的段实收恒为 0 —— 这时给一句「还有 4 分钟进入下一档 ¥4.00」"
+                        + "是假消息。本用例同时验证月卡覆盖范围确实被传进了预告");
+        assertNull(vo.getNextChangeInSeconds(), "段内不会再有金额变化，不给倒计时");
+    }
+
+    @Test
+    @DisplayName("预览：此刻落在包场时段里时不给跳档预告")
+    void previewOrder_skipsNextChangeWhileInBooking() {
+        // 计费区间在包场开始那一刻就定格了，而那一刻在过去 ——
+        // 照常算会得出一个只对「包场前那段」成立的时刻，而那段早已结束
+        LocalDateTime bookingStart = LocalDateTime.now().truncatedTo(ChronoUnit.MINUTES).minusHours(1);
+        Booking booking = seedPaidBookingAt(USER_ID, bookingStart, LocalDateTime.now().plusHours(3));
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, bookingStart.minusHours(4), null);
+        order.setBookingId(booking.getId());
+
+        OrderPreviewVo vo = service.previewOrder(USER_ID, order.getId()).getData();
+
+        assertNull(vo.getNextChangeText(), "此刻没有正在计费的段，也就没有「下一档」可言");
+        assertNull(vo.getNextChangeInSeconds(), "秒数一并留空，前端据此不显示这一行");
+        assertTrue(vo.isFreeByBooking(), "这时候该说的是「包场时段不计费」，而不是跳档");
     }
 
     @Test
@@ -1201,29 +1477,22 @@ class OrderServiceTests {
         return new OrderService(orderMapper.asMapper(), storeMapper.asMapper(), lockMapper.asMapper(),
                 bookingMapper.asMapper(),
                 new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-                new BookingService(bookingMapper.asMapper(), storeMapper.asMapper(),
-                        new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-                        userMapper.asMapper()),
+                bookingService,
                 billingService, monthlyCardService, lockService,
-                new InviteTokenService(bookingMapper.asMapper()),
+                inviteTokenService,
                 orderProperties, lockProperties);
     }
 
     /**
      * 构造被测的清场调度器。
      *
-     * <p>各自新建一份 {@code BookingService} 而不是复用 {@code service} 里的那个：
-     * 两者背后是<b>同一个</b> {@link FakeBookingMapper} 实例，
-     * 数据本就是共享的，没必要为了省一个对象去改 {@link #newService} 的签名。
+     * <p>复用字段里那份 {@code BookingService}：它无状态，背后连的也是同一套假 Mapper，
+     * 与 被测的 {@code service} 共享同一份数据。
      *
      * @return 挂在当前假 Mapper 数据上的调度器
      */
     private BookingClearScheduler newScheduler() {
-        return new BookingClearScheduler(
-                new BookingService(bookingMapper.asMapper(), storeMapper.asMapper(),
-                        new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-                        userMapper.asMapper()),
-                service);
+        return new BookingClearScheduler(bookingService, service);
     }
 
     /**
@@ -1272,11 +1541,13 @@ class OrderServiceTests {
      * @param userId    用户 ID
      * @param amount    实付金额
      * @param startTime 计费起点，决定它属于哪个月
+     * @return 订单，供调用方继续补字段（如 {@code stayMinutes}）
      */
-    private void seedPaidOrder(Long userId, BigDecimal amount, LocalDateTime startTime) {
+    private Order seedPaidOrder(Long userId, BigDecimal amount, LocalDateTime startTime) {
         Order order = seedOrder(userId, OrderStatus.PAID, startTime, startTime.plusHours(1));
         order.setPayableAmount(amount);
         order.setTotalAmount(amount);
+        return order;
     }
 
     /**

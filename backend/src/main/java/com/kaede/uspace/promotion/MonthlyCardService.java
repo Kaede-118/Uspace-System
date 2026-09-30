@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.billing.CardCoverage;
+import com.kaede.uspace.billing.CardScope;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
@@ -215,7 +216,7 @@ public class MonthlyCardService {
             vo.setCardType(type.name());
             vo.setLabel(type.getLabel());
             vo.setPrice(properties.getMonthlyCard().priceOf(type));
-            vo.setCoverageLabel(type.getCoverage().getLabel());
+            vo.setCoverageLabel(type.getScope().getLabel());
             vo.setPeriodText(periodTextOf(type));
             vo.setValidDays(properties.getMonthlyCard().getValidDays());
             result.add(vo);
@@ -260,13 +261,19 @@ public class MonthlyCardService {
      *
      * <p>返回 {@code null} 表示无卡或卡不覆盖任何时段，计费侧据此按普通订单计价。
      *
-     * <p><b>日期由调用方指定，且应当是订单的开始日期</b>，不是「现在」——
+     * <p><b>带回来的是这张卡的【完整有效期】，不只是用来查询的那一天</b> ——
+     * 计费侧要把有效期的两个端点当作切分线，跨过零点的订单才能被正确切成
+     * 「卡内免费」与「卡外收费」两段。只给一个日期的话，卡最后一天 23:00 进店、
+     * 次日 01:00 离场会被整单免掉（等于多送一个多小时），卡生效当天凌晨进店的
+     * 又会整单都不免。
+     *
+     * <p><b>用哪一天去查由调用方指定，且应当是订单的开始日期</b>，不是「现在」——
      * 与月累计消费的口径一致：跨零点结算的夜单不会因为跨了一天就换一套判定，
      * 管理员事后修正时长也不会让历史订单的免单结论漂移。
      *
      * @param userId 用户 ID
-     * @param date   判定日期
-     * @return 覆盖范围；无卡时返回 null
+     * @param date   判定日期，决定取哪一张卡
+     * @return 覆盖范围（时段 + 该卡的完整有效期）；无卡时返回 null
      */
     public CardCoverage findCoverageAt(Long userId, LocalDate date) {
         MonthlyCard card = findActiveCard(userId, date);
@@ -275,7 +282,13 @@ public class MonthlyCardService {
             // 宁可少免一次，也不能因为一个脏值让计费抛异常、结不了账
             return null;
         }
-        return MonthlyCardType.valueOf(card.getCardType()).getCoverage();
+        if (card.getStartDate() == null || card.getEndDate() == null) {
+            // 两列都是 NOT NULL，理论上到不了这里。真出现说明表结构被人改过，
+            // 同样按无卡处理 —— 理由同上，且绝不能让计费侧拿到一个空区间
+            return null;
+        }
+        return CardCoverage.of(MonthlyCardType.valueOf(card.getCardType()).getScope(),
+                card.getStartDate(), card.getEndDate());
     }
 
     /**
@@ -351,7 +364,7 @@ public class MonthlyCardService {
      * @return 时段说明
      */
     private String periodTextOf(MonthlyCardType type) {
-        if (type.getCoverage() == CardCoverage.ALL) {
+        if (type.getScope() == CardScope.ALL) {
             return "不限时段";
         }
         return billingProperties.getDayEnd() + " – 次日 " + billingProperties.getDayStart();

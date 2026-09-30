@@ -9,6 +9,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -100,9 +101,12 @@ public class FakeSysUserMapper implements InvocationHandler {
         return switch (method.getName()) {
             case "insert" -> insert((SysUser) args[0]);
             case "selectById" -> selectById((Long) args[0]);
+            case "selectBatchIds" -> selectBatchIds((Collection<?>) args[0]);
             case "selectByUsername" -> selectByUsername((String) args[0]);
             case "selectByQq" -> selectByQq((String) args[0]);
             case "updateProfile" -> updateProfile(args);
+            case "updateAvatar" -> updateAvatar(args);
+            case "updateBanner" -> updateBanner(args);
             case "updatePasswordAndBumpVersion" -> updatePasswordAndBumpVersion(args);
             case "updateStatus" -> updateStatus(args);
             case "updateRole" -> updateRole(args);
@@ -205,6 +209,23 @@ public class FakeSysUserMapper implements InvocationHandler {
     }
 
     /**
+     * 按主键批量查询（MyBatis-Plus 的 {@code selectBatchIds}）。
+     *
+     * <p>包场的参与者名单靠它<b>一次性</b>补齐昵称与头像 —— 逐条查就是 N+1。
+     * 已逻辑删除的用户会被过滤掉：调用方（{@code BookingParticipantVo.of}）
+     * 对「查不到用户」已有处理，名单里那一行仍然在、只是昵称为空。
+     *
+     * @param ids 用户 ID 集合
+     * @return 仍然存在的用户，顺序不保证
+     */
+    private List<SysUser> selectBatchIds(Collection<?> ids) {
+        return ids.stream()
+                .map(id -> rows.get((Long) id))
+                .filter(FakeSysUserMapper::isVisible)
+                .toList();
+    }
+
+    /**
      * 按登录名查询。
      *
      * @param username 登录名
@@ -251,6 +272,41 @@ public class FakeSysUserMapper implements InvocationHandler {
         user.setPhone((String) args[2]);
         user.setQq((String) args[3]);
         user.setPreference((String) args[4]);
+        return 1;
+    }
+
+    /**
+     * 更新头像地址。
+     *
+     * <p><b>与 {@link #updateProfile} 分开实现且只改一列</b>，这一点必须与真实
+     * SQL 保持一致：两者语义不同（那个是全量替换、这个是单列覆盖），
+     * 假实现若图省事复用同一段，就测不出「换头像不会顺手清掉背景图」这条约定 ——
+     * 而那正是把它们拆成两个方法的理由。
+     *
+     * @param args [id, avatar]
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    private int updateAvatar(Object[] args) {
+        SysUser user = selectById((Long) args[0]);
+        if (user == null) {
+            return 0;
+        }
+        user.setAvatar((String) args[1]);
+        return 1;
+    }
+
+    /**
+     * 更新背景图地址。与 {@link #updateAvatar} 严格对称，同样只改一列。
+     *
+     * @param args [id, banner]
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    private int updateBanner(Object[] args) {
+        SysUser user = selectById((Long) args[0]);
+        if (user == null) {
+            return 0;
+        }
+        user.setBanner((String) args[1]);
         return 1;
     }
 

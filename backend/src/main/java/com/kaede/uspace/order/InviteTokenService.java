@@ -1,8 +1,13 @@
 package com.kaede.uspace.order;
 
+import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
-import com.kaede.uspace.space.dto.BookingVo;
+import com.kaede.uspace.space.BookingService;
+import com.kaede.uspace.space.BookingStatus;
+import com.kaede.uspace.space.dto.BookingInviteVo;
+import com.kaede.uspace.space.dto.InviteLinkVo;
+import com.kaede.uspace.space.dto.JoinResultVo;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -14,19 +19,26 @@ import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * 包场邀请令牌的生成与校验（模块 8）。
+ * 包场邀请令牌（模块 8）。
  *
- * <p><b>它是做什么的</b>：包场人付款成功后，系统生成一串随机令牌并落库。
- * 包场人把带令牌的链接分享给朋友，朋友凭链接被认作「被邀请者」，
- * 在包场时段内可以下单、拿到开门密码 —— 而其他人下不了单。
+ * <p><b>它承担邀请这条链路上的三件事</b>，都由同一个令牌驱动：
+ * <ol>
+ *   <li><b>生成</b> —— 包场付款成功时生成，与「转已付款」写在同一条 UPDATE 里</li>
+ *   <li><b>查看</b> —— 被邀请者点开链接，看这是谁包的场、几点的、都有谁在
+ *       （{@link #findByToken}）</li>
+ *   <li><b>加入</b> —— 落地页加载后自动调，把这个人记进参与者表
+ *       （{@link #join}）。加入之后他下单就不必再带令牌了</li>
+ * </ol>
+ * 另有 {@link #getInviteLink}，是<b>包场人</b>取链接用的入口 ——
+ * 令牌在付款时生成后一直躺在库里，在此之前没有任何接口能把它交给包场人。
  *
- * <p><b>准入的落地方式是「不下发密码」而非门锁黑名单</b>：被邀请者与路人的区别，
- * 就是前者拿得到密码、后者拿不到。门锁上不设任何常驻密码。
+ * <p><b>令牌的定位已经变了</b>：它曾经是被邀请者的唯一凭证，现在<b>降级为兜底</b> ——
+ * 常规路径是「点开链接 → 加入参与者表 → 之后一切判定看表」。令牌仍然有用，
+ * 因为落地页那次自动加入可能失败（网络抖动、用户在请求发出前就点了开门），
+ * 那时下单带上令牌仍能进场。
  *
  * <p><b>令牌不单独设过期时间</b>：它的有效性完全由包场时段界定 ——
- * 校验链是「当前时刻落在某个已付款包场区间内」+「令牌与该场的令牌相等」。
- * 时段一过，令牌自动失效，不必再维护一个过期字段（多一个字段就多一处
- * 可能与时段判断不一致的地方）。
+ * 时段一过，那场包场的排他性自然消失，令牌也就没有意义了。
  *
  * <p><b>令牌只在下单请求体里传</b>（见 {@code CreateOrderRequest}），
  * 不进 URL 路径 —— 路径会进 access log、浏览器历史、Referer 头。
@@ -48,10 +60,24 @@ public class InviteTokenService {
     /** 随机源。用 SecureRandom 而非 Random —— 令牌即凭证，可预测的凭证等于没有凭证 */
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
-    private final BookingMapper bookingMapper;
+    /**
+     * 邀请落地页的前端路由前缀。
+     *
+     * <p>后端只拼出这一段路径，前端路由怎么定义是前端的事 ——
+     * 但两边必须一致，所以它是一处约定，前端改路由时这里也要改。
+     */
+    private static final String INVITE_PATH_PREFIX = "/invite/";
 
-    public InviteTokenService(BookingMapper bookingMapper) {
+    private final BookingMapper bookingMapper;
+    private final BookingService bookingService;
+    private final WebProperties webProperties;
+
+    public InviteTokenService(BookingMapper bookingMapper,
+                              BookingService bookingService,
+                              WebProperties webProperties) {
         this.bookingMapper = bookingMapper;
+        this.bookingService = bookingService;
+        this.webProperties = webProperties;
     }
 
     /**
@@ -102,28 +128,139 @@ public class InviteTokenService {
     }
 
     /**
-     * 凭邀请令牌查看包场信息。
+     * 凭邀请令牌查看包场信息与参与者名单。
      *
      * <p>供被邀请者点开分享链接时使用：他需要先知道「这是谁包的场、几点的、
-     * 在哪个店」，才决定要不要去。这是只读入口，不产生任何副作用。
+     * 都有谁在」，才决定要不要去。<b>只读，不产生任何副作用</b> ——
+     * 这一点是刻意的：GET 会被浏览器预取、被刷新、被爬虫重复请求，
+     * 让它顺手把人记进名单，等于「谁点开过链接」由这些无关的动作决定。
+     * 真正的加入是落地页加载后单独发的那次 POST（见 {@link #join}）。
      *
      * <p>查得到就说明该场已付款 —— 令牌是付款成功那一刻才生成的，
      * 未付款的包场令牌为空，不会被命中。
      *
      * @param token 邀请令牌
-     * @return 成功时返回包场视图；令牌无效或为空时返回 {@link ErrorCode#NOT_FOUND}
+     * @return 成功时返回包场视图与名单；令牌无效或为空时返回 {@link ErrorCode#NOT_FOUND}
      */
-    public BizResult<BookingVo> findByToken(String token) {
-        if (token == null || token.isBlank()) {
-            return BizResult.fail(ErrorCode.NOT_FOUND, "邀请链接无效");
-        }
-
-        Booking booking = bookingMapper.selectByInviteToken(token);
+    public BizResult<BookingInviteVo> findByToken(String token) {
+        Booking booking = findBookingByToken(token);
         if (booking == null) {
-            // 刻意不区分「令牌不存在」与「包场已取消」—— 两者对调用方的处置相同（找包场人要新链接），
-            // 分开反而会泄露「这个令牌曾经存在过」
+            // 刻意不区分「令牌不存在」与「包场已取消」—— 两者对调用方的处置相同
+            // （找包场人要新链接），分开反而会泄露「这个令牌曾经存在过」
             return BizResult.fail(ErrorCode.NOT_FOUND, "邀请链接无效或已失效");
         }
-        return BizResult.ok(BookingVo.from(booking));
+        return BizResult.ok(BookingInviteVo.of(booking,
+                bookingService.listParticipants(booking.getId())));
+    }
+
+    /**
+     * 凭邀请令牌加入包场（落地页加载后自动调用）。
+     *
+     * <p>重复调用不是错误，返回的是「你已经进入了」而不是报错 ——
+     * 刷新页面、从聊天记录里再点一次都会走到这里。详见
+     * {@code BookingService#joinByBooking}。
+     *
+     * <p><b>为什么是 POST 而不是让 GET 顺手做了</b>：GET 会被预取与重复请求，
+     * 把它变成写操作，等于让浏览器的自主行为决定谁进了名单；
+     * 而且 HTTP 语义上 GET 本就该是安全的。用户感受是一样的 ——
+     * 落地页加载完就自动发这个请求，点开链接即视为进入。
+     *
+     * @param token  邀请令牌
+     * @param userId 加入者用户 ID
+     * @return 加入结果；令牌无效时返回 {@link ErrorCode#NOT_FOUND}
+     */
+    public BizResult<JoinResultVo> join(String token, Long userId) {
+        Booking booking = findBookingByToken(token);
+        if (booking == null) {
+            return BizResult.fail(ErrorCode.NOT_FOUND, "邀请链接无效或已失效");
+        }
+        return bookingService.joinByBooking(booking, userId);
+    }
+
+    /**
+     * 取某场包场的邀请链接（<b>只有包场人本人</b>）。
+     *
+     * <p>这是包场人把链接分享出去的唯一入口：令牌在付款成功时就生成了，
+     * 但在本方法之前，没有任何接口能把它交给包场人。
+     *
+     * <p><b>不是本人的场次一律返回 404，而不是 403</b> —— 沿用项目既有约定：
+     * 403 等于承认「这场包场存在」，可以靠状态码的差异枚举出别人的包场单号。
+     * 这与 {@code OrderVo}、{@code CARD_NOT_FOUND} 是同一条边界。
+     *
+     * @param bookingId 包场 ID
+     * @param userId    当前登录用户 ID
+     * @return 成功时返回链接信息；不是本人的返回 {@link ErrorCode#BOOKING_NOT_FOUND}，
+     *         尚未付款的返回 {@link ErrorCode#BOOKING_NOT_PAID}
+     */
+    public BizResult<InviteLinkVo> getInviteLink(Long bookingId, Long userId) {
+        Booking booking = bookingMapper.selectById(bookingId);
+        if (booking == null || !booking.getHostUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.BOOKING_NOT_FOUND);
+        }
+        // 状态与令牌都要看：令牌是付款那一条 UPDATE 里写的，理论上「PAID 但没有令牌」
+        // 不会出现，但真出现了（比如历史上手工改过库），这里挡住比发出去一条
+        // 打不开的链接要好 —— 后者用户只会以为是自己手机的问题
+        if (!BookingStatus.PAID.name().equals(booking.getStatus())
+                || booking.getInviteToken() == null) {
+            return BizResult.fail(ErrorCode.BOOKING_NOT_PAID);
+        }
+        return BizResult.ok(toInviteLink(booking));
+    }
+
+    /**
+     * 凭令牌取出包场实体。
+     *
+     * <p>用私有方法而不是 public 的「先查实体再判断」，是为了让下游拿不到
+     * 「查得到但已经取消」的中间状态 —— 本类对外只暴露三种完整的结果。
+     *
+     * @param token 邀请令牌，可为 null
+     * @return 包场实体；令牌为空、空白或查不到时返回 null
+     */
+    private Booking findBookingByToken(String token) {
+        if (token == null || token.isBlank()) {
+            return null;
+        }
+        return bookingMapper.selectByInviteToken(token);
+    }
+
+    /**
+     * 把包场实体翻译成链接视图。
+     *
+     * @param booking 包场实体（调用方已确认已付款且令牌非空）
+     * @return 链接视图
+     */
+    private InviteLinkVo toInviteLink(Booking booking) {
+        String path = INVITE_PATH_PREFIX + booking.getInviteToken();
+
+        InviteLinkVo vo = new InviteLinkVo();
+        vo.setBookingId(booking.getId());
+        vo.setBookingNo(booking.getBookingNo());
+        vo.setInviteToken(booking.getInviteToken());
+        vo.setPath(path);
+        vo.setUrl(joinUrl(webProperties.getBaseUrl(), path));
+        vo.setStartAt(booking.getStartAt());
+        vo.setEndAt(booking.getEndAt());
+        return vo;
+    }
+
+    /**
+     * 把站点地址与路径拼成完整链接。
+     *
+     * <p>配置里多写一个结尾斜杠是很常见的（复制粘贴时带上），
+     * 不处理就会拼出 {@code https://a.com//invite/xxx} —— 多数服务器能容忍，
+     * 但有的会 404，而这类问题只在生产环境才被发现。
+     *
+     * @param baseUrl 站点地址，可为 null 或空
+     * @param path    以斜杠开头的路径
+     * @return 完整链接；{@code baseUrl} 为空时退化为只返回路径
+     */
+    private static String joinUrl(String baseUrl, String path) {
+        if (baseUrl == null || baseUrl.isBlank()) {
+            return path;
+        }
+        String trimmed = baseUrl.endsWith("/")
+                ? baseUrl.substring(0, baseUrl.length() - 1)
+                : baseUrl;
+        return trimmed + path;
     }
 }

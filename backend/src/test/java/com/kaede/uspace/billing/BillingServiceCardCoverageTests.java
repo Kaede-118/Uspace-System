@@ -6,6 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,6 +59,40 @@ class BillingServiceCardCoverageTests {
         return LocalDateTime.of(2026, 9, 16, hour, minute);
     }
 
+    /** 测试基准日期，与 {@link #at} 用的是同一天 */
+    private static final LocalDate DATE = LocalDate.of(2026, 9, 16);
+
+    /**
+     * 一张覆盖整个测试区间的全天卡（9/14 ~ 9/18）。
+     *
+     * <p>有效期取得比测试区间宽 —— 这些用例验的是<b>时段维度</b>，
+     * 日期维度另有一组用例专门守着。范围刚好卡在边界上会让它们
+     * 被有效期切分线意外截断，变成一条看不出所以然的断言失败。
+     *
+     * @return 全天卡覆盖范围
+     */
+    private static CardCoverage allDayCard() {
+        return CardCoverage.of(CardScope.ALL, DATE.minusDays(2), DATE.plusDays(2));
+    }
+
+    /**
+     * 一张覆盖整个测试区间的夜间卡（9/14 ~ 9/18）。
+     *
+     * @return 夜间卡覆盖范围
+     */
+    private static CardCoverage nightCard() {
+        return CardCoverage.of(CardScope.NIGHT, DATE.minusDays(2), DATE.plusDays(2));
+    }
+
+    /**
+     * 构造一张在 {@link #DATE} 当天失效的全天卡。
+     *
+     * @return 卡的有效期是 DATE 前 29 天到 DATE 当天，共 30 天（含首尾）
+     */
+    private static CardCoverage allDayCardEndingToday() {
+        return CardCoverage.of(CardScope.ALL, DATE.minusDays(29), DATE);
+    }
+
     /**
      * 断言实收总额（标度无关比较）。
      *
@@ -102,7 +137,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("全天卡：日夜两段都免费，合计 0 元")
     void allDayCard_freesEverySegment() {
         BillingResult bill = billingService.calculate(
-                at(21, 0), at(23, 30), BELOW_THRESHOLD, CardCoverage.ALL);
+                at(21, 0), at(23, 30), BELOW_THRESHOLD, allDayCard());
 
         assertEquals(2, bill.getSegments().size(), "21:00–23:30 应被切成日场与夜场两段");
         assertAmount("0", bill, "全天卡覆盖所有段");
@@ -113,7 +148,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("全天卡：免费段的档数、单价与封顶前金额照常保留")
     void allDayCard_keepsSegmentDetail() {
         BillingResult bill = billingService.calculate(
-                at(21, 0), at(23, 30), BELOW_THRESHOLD, CardCoverage.ALL);
+                at(21, 0), at(23, 30), BELOW_THRESHOLD, allDayCard());
 
         SegmentBill day = bill.getSegments().get(0);
         assertEquals(BillingPeriod.DAY, day.getPeriod());
@@ -139,7 +174,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("全天卡 + 已享月度优惠：免单额按优惠价计，且不污染 discountAmount")
     void allDayCard_withMonthlyDiscount_doesNotPolluteDiscountAmount() {
         BillingResult bill = billingService.calculate(
-                at(21, 0), at(23, 30), ABOVE_THRESHOLD, CardCoverage.ALL);
+                at(21, 0), at(23, 30), ABOVE_THRESHOLD, allDayCard());
 
         assertTrue(bill.isDiscounted(), "当月累计已过门槛，本单走优惠价");
         assertAmount("0", bill, "全天卡覆盖所有段");
@@ -155,7 +190,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("全天卡：宽限内出场时两段金额本就是 0，免单额也为 0")
     void allDayCard_withinGrace_freeAmountIsZero() {
         BillingResult bill = billingService.calculate(
-                at(12, 0), at(12, 3), BELOW_THRESHOLD, CardCoverage.ALL);
+                at(12, 0), at(12, 3), BELOW_THRESHOLD, allDayCard());
 
         assertAmount("0", bill, "3 分钟落在免费宽限内");
         assertCardFree("0", bill, "本来就不用付钱，月卡没免掉任何东西");
@@ -171,7 +206,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("夜间卡：草案原例 —— 21:00 进场 23:30 离场，日场段照收 8 元、夜场段免费")
     void nightCard_matchesDesignDocExample() {
         BillingResult bill = billingService.calculate(
-                at(21, 0), at(23, 30), BELOW_THRESHOLD, CardCoverage.NIGHT);
+                at(21, 0), at(23, 30), BELOW_THRESHOLD, nightCard());
 
         assertAmount("8", bill, "与 docs/月卡设计草案.md 第四节的例子逐字一致");
         assertCardFree("10.5", bill, "只有夜场段被覆盖");
@@ -184,7 +219,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("夜间卡：整单都在日场时，一个段也不免")
     void nightCard_pureDayOrder_freesNothing() {
         BillingResult bill = billingService.calculate(
-                at(14, 0), at(16, 0), BELOW_THRESHOLD, CardCoverage.NIGHT);
+                at(14, 0), at(16, 0), BELOW_THRESHOLD, nightCard());
 
         assertAmount("16", bill, "14:00–16:00 共 2 小时，4 档 × 4 元");
         assertCardFree("0", bill, "夜间卡对日场没有任何减免");
@@ -195,7 +230,7 @@ class BillingServiceCardCoverageTests {
     @DisplayName("夜间卡 + 已享月度优惠：日场段照常走优惠价，覆盖段按优惠价免")
     void nightCard_withMonthlyDiscount_daySegmentKeepsDiscount() {
         BillingResult bill = billingService.calculate(
-                at(21, 0), at(23, 30), ABOVE_THRESHOLD, CardCoverage.NIGHT);
+                at(21, 0), at(23, 30), ABOVE_THRESHOLD, nightCard());
 
         // 段级叠加（2026-09-29 拍板）：未覆盖的段是正常付费消费，照常享月度优惠价。
         // 若改成「有段被免就整单不打折」，会出现「多玩半小时反而更贵」的价格悬崖 ——
@@ -214,7 +249,7 @@ class BillingServiceCardCoverageTests {
     void freeSegment_cappedFlagStillReflectsRawAmount() {
         // 日场 5 小时 6 分 → 可计费 301 分钟 → 11 档 × 4 元 = 44 元 > 封顶 40 元
         BillingResult bill = billingService.calculate(
-                at(10, 0), at(15, 6), BELOW_THRESHOLD, CardCoverage.ALL);
+                at(10, 0), at(15, 6), BELOW_THRESHOLD, allDayCard());
 
         SegmentBill day = bill.getSegments().get(0);
         assertTrue(day.isCapped(), "原始金额确实超过了封顶，与是否免费无关");
@@ -246,13 +281,85 @@ class BillingServiceCardCoverageTests {
         // 14:00 → 次日 02:00：日场 8 小时 + 夜场 4 小时，跨度够长
         BillingResult bill = billingService.calculate(
                 at(14, 0), LocalDateTime.of(2026, 9, 17, 2, 0), BELOW_THRESHOLD,
-                CardCoverage.NIGHT);
+                nightCard());
 
         for (SegmentBill segment : bill.getSegments()) {
             boolean isNight = segment.getPeriod() == BillingPeriod.NIGHT;
             assertEquals(isNight, segment.isFreeByCard(),
                     segment.getPeriod().getLabel() + "段的免费标记应当与时段一致");
         }
+    }
+
+    // ==================================================================
+    // 日期维度（2026-09-30 加）
+    // ==================================================================
+
+    @Test
+    @DisplayName("卡最后一天跨零点：零点前免费、零点后照常计费")
+    void cardExpiringAtMidnight_onlyFreeBeforeMidnight() {
+        // 改之前这一单是「按订单开始日期整单判定」，DATE 那天还剩 1 小时，
+        // 于是整单都免 —— 等于多送一个多小时。现在按卡的有效区间逐段覆盖
+        BillingResult bill = billingService.calculate(
+                at(23, 0), LocalDateTime.of(2026, 9, 17, 1, 0), BELOW_THRESHOLD,
+                allDayCardEndingToday());
+
+        assertEquals(2, bill.getSegments().size(), "卡的失效时刻是一条切分线，这一单必须切成两段");
+
+        SegmentBill before = bill.getSegments().get(0);
+        assertEquals(LocalDateTime.of(2026, 9, 17, 0, 0), before.getEndTime(),
+                "前一段恰好收到零点");
+        assertTrue(before.isFreeByCard(), "零点之前仍在卡的有效期内");
+        assertEquals(0, BigDecimal.ZERO.compareTo(before.getAmount()), "这一段实收 0");
+
+        SegmentBill after = bill.getSegments().get(1);
+        assertFalse(after.isFreeByCard(), "零点起卡已失效，照常计费");
+        assertEquals(0, new BigDecimal("7").compareTo(after.getAmount()),
+                "夜场 1 小时 = 2 档 × 3.5 元");
+
+        assertAmount("7", bill, "整单只收卡失效之后的那 7 元");
+        assertCardFree("7", bill, "零点前那 1 小时本该收 7 元，被月卡免掉");
+    }
+
+    @Test
+    @DisplayName("卡生效日凌晨进店：生效前那段收费、生效后那段免费")
+    void cardStartingToday_chargesBeforeEffectiveTime() {
+        // 另一头同样要切。只处理失效那一头的话，生效前那段会白玩 ——
+        // 而运营看到的只是「这个用户少收了钱」，没有任何报错
+        CardCoverage card = CardCoverage.of(CardScope.ALL, DATE, DATE.plusDays(29));
+        BillingResult bill = billingService.calculate(
+                LocalDateTime.of(2026, 9, 15, 23, 0),
+                LocalDateTime.of(2026, 9, 16, 1, 0), BELOW_THRESHOLD, card);
+
+        assertEquals(2, bill.getSegments().size(), "卡的生效时刻同样是一条切分线");
+        assertFalse(bill.getSegments().get(0).isFreeByCard(), "卡生效之前那段照常收费");
+        assertTrue(bill.getSegments().get(1).isFreeByCard(), "生效之后那段免费");
+        assertAmount("7", bill, "只收生效前那 1 小时：夜场 2 档 × 3.5 元");
+        assertCardFree("7", bill, "免掉的是生效之后那 1 小时");
+    }
+
+    @Test
+    @DisplayName("无卡时跨零点的订单不被零点切开")
+    void withoutCard_midnightDoesNotSplit() {
+        // 「按日期切段」只在有卡时才做。无卡时切了没有任何意义，
+        // 却会让每段各享一次宽限，把金额悄悄算少 ——
+        // 这正是本次改动最容易带出来的副作用
+        BillingResult bill = billingService.calculate(
+                at(23, 0), LocalDateTime.of(2026, 9, 17, 1, 0), BELOW_THRESHOLD, null);
+
+        assertEquals(1, bill.getSegments().size(), "整单都在夜场，应当只有一段");
+        assertAmount("14", bill, "2 小时 = 4 档 × 3.5 元");
+    }
+
+    @Test
+    @DisplayName("卡覆盖整单时不多切段：段数与无卡时一致")
+    void cardCoveringWholeOrder_doesNotAddSegments() {
+        BillingResult withCard = billingService.calculate(
+                at(21, 0), at(23, 30), BELOW_THRESHOLD, allDayCard());
+        BillingResult withoutCard = billingService.calculate(
+                at(21, 0), at(23, 30), BELOW_THRESHOLD, null);
+
+        assertEquals(withoutCard.getSegments().size(), withCard.getSegments().size(),
+                "卡的有效期边界不在订单区间内，就一段都不该多切");
     }
 
 }

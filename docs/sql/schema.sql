@@ -56,6 +56,15 @@ CREATE TABLE `sys_user` (
   --      这类需要索引的查询。真要用 SQL 筛时用 FIND_IN_SET（不走索引，但本店量级无所谓）
   `preference`    VARCHAR(64)   DEFAULT NULL            COMMENT '游玩偏好，逗号分隔的设备类型 code，可多选可为空。如 PAIPAI,TAISHOU',
 
+  -- 头像与背景图：存【站内相对路径】而不是完整 URL ——
+  --   完整 URL 会把域名写进库，换域名要 UPDATE ... REPLACE(...) 全表刷一遍。
+  --   前端 <img :src="avatar"> 直接加载；为空时前端回落到默认头像 / 纯色背景。
+  -- ⚠️ 这两列【不参与】PUT /api/user/me 的全量替换 —— 那个接口传 null 表示清空，
+  --    混进去会让「只改昵称」的表单顺手把头像清掉，而且不报任何错。
+  --    改它们走独立的上传接口 POST /api/user/me/avatar 与 /me/banner
+  `avatar`        VARCHAR(255)  DEFAULT NULL            COMMENT '头像地址（站内相对路径），如 /uploads/avatar/xiaofeng_12.png。NULL 表示用默认头像',
+  `banner`        VARCHAR(255)  DEFAULT NULL            COMMENT '自定义背景图地址（站内相对路径），约 6:1 横长图，用作个人卡片背景。NULL 表示用纯色兜底',
+
   `role`          VARCHAR(20)   NOT NULL DEFAULT 'USER' COMMENT '角色：USER 普通用户 / ADMIN 管理员',
   `status`        TINYINT       NOT NULL DEFAULT 1      COMMENT '状态：1=正常 0=禁用',
   `token_version` INT           NOT NULL DEFAULT 0      COMMENT 'JWT 版本号：封禁/改密时 +1，使该用户所有已签发的 token 立即失效',
@@ -202,10 +211,12 @@ CREATE TABLE `biz_closure` (
 -- 包场时段内不计费（包场费已预付），时段结束后仍逗留的部分按普通规则计时。
 --
 -- 订单与本表的挂接（模块 8 已细化）：biz_order.booking_id 记下「进店时命中的包场」，
---   结算时把包场时段从计费区间里剪掉。两种情形都要认 ——
+--   结算时把包场时段从计费区间里剪掉。三个来源都要认 ——
 --   ① 被邀请者：下单时正处包场时段，booking_id 指向该场；
 --   ② 包场人提前到店：下单时包场尚未开始、booking_id 为空，
---      结算时按 host_user_id 回查，否则他会被重复计费（既付了包场费又付了计时费）。
+--      结算时按 host_user_id 回查，否则他会被重复计费（既付了包场费又付了计时费）；
+--   ③ 参与者表命中（biz_booking_participant）：比准入窗口更早到店的被邀请者，
+--      下单那一刻包场还没进窗口，订单同样不挂 booking_id —— 这条是后补的缺口。
 -- ============================================================================
 DROP TABLE IF EXISTS `biz_booking`;
 CREATE TABLE `biz_booking` (
@@ -233,6 +244,39 @@ CREATE TABLE `biz_booking` (
   KEY `idx_store_range` (`store_id`, `start_at`, `end_at`),
   KEY `idx_host_user` (`host_user_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '包场';
+
+
+-- ============================================================================
+-- 模块 3：空间管理 —— 包场参与者
+--
+-- 「谁在这场包场里」的权威来源：包场人与被邀请者都记在这张表，靠 role 区分。
+-- 下单准入、包场开始的清场、结算时的包场时段剪切，三处都读它。
+--
+-- 为什么用关联表而不是 biz_booking.participants 逗号串（sys_user.preference 是先例）：
+--   ① 「我参与的包场」正是【按人筛选】，需要索引；而 preference 那条先例的前提
+--      恰恰写在它的列注释里 ——「取值只有几个到十几个，且没有按偏好精确筛选用户的查询」；
+--   ② 去重语义由数据库保证 —— 重复点邀请链接是撞 uk_booking_user 唯一键。
+--      换成逗号串就得靠一句写对的原子 UPDATE，两人同时点链接会静默丢掉一个，
+--      被丢的那个自己也不知道。
+--
+-- HOST 行在包场付款成功的那一刻写入（与邀请令牌同一处、同一事务）——
+-- 那是包场从「安排」变成「事实」的唯一时刻。因此【待付款的包场没有 HOST 行】，
+-- 「我创建的包场」列表仍按 biz_booking.host_user_id 查，不能改读本表。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_booking_participant`;
+CREATE TABLE `biz_booking_participant` (
+  `id`         BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `booking_id` BIGINT      NOT NULL                COMMENT '包场 ID',
+  `user_id`    BIGINT      NOT NULL                COMMENT '参与人用户 ID',
+  `role`       VARCHAR(20) NOT NULL                COMMENT '角色：HOST 包场人（创建者）/ PARTICIPANT 被邀请者。见 BookingParticipantRole',
+  `joined_at`  DATETIME    NOT NULL                COMMENT '加入时刻。HOST 行 = 包场付款时刻；PARTICIPANT 行 = 点邀请链接的时刻',
+  `created_at` DATETIME    NOT NULL                COMMENT '创建时间',
+  `updated_at` DATETIME    NOT NULL                COMMENT '更新时间',
+  `deleted`    TINYINT     NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_booking_user` (`booking_id`, `user_id`),
+  KEY `idx_user_role` (`user_id`, `role`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '包场参与者';
 
 
 -- ============================================================================
@@ -418,6 +462,11 @@ CREATE TABLE `biz_order` (
   -- 计费区间
   `start_time`      DATETIME      DEFAULT NULL            COMMENT '用户点击开门的时刻，计费起点',
   `end_time`        DATETIME      DEFAULT NULL            COMMENT '离场时刻，进行中为 NULL',
+  -- 这两条时长口径不同，不可互相替代：stay_minutes 是「人在店里待了多久」，
+  -- day_minutes + night_minutes 是「按分钟收钱的那部分」。包场时段被剪掉、
+  -- 宽限 5 分钟也不计入，所以包场 2 小时的单计费时长可以是 0 ——
+  -- 拿计费口径当「在店时长」展示，用户会看到「累计时长 0 分钟」。
+  `stay_minutes`    INT           DEFAULT NULL            COMMENT '在店时长（分钟）= end_time − start_time，【不参与计费】，仅展示与聚合用。与 day_minutes + night_minutes 的区别：前者含包场时段、含宽限那 5 分钟',
 
   -- 计费结果（分段存储，供账单分类展示与事后追溯）
   -- ⚠️ 金额列的口径：段金额与合计都是【实收】（已封顶、已含优惠），
@@ -639,6 +688,84 @@ CREATE TABLE `biz_notice` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '公告（消息流）';
 
 
+-- ============================================================================
+-- 商品（不对应论文某一章，与 common 公共层同性质）
+--
+-- 与月卡同构的**两张表**：一张放「卖什么」（资产的定义），一张放「买过什么」（交易）。
+--
+--   POST /api/product-orders  →  本表落一条 PENDING_PAYMENT（order_no 即 out_trade_no）
+--          │
+--     支付回调（同一事务两跳）
+--          ├─ ① 本表 → PAID（带 status 守卫，幂等第一道）
+--          └─ ② 条件 UPDATE 扣减 biz_product.stock（WHERE stock >= 数量）
+--
+-- ⚠️ 库存是「支付成功时才扣」，不是下单时预占。这是已知的取舍：
+--    严格方案是下单预占、超时释放。取「支付时才扣」的风险是两人同时买最后一件
+--    都能下单成功，后付款的那个没货可拿。缓解办法是下单时按
+--    「可售量 = 库存 − 未支付的待支付单数」做一次软检查（不锁库存，
+--    所以仍有竞态窗口）；最后一道防线是上面那个条件 UPDATE ——
+--    受影响行数为 0 就记 error 日志转人工，绝不在回调里抛异常
+--    （那会让支付平台不断重推一笔永远处理不了的通知）。
+--
+-- ⚠️ 超时的待支付单**不再占库存**（软检查按 created_at 过滤），
+--    但**不会自动关闭** —— 用户仍然可以把它付掉。这与月卡购买单刻意不同：
+--    月卡是「一人一卡」，未关闭的旧单会把用户自己卡死，所以必须关；
+--    商品可以买多笔，关掉旧单反而是替用户做了「不买了」的决定。
+--
+-- 四张收款表（biz_order / biz_booking / biz_monthly_card_order / 本表）
+-- 的支付字段口径保持一致，回调代码不区分自己处理的是哪一种。
+--
+-- 商品消费计入 sys_user.order_paid（与房间使用费同类），不计入 card_paid。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_product`;
+CREATE TABLE `biz_product` (
+  `id`          BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `name`        VARCHAR(100)  NOT NULL                COMMENT '商品名称',
+  `cover`       VARCHAR(255)  DEFAULT NULL            COMMENT '封面图地址（站内相对路径），可为空',
+  `description` VARCHAR(500)  DEFAULT NULL            COMMENT '商品描述',
+  `price`       DECIMAL(10,2) NOT NULL                COMMENT '售价（元）',
+  `stock`       INT           NOT NULL DEFAULT 0      COMMENT '当前库存。支付成功时才扣（条件 UPDATE），下单时只做软检查',
+  `enabled`     TINYINT       NOT NULL DEFAULT 1      COMMENT '是否上架：0 下架 1 上架。下架的商品不在用户端列表里，也不能下单，但详情仍可打开',
+  `sort_no`     INT           NOT NULL DEFAULT 0      COMMENT '排序值，越小越靠前',
+  `created_at`  DATETIME      NOT NULL                COMMENT '创建时间',
+  `updated_at`  DATETIME      NOT NULL                COMMENT '更新时间',
+  `deleted`     TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  -- 用户端列表就是「上架的、按 sort_no 排」，这条索引直接服务。
+  -- 排序时 id 兜底：sort_no 由管理员随手填、撞值常见，只按它排会让同值行
+  -- 的先后由存储引擎决定 —— 翻页时表现为「某件商品没出现过」
+  KEY `idx_enabled_sort` (`enabled`, `sort_no`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '实体商品';
+
+DROP TABLE IF EXISTS `biz_product_order`;
+CREATE TABLE `biz_product_order` (
+  `id`             BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `order_no`       VARCHAR(32)   NOT NULL                COMMENT '购买单号，同时是商户订单号 out_trade_no。前缀 PD',
+  `user_id`        BIGINT        NOT NULL                COMMENT '购买人用户 ID',
+  `product_id`     BIGINT        NOT NULL                COMMENT '商品 ID。商品被删除后这里仍指向原 ID，名称靠 product_name 快照还原',
+  `product_name`   VARCHAR(100)  NOT NULL                COMMENT '商品名称快照 —— 商品改名后历史订单仍显示当时的名字',
+  `unit_price`     DECIMAL(10,2) NOT NULL                COMMENT '下单时单价快照（元）。事后调价不影响已售出的单',
+  `quantity`       INT           NOT NULL DEFAULT 1      COMMENT '数量',
+  `amount`         DECIMAL(10,2) NOT NULL                COMMENT '应付金额（元）= unit_price × quantity，下单时算好存下',
+  `status`         VARCHAR(20)   NOT NULL DEFAULT 'PENDING_PAYMENT'
+                   COMMENT '状态：PENDING_PAYMENT 待支付 / PAID 已支付（到店自取，无核销流程）/ CLOSED 已关闭',
+  `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
+  `payment_no`     VARCHAR(64)   DEFAULT NULL            COMMENT '支付平台交易号：微信 transaction_id / 支付宝 trade_no',
+  `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付完成时刻',
+  `created_at`     DATETIME      NOT NULL                COMMENT '创建时间',
+  `updated_at`     DATETIME      NOT NULL                COMMENT '更新时间',
+  `deleted`        TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_order_no` (`order_no`),
+  -- 两个用途：用户端「我的订单」按 user_id 查；后台按 user_id 筛。
+  -- 带 status 是让「只看待支付的」这类筛选用得上索引
+  KEY `idx_user_status` (`user_id`, `status`),
+  -- 软检查要用：按商品统计「未超时的待支付单」有多少笔。
+  -- 没有它，每算一次可售量都是全表扫描
+  KEY `idx_product_status_created` (`product_id`, `status`, `created_at`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '实体商品购买单';
+
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ============================================================================
@@ -652,4 +779,8 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- 公告（biz_notice）不对应论文某一章，与 common 公共层同性质 ——
 -- 它是横跨设备、包场、门店三条线的统一信息出口，独立成包正是为了不被任何一条线绑住。
 -- 详见上面建表处与 backend 的 notice 包说明。
+--
+-- 商品（biz_product + biz_product_order）同理不对应论文某一章 ——
+-- 它是独立于时长计费之外的第二类收入，与月卡同形（自己管目录与购买单，
+-- 收款处理器住在 order 包）。详见上面建表处与 backend 的 product 包说明。
 -- ============================================================================

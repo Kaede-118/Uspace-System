@@ -79,6 +79,23 @@ public class Order extends BaseEntity {
     /** 离场时刻。使用中为 null */
     private LocalDateTime endTime;
 
+    /**
+     * 在店时长（分钟）= {@code endTime − startTime}，向下取整。
+     *
+     * <p><b>它不参与计费</b>，只是「这个人在店里待了多久」这一事实的记录，
+     * 供「我的」页展示与累计时长统计使用（{@code GET /api/orders/me/stats}）。
+     *
+     * <p><b>⚠️ 与 {@link #dayMinutes} + {@link #nightMinutes} 的区别，两者不可互相替代</b>：
+     * 后两者是<b>计费时长</b> —— 包场时段被剪掉了（见 {@link #bookingId}），
+     * 宽限的那 5 分钟也不计入。所以「包场 2 小时、扣掉后计费 0 分钟」的订单，
+     * 用计费口径算出来是「在店 0 分钟」，而人明明待了 2 小时。
+     *
+     * <p>使用中（{@code IN_USE}）时为 null —— 那时没有离场时刻，算不出定值。
+     * 要展示「已经待了多久」得实时算（{@code Duration.between(startTime, now)}），
+     * 但口径要与本字段一致：同样截断到整分钟。
+     */
+    private Integer stayMinutes;
+
     /** 日场时长（分钟） */
     private Integer dayMinutes;
 

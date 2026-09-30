@@ -1,11 +1,13 @@
 package com.kaede.uspace.billing;
 
 import com.kaede.uspace.billing.dto.BillingResult;
+import com.kaede.uspace.billing.dto.NextChange;
 import com.kaede.uspace.billing.dto.SegmentBill;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -49,6 +51,13 @@ import java.util.List;
  * 覆盖范围由调用方以 {@link CardCoverage} 传入。计费侧只认识「哪些段免费」，
  * 不认识「月卡」这个业务名词 —— 于是加卡种、改覆盖范围这类促销形态的变化
  * 不会波及计价规则本身，而日夜场的边界也仍然只有本类一处定义。
+ *
+ * <p>2026-09-30 把月卡的<b>有效日期</b>也纳入覆盖判定（{@link CardCoverage}
+ * 因此从「只有时段维度」的枚举变成带日期的对象）：卡的有效期边界与日夜场边界
+ * 一样，是一条<b>切分线</b> —— 否则跨过零点的订单会整单落在卡内或卡外，
+ * 两头都不对。代价与跨时段切段是同一类：每多切一段就多享一次宽限，
+ * 所以切分只在卡的有效期边界真正落在订单区间内时发生，
+ * 无卡时一段也不多切（见 {@link #splitByPeriod}）。
  *
  * <p><b>本类为纯计算，不访问数据库、不依赖其他模块</b>，因此可直接单元测试。
  * 月度优惠所需的「当月累计实付额」由调用方查好后经参数传入 ——
@@ -128,13 +137,16 @@ public class BillingService {
      *       夜间卡用户的日场段因此仍参与月度优惠判定（那是正常付费消费），
      *       而不是「有卡就整单不打折」</li>
      * </ul>
+     * 月卡的「段」同时也是<b>日期维度</b>上的一段：卡最后一天 23:00 进店、
+     * 次日 01:00 离场时，这一段会被零点切成「卡内」与「卡外」两段，
+     * 前者免费、后者照常计价 —— 而不是按订单开始时刻一刀切成全免或全收。
      * 这样安排还有一个实际好处：账单上「日场段按优惠价收 7 元、夜场段月卡免费」
      * 是算得出来的，而不是把两者混成一个说不清的数字。
      *
      * @param startTime    开始使用时间（用户点击「开门」的时刻）
      * @param endTime      结束使用时间（用户离场或订单结算时刻）
      * @param monthSpent   该用户本月已支付订单的实付额之和（元），null 视同 0
-     * @param cardCoverage 月卡的时段覆盖范围；无卡传 null
+     * @param cardCoverage 月卡的覆盖范围（时段 + 有效日期区间）；无卡传 null
      * @return 含分段明细、总金额与两种优惠金额的计费结果
      * @throws IllegalArgumentException 当时间为空、或结束时间早于开始时间时抛出
      */
@@ -156,7 +168,7 @@ public class BillingService {
         BigDecimal originalTotal = BigDecimal.ZERO;
         BigDecimal cardFreeAmount = BigDecimal.ZERO;
 
-        for (TimeSegment segment : splitByPeriod(startTime, endTime)) {
+        for (TimeSegment segment : splitByPeriod(startTime, endTime, cardCoverage)) {
             SegmentBill bill = billSegment(segment, discounted, cardCoverage);
             segments.add(bill);
             totalAmount = totalAmount.add(bill.getAmount());
@@ -194,7 +206,7 @@ public class BillingService {
                 discounted ? "，已享月度优惠（结算前当月累计 " + result.getMonthSpentBefore()
                         + " 元，本单省 " + result.getDiscountAmount() + " 元）" : "",
                 cardCoverage == null ? ""
-                        : "，月卡覆盖 " + cardCoverage.getLabel() + "（免 " + cardFreeAmount + " 元）");
+                        : "，月卡覆盖 " + cardCoverage.describe() + "（免 " + cardFreeAmount + " 元）");
         return result;
     }
 
@@ -236,19 +248,251 @@ public class BillingService {
         return properties.getMonthlyDiscount().getThreshold();
     }
 
+    // ==================================================================
+    // 跳档预告
+    // ==================================================================
+
     /**
-     * 把一次消费按时段边界切分成若干段。
+     * 预告「下一次账单变化」—— 什么时候变、会变成什么。
      *
-     * <p>切分点是配置的日场起止时刻。例如 21:30 – 23:30 会被切成
-     * 日场 21:30–22:00 与夜场 22:00–23:30 两段。
+     * <p>用户看着计时器时最想知道的就是这个：现在停，还是再玩一会儿。
+     * 首页的进行中卡片与结账预览页共用本方法。
+     *
+     * <p><b>为什么必须后端算</b>：档位边界是 {@code units × 30 + 5 + 1} 分钟，
+     * 其中的 30 与 5 都是配置项。前端算等于把计费规则复制一份 ——
+     * 改配置时前端静默算错，且不报任何错。
+     *
+     * <p><b>四种结果</b>：
+     * <ol>
+     *   <li><b>段内跳档（TIER）</b> —— 下一个档位边界落在当前时段之内。
+     *       文本「进入下一档 ¥20.00」</li>
+     *   <li><b>跨时段（PERIOD）</b> —— 下一个档位边界落在当前时段之外，
+     *       先发生的是时段边界。文本「跨入夜场，按夜场重新计价」。
+     *       <b>这一档不能省</b>：只做 TIER 的话，21:50 的卡片会写
+     *       「还有 40 分钟进入下一档」，而用户实际在 22:00 就跨进夜场重新起了一段 ——
+     *       展示一个错误的时间预期比不展示更糟</li>
+     *   <li><b>月卡到期（CARD）</b> —— 当前段被月卡覆盖，但卡在本段结束前失效。
+     *       文本「月卡即将到期，之后按时长计费」。<b>与上一条同理不能省</b>：
+     *       只报「月卡免费」的话，23:50 的用户会看到一句静态的「免费」，
+     *       然后在零点金额毫无预兆地开始涨</li>
+     *   <li><b>段内不再变化</b> —— 已达封顶、或当前段整段都被月卡覆盖，
+     *       返回说明文字、不给秒数</li>
+     * </ol>
+     *
+     * <p><b>跨时段后不再涨价这件事不等于「不用提示」</b>：跨段那一刻旧段定格、
+     * 新段从 0 分钟起算，新段自身还要再积累到达下一档才涨价。但<b>计价规则变了</b>
+     * （夜场更便宜），这正是用户该知道的。
+     *
+     * @param startTime    计费起点，通常传当前计费段的起点（已剪掉包场）
+     * @param now          计算截止时刻
+     * @param monthSpent   当月累计实付额，用于取正确的单价（优惠价还是原价）
+     * @param cardCoverage 月卡的时段覆盖范围，无卡传 null
+     * @return 预告；参数缺失或 {@code now} 早于 {@code startTime} 时返回 null
+     */
+    public NextChange nextChange(LocalDateTime startTime, LocalDateTime now,
+                                 BigDecimal monthSpent, CardCoverage cardCoverage) {
+        if (startTime == null || now == null) {
+            throw new IllegalArgumentException("跳档预告的计费起点与当前时刻不能为空");
+        }
+        // 时钟回拨、或调用方传错参数时不猜，直接说「没有可预告的」——
+        // 预告是锦上添花的信息，为它抛异常会把结算预览整个拖下水
+        if (now.isBefore(startTime)) {
+            return null;
+        }
+
+        TimeSegment current = currentSegment(startTime, now, cardCoverage);
+        boolean discounted = isDiscounted(monthSpent);
+        BillingPeriod period = current.period();
+        // 下一个时段边界。提前算出来 —— 月卡那一支也要靠它判断卡是不是在本段内到期
+        LocalDateTime periodEnd = nextBoundary(now, period);
+
+        // ① 当前段被月卡覆盖：实收恒为 0，段内不会再有金额变化。
+        //    但若卡在本段结束前失效，那一刻起要开始计费 —— 跨零点的用户
+        //    否则会看到「当前时段月卡免费」，然后金额毫无预兆地从 0 开始涨
+        if (isFreeByCard(period, current.start(), cardCoverage)) {
+            LocalDateTime cardEnd = cardCoverage.getValidUntil();
+            // 进到这一支说明 now 仍在卡内（covers 为 true），所以 cardEnd 必然晚于 now，
+            // 只需判它是否早于时段边界 —— 不早于就说明本段内卡不会失效
+            if (cardEnd.isBefore(periodEnd)) {
+                return NextChange.at(secondsBetween(now, cardEnd), "月卡即将到期，之后按时长计费");
+            }
+            return NextChange.none("当前时段月卡免费");
+        }
+
+        int units = unitsOf(Duration.between(current.start(), now).toMinutes());
+        BigDecimal unitPrice = unitPriceOf(period, discounted);
+        BigDecimal cap = capOf(period, discounted);
+
+        // ② 已达封顶：段内金额不再增长。
+        //    用「原始金额 ≥ 封顶」而不是段上的 capped 标志 —— 那个要到第 11 档
+        //    （5 小时 6 分）才为 true，而金额不再增长从第 10 档（4 小时 36 分）
+        //    就开始了，靠它会漏报。与 OrderService.allSegmentsCapped 同一条口径。
+        //
+        //    此刻不给倒计时：跨段虽然终会到来（新段会重新计费），但它可能在
+        //    十余小时之后，而「已到封顶价」才是用户现在真正需要知道的事。
+        //    真到了跨段那一刻，预览接口会重新算出新段的预告。
+        if (unitPrice.multiply(BigDecimal.valueOf(units)).compareTo(cap) >= 0) {
+            return NextChange.none("当前已到封顶价");
+        }
+
+        // ③ 段内的下一个档位边界。取时长是【向下取整】的（billSegment 同款口径），
+        //    所以边界落在整分钟上，算出来的时刻是精确值而不是估算。
+        LocalDateTime tierAt = current.start().plusMinutes(nextTierMinutes(units));
+
+        if (tierAt.isBefore(periodEnd)) {
+            BigDecimal nextAmount = unitPrice.multiply(BigDecimal.valueOf(units + 1)).min(cap);
+            return NextChange.at(secondsBetween(now, tierAt), "进入下一档 " + money(nextAmount));
+        }
+
+        // ④ 先发生的是时段边界。新时段取 periodOf(边界时刻)，
+        //    而不是「不是日场就是夜场」—— 那样写的话，将来配置里多一个时段就错了
+        BillingPeriod next = periodOf(periodEnd);
+        return NextChange.at(secondsBetween(now, periodEnd),
+                "跨入" + next.getLabel() + "，按" + next.getLabel() + "重新计价");
+    }
+
+    /**
+     * 找出某时刻所处的计费段。
+     *
+     * <p>复用 {@link #splitByPeriod} 而不是另写一套「往回找时段起点」的逻辑 ——
+     * 段的划分只应有一处定义，两处一旦分岔，「下一档还有多久」会与账单上的档数对不上。
+     *
+     * <p><b>coverage 必须一起传下去</b>：卡的有效期边界也是一条切分线。
+     * 漏传的话，卡失效之后的那一段会被当成「从订单起点一路算到现在」，
+     * 于是预告说「已到 ¥17.50」而账单只收 ¥3.50 —— 两边各自看都合理，却对不上。
+     *
+     * @param startTime 计费起点
+     * @param now       当前时刻
+     * @param coverage  月卡的覆盖范围，无卡传 null
+     * @return 当前所处的段（end 即 {@code now}）
+     */
+    private TimeSegment currentSegment(LocalDateTime startTime, LocalDateTime now,
+                                       CardCoverage coverage) {
+        List<TimeSegment> done = splitByPeriod(startTime, now, coverage);
+        BillingPeriod period = periodOf(now);
+
+        if (done.isEmpty()) {
+            // now 恰好等于计费起点：还没有任何一段走完，当前段就是刚起头的这一段
+            return new TimeSegment(period, startTime, now);
+        }
+
+        TimeSegment last = done.get(done.size() - 1);
+        if (last.period() != period) {
+            // now 恰好落在时段边界上（如 22:00:00 整）：上一段在边界处结束，
+            // 属于新时段的只有这一刻。按「0 分钟的新段」算，用户看到的是
+            // 「还有 6 分钟进入下一档」，而不是一段已经结束的旧账
+            return new TimeSegment(period, now, now);
+        }
+        return last;
+    }
+
+    /**
+     * 算某个时长落在第几档。
+     *
+     * <p>档数用整数向上取整除法 {@code (可计费分钟 + 单位 − 1) / 单位}，避免浮点运算。
+     * 可计费分钟为「时长 − 宽限」，非正数时档数直接为 0。
+     *
+     * <p><b>账单与本方法必须调同一个它</b>：两处各写一份的话，卡片上「还有 12 分钟
+     * 进入下一档」会与结账时的档数对不上，而两边看起来都合理。
+     *
+     * @param minutes 时长（分钟）
+     * @return 档数
+     */
+    private int unitsOf(long minutes) {
+        long billableMinutes = minutes - properties.getGraceMinutes();
+        if (billableMinutes <= 0) {
+            return 0;
+        }
+        return (int) ((billableMinutes + properties.getUnitMinutes() - 1)
+                / properties.getUnitMinutes());
+    }
+
+    /**
+     * 推断下一个档位起点距当前段开始有多少分钟。
+     *
+     * <p>推导：{@code units = ceil((minutes − grace) ÷ unit)} 时，
+     * 下一档出现在 {@code minutes = units × unit + grace + 1}。
+     * 例如宽限 5 分钟、每档 30 分钟时，档位边界依次落在 6 / 36 / 66 … 分钟。
+     *
+     * <p><b>宽限期内（units = 0）下一次是第 6 分钟而不是第 36 分钟</b> ——
+     * 加 1 而不是加整个单位时长，是因为档位边界是「刚好越过宽限」的那一刻。
+     *
+     * @param units 当前档数
+     * @return 下一个档位边界的相对分钟数
+     */
+    private int nextTierMinutes(int units) {
+        return units * properties.getUnitMinutes() + properties.getGraceMinutes() + 1;
+    }
+
+    /**
+     * 判断某个计费段是否被月卡覆盖。
+     *
+     * <p>账单与跳档预告共用本方法：两处若各判一次，「月卡段还会不会涨价」
+     * 就会在某个卡种上给出相反的答案。
+     *
+     * <p><b>判定完全交给 {@link CardCoverage#covers}</b>：时段与日期两个条件
+     * 都由它一处表达。本方法只负责 null 判断 —— 无卡时没有任何段被覆盖。
+     *
+     * @param period   该段所属的时段
+     * @param at       该段的起点时刻
+     * @param coverage 覆盖范围，可为 null（无卡）
+     * @return 该段免费返回 true
+     */
+    private static boolean isFreeByCard(BillingPeriod period, LocalDateTime at,
+                                        CardCoverage coverage) {
+        return coverage != null && coverage.covers(period, at);
+    }
+
+    /**
+     * 取两个时刻之间的整秒数。
+     *
+     * @param from 起点
+     * @param to   终点
+     * @return 秒数
+     */
+    private static long secondsBetween(LocalDateTime from, LocalDateTime to) {
+        return Duration.between(from, to).getSeconds();
+    }
+
+    /**
+     * 把金额格式化成账单上显示的样子（两位小数带符号）。
+     *
+     * <p>用 {@code setScale} 而不是 {@code stripTrailingZeros}：后者对 40 元会给出
+     * {@code 4E+1} 这种科学计数法的字符串，金额栏上显示成「¥4E+1」。
+     *
+     * @param amount 金额
+     * @return 如「¥20.00」
+     */
+    private static String money(BigDecimal amount) {
+        return "¥" + amount.setScale(2, RoundingMode.HALF_UP).toPlainString();
+    }
+
+    /**
+     * 把一次消费切成若干段。
+     *
+     * <p><b>切分线有两条</b>：
+     * <ol>
+     *   <li>{@link #nextBoundary 时段边界} —— 配置的日场起止时刻。
+     *       例如 21:30 – 23:30 会被切成日场 21:30–22:00 与夜场 22:00–23:30 两段</li>
+     *   <li><b>月卡的有效期边界</b>（仅当有卡）—— 卡的生效时刻与失效时刻。
+     *       段不能被它劈成两半：「整段免费」的判定要求段完整落在卡的区间内，
+     *       所以跨过零点的订单必须在这里切开，卡内那段免、卡外那段照常计价</li>
+     * </ol>
+     *
+     * <p><b>多切一段就多享一次宽限</b>，这是分段计算的固有代价（与跨时段切段
+     * 是同一类副作用，CLAUDE.md 记着它的几个例子）。所以卡那条切分线
+     * <b>只在边界真的落在订单区间内时才切</b> —— 无卡时一段也不多切，
+     * 卡覆盖整单时也一段都不多切。
      *
      * <p>时长为 0 的段不会产生（恰好从边界开始时不会多出一个空段）。
      *
      * @param startTime 起始时间
      * @param endTime   结束时间
+     * @param coverage  月卡的覆盖范围，无卡传 null
      * @return 按时间先后排列的时段片段
      */
-    private List<TimeSegment> splitByPeriod(LocalDateTime startTime, LocalDateTime endTime) {
+    private List<TimeSegment> splitByPeriod(LocalDateTime startTime, LocalDateTime endTime,
+                                            CardCoverage coverage) {
         List<TimeSegment> segments = new ArrayList<>();
         LocalDateTime cursor = startTime;
 
@@ -258,10 +502,47 @@ public class BillingService {
             // 段末取「下一个时段边界」与「订单结束时间」中较早的那个
             LocalDateTime segmentEnd = boundary.isBefore(endTime) ? boundary : endTime;
 
+            // 卡的有效期边界还要更早的话，就以它收段
+            LocalDateTime cardBoundary = nextCardBoundary(cursor, endTime, coverage);
+            if (cardBoundary != null && cardBoundary.isBefore(segmentEnd)) {
+                segmentEnd = cardBoundary;
+            }
+
             segments.add(new TimeSegment(period, cursor, segmentEnd));
             cursor = segmentEnd;
         }
         return segments;
+    }
+
+    /**
+     * 求从某个时刻起的下一个「月卡有效期边界」。
+     *
+     * <p><b>两条边界都要看</b>：生效时刻（它之前的那段要收费）与失效时刻
+     * （它之后的那段要收费）。两头都处理，规则才闭合 —— 只做失效那一头的话，
+     * 卡生效当天凌晨进店的订单会在生效前那段白玩。
+     *
+     * <p>返回的时刻<b>严格晚于</b> {@code cursor}：相等时说明游标已经站在这条
+     * 边界上、这一段早已切开，再返回它就会切出一个时长为 0 的段、游标原地不动。
+     *
+     * @param cursor   当前游标
+     * @param endTime  订单结束时刻
+     * @param coverage 覆盖范围，无卡传 null
+     * @return 边界时刻；无卡、或区间内没有边界时返回 null
+     */
+    private static LocalDateTime nextCardBoundary(LocalDateTime cursor, LocalDateTime endTime,
+                                                  CardCoverage coverage) {
+        if (coverage == null) {
+            return null;
+        }
+        LocalDateTime from = coverage.getValidFrom();
+        if (from.isAfter(cursor) && from.isBefore(endTime)) {
+            return from;
+        }
+        LocalDateTime until = coverage.getValidUntil();
+        if (until.isAfter(cursor) && until.isBefore(endTime)) {
+            return until;
+        }
+        return null;
     }
 
     /**
@@ -303,8 +584,8 @@ public class BillingService {
     /**
      * 计算单个时段的费用。
      *
-     * <p>档数采用整数向上取整除法 {@code (可计费分钟 + 单位 − 1) / 单位}，
-     * 避免浮点运算。可计费分钟为「段时长 − 宽限」，非正数时档数直接为 0 ——
+     * <p>档数由 {@link #unitsOf} 算出（整数向上取整除法，避免浮点运算）。
+     * 可计费分钟为「段时长 − 宽限」，非正数时档数为 0 ——
      * 「首 N 分钟内免费出场」正是由此自然得出，无需单独判断。
      *
      * <p><b>月卡覆盖的段照常算档数、单价、封顶与封顶前金额，只把实收置 0。</b>
@@ -314,28 +595,27 @@ public class BillingService {
      *
      * @param segment      时段片段
      * @param discounted   本单是否按月度优惠价计费（影响单价与封顶）
-     * @param cardCoverage 月卡的时段覆盖范围，null 表示无卡
+     * @param cardCoverage 月卡的覆盖范围（时段 + 有效日期），null 表示无卡
      * @return 该段的计费明细
      */
     private SegmentBill billSegment(TimeSegment segment, boolean discounted,
                                     CardCoverage cardCoverage) {
         long minutes = Duration.between(segment.start(), segment.end()).toMinutes();
-
-        long billableMinutes = minutes - properties.getGraceMinutes();
-        int units = 0;
-        if (billableMinutes > 0) {
-            units = (int) ((billableMinutes + properties.getUnitMinutes() - 1)
-                    / properties.getUnitMinutes());
-        }
+        // 档数与跳档预告共用 unitsOf —— 两处各写一份的话，「还有多久到下一档」
+        // 会与账单上的档数对不上，而两边看起来都合理
+        int units = unitsOf(minutes);
 
         BigDecimal unitPrice = unitPriceOf(segment.period(), discounted);
         BigDecimal rawAmount = unitPrice.multiply(BigDecimal.valueOf(units));
         BigDecimal cap = capOf(segment.period(), discounted);
         BigDecimal amount = rawAmount.min(cap);
 
-        // 免费判定：全天卡覆盖所有段；夜间卡只覆盖夜场段，日场段照常收费
-        boolean freeByCard = cardCoverage == CardCoverage.ALL
-                || (cardCoverage == CardCoverage.NIGHT && segment.period() == BillingPeriod.NIGHT);
+        // 免费判定：时段在卡种范围内、且起点落在卡的有效区间内。
+        // 传起点而不是终点 —— 段已按卡的有效期边界切过，不会跨越它，
+        // 所以起点在此区间内即整段都在（见 splitByPeriod）。
+        // 与跳档预告共用 isFreeByCard —— 否则「月卡段还会不会涨价」在
+        // 某个卡种上会给出相反的答案
+        boolean freeByCard = isFreeByCard(segment.period(), segment.start(), cardCoverage);
 
         SegmentBill bill = new SegmentBill();
         bill.setPeriod(segment.period());

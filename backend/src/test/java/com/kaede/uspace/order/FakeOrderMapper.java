@@ -121,8 +121,11 @@ public class FakeOrderMapper implements InvocationHandler {
             case "deleteById" -> deleteById((Long) args[0]);
             case "selectByOrderNo" -> selectByOrderNo((String) args[0]);
             case "selectActiveByUser" -> selectActiveByUser((Long) args[0]);
+            case "selectUnsettledByUser" -> selectUnsettledByUser((Long) args[0]);
             case "selectActiveByStore" -> selectActiveByStore((Long) args[0]);
             case "selectMonthPaidAmount" -> selectMonthPaidAmount(args);
+            case "selectTotalStayMinutes" -> selectTotalStayMinutes(args);
+            case "selectMonthStayMinutes" -> selectMonthStayMinutes(args);
             case "selectPageByUser" -> selectPageByUser(args);
             case "selectPageForAdmin" -> selectPageForAdmin(args);
             case "updatePasscode" -> updatePasscode(args);
@@ -215,6 +218,33 @@ public class FakeOrderMapper implements InvocationHandler {
                 .filter(FakeOrderMapper::isAlive)
                 .filter(o -> Objects.equals(o.getUserId(), userId))
                 .filter(o -> OrderStatus.IN_USE.name().equals(o.getStatus()))
+                .max(Comparator.comparing(Order::getId))
+                .orElse(null);
+    }
+
+    /**
+     * 查询某人最近一条未结清的订单（使用中或待支付），取 id 最大的一条。
+     *
+     * <p>与真实 SQL 的 {@code status IN ('IN_USE', 'PENDING_PAYMENT')}
+     * + {@code ORDER BY id DESC LIMIT 1} 逐条对齐。
+     *
+     * <p><b>「待支付」那一半不能少</b>：少了它，假 Mapper 就复刻了修复前的老行为，
+     * 「欠费的账号还能再开一单」这条会测成永远通过 —— 而那正是本次要挡的。
+     * 反过来，「已支付」必须排除：付过的单是已经了结的，不该拦着用户开新单。
+     *
+     * <p>状态直接交给 {@link OrderStatus#isUnpaid} 判，<b>不在外面加判空</b>：
+     * 它的契约就是「认不出（含 null）返回 false」，2026-09-30 已修好。
+     * 外面再包一层 {@code status != null} 反而有害 ——
+     * 万一它又被改回会抛 NPE 的写法，那层守卫会把问题盖住，测试照样全绿。
+     *
+     * @param userId 用户 ID
+     * @return 订单；没有则返回 null
+     */
+    private Order selectUnsettledByUser(Long userId) {
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> OrderStatus.isUnpaid(o.getStatus()))
                 .max(Comparator.comparing(Order::getId))
                 .orElse(null);
     }
@@ -346,7 +376,7 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[10]);
+        order.setStatus((String) args[11]);
         return 1;
     }
 
@@ -363,10 +393,10 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[10]);
+        order.setStatus((String) args[11]);
         order.setAdjusted(1);
-        order.setAdjustedBy((Long) args[11]);
-        order.setAdjustReason((String) args[12]);
+        order.setAdjustedBy((Long) args[12]);
+        order.setAdjustReason((String) args[13]);
         order.setAdjustedAt(LocalDateTime.now());
         return 1;
     }
@@ -434,14 +464,65 @@ public class FakeOrderMapper implements InvocationHandler {
      */
     private static void applyAmounts(Order order, Object[] args, int offset) {
         order.setEndTime((LocalDateTime) args[offset]);
-        order.setDayMinutes((Integer) args[offset + 1]);
-        order.setDayAmount((BigDecimal) args[offset + 2]);
-        order.setNightMinutes((Integer) args[offset + 3]);
-        order.setNightAmount((BigDecimal) args[offset + 4]);
-        order.setTotalAmount((BigDecimal) args[offset + 5]);
-        order.setDiscountAmount((BigDecimal) args[offset + 6]);
-        order.setCardFreeAmount((BigDecimal) args[offset + 7]);
-        order.setPayableAmount((BigDecimal) args[offset + 8]);
+        order.setStayMinutes((Integer) args[offset + 1]);
+        order.setDayMinutes((Integer) args[offset + 2]);
+        order.setDayAmount((BigDecimal) args[offset + 3]);
+        order.setNightMinutes((Integer) args[offset + 4]);
+        order.setNightAmount((BigDecimal) args[offset + 5]);
+        order.setTotalAmount((BigDecimal) args[offset + 6]);
+        order.setDiscountAmount((BigDecimal) args[offset + 7]);
+        order.setCardFreeAmount((BigDecimal) args[offset + 8]);
+        order.setPayableAmount((BigDecimal) args[offset + 9]);
+    }
+
+    /**
+     * 累计在店时长，全部历史 —— 与真实 SQL 的「只算 PAID、按 user_id 过滤、
+     * 排除已删除」逐条对齐。
+     *
+     * <p><b>只算 PAID 这条不能少</b>：写成「所有状态」的话，「我的」页的累计时长
+     * 会把在店未结账的那一单也算进去，每刷新一次数字就往上跳一次。
+     *
+     * @param args 依次为 userId
+     * @return 累计分钟数；无记录时返回 0
+     */
+    private Long selectTotalStayMinutes(Object[] args) {
+        Long userId = (Long) args[0];
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> OrderStatus.PAID.name().equals(o.getStatus()))
+                .map(Order::getStayMinutes)
+                .filter(Objects::nonNull)
+                .mapToLong(Integer::longValue)
+                .sum();
+    }
+
+    /**
+     * 某月的在店时长 —— 归月口径与 {@link #selectMonthPaidAmount} 逐字一致：
+     * 按 {@code start_time} 的半开区间 {@code [from, to)} 归集，不是 {@code end_time}。
+     *
+     * <p>写成按 {@code end_time} 归集的话，跨零点结算的夜单会跳到下个月，
+     * 而这种错在单测里完全看不出来。
+     *
+     * @param args 依次为 userId、from、to
+     * @return 该月分钟数；无记录时返回 0
+     */
+    private Long selectMonthStayMinutes(Object[] args) {
+        Long userId = (Long) args[0];
+        LocalDateTime from = (LocalDateTime) args[1];
+        LocalDateTime to = (LocalDateTime) args[2];
+
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> OrderStatus.PAID.name().equals(o.getStatus()))
+                .filter(o -> o.getStartTime() != null
+                        && !o.getStartTime().isBefore(from)
+                        && o.getStartTime().isBefore(to))
+                .map(Order::getStayMinutes)
+                .filter(Objects::nonNull)
+                .mapToLong(Integer::longValue)
+                .sum();
     }
 
     /**

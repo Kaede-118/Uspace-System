@@ -1,7 +1,6 @@
 package com.kaede.uspace.order;
 
 import java.util.Arrays;
-import java.util.Set;
 
 /**
  * 订单状态。
@@ -78,14 +77,24 @@ public enum OrderStatus {
      * 判断某个状态是否属于「尚未付款」。
      *
      * <p>即 {@link #IN_USE} 与 {@link #PENDING_PAYMENT}。
-     * 供管理员人工调整时长时判定可否操作 —— 这两种状态改动金额没有退款问题，
-     * 而 {@link #PAID} 已经入账，调整要走人工退款流程。
+     * 供下单前的「上一单还没了结」校验与管理员人工调整时长时判定可否操作 ——
+     * 这两种状态改动金额没有退款问题，而 {@link #PAID} 已经入账，
+     * 调整要走人工退款流程。
+     *
+     * <p><b>刻意不写成 {@code Set.of(...).contains(name)}</b>：JDK 的不可变集合
+     * 对 {@code null} 查询会抛 {@link NullPointerException}（它们用
+     * {@code requireNonNull} 挡住 null），而本方法的契约是「认不出就返回 false」。
+     * 用 {@code equals} 逐个比则天生安全 —— 状态名来自数据库的 {@code VARCHAR} 列，
+     * 为 null 是完全可能的情形（手工改库、老数据、假 Mapper 里没设状态的记录），
+     * 不该让「查一下这一单能不能改」直接崩掉。
+     *
+     * <p>与 {@code DeviceStatus.isUsable} 是同一套写法，改动时两处一起改。
      *
      * @param name 状态名，可为 null
      * @return 未付款返回 true；null 或已支付返回 false
      */
     public static boolean isUnpaid(String name) {
-        return Set.of(IN_USE.name(), PENDING_PAYMENT.name()).contains(name);
+        return IN_USE.name().equals(name) || PENDING_PAYMENT.name().equals(name);
     }
 
     /**

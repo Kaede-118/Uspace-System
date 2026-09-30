@@ -73,6 +73,8 @@ class SysUserMapperIntegrationTests {
         user.setPhone("13800138000");
         user.setQq("999000111");
         user.setPreference("PAIPAI,TAISHOU");
+        user.setAvatar("/uploads/avatar/it_columns_1.png");
+        user.setBanner("/uploads/banner/it_columns_1.png");
         userMapper.insert(user);
 
         SysUser loaded = userMapper.selectById(user.getId());
@@ -83,6 +85,10 @@ class SysUserMapperIntegrationTests {
         assertEquals("13800138000", loaded.getPhone());
         assertEquals("999000111", loaded.getQq());
         assertEquals("PAIPAI,TAISHOU", loaded.getPreference());
+        assertEquals("/uploads/avatar/it_columns_1.png", loaded.getAvatar(),
+                "avatar 列写错名字或漏建时，这条会以 Unknown column 报出来，"
+                        + "而不是等到用户上传完头像才发现存不进去");
+        assertEquals("/uploads/banner/it_columns_1.png", loaded.getBanner());
         assertEquals("USER", loaded.getRole());
         assertEquals(1, loaded.getStatus().intValue());
         assertEquals(0, loaded.getTokenVersion().intValue());
@@ -174,6 +180,43 @@ class SysUserMapperIntegrationTests {
     // ==================================================================
     // 其余具名方法
     // ==================================================================
+
+    @Test
+    @DisplayName("头像与背景图各自独立更新 —— 换一个不会动另一个")
+    void updateAvatarAndBanner_touchOnlyTheirOwnColumn() {
+        SysUser user = newUser("images");
+        user.setAvatar("/uploads/avatar/old.png");
+        user.setBanner("/uploads/banner/old.png");
+        userMapper.insert(user);
+
+        userMapper.updateAvatar(user.getId(), "/uploads/avatar/new.jpg");
+
+        SysUser afterAvatar = userMapper.selectById(user.getId());
+        assertEquals("/uploads/avatar/new.jpg", afterAvatar.getAvatar());
+        assertEquals("/uploads/banner/old.png", afterAvatar.getBanner(),
+                "两列合成一条 SQL 更新的话，换头像会把背景图一起写回旧值 —— "
+                        + "并发上传时表现为「换好的背景图自己变回去了」");
+
+        userMapper.updateBanner(user.getId(), "/uploads/banner/new.webp");
+
+        SysUser afterBanner = userMapper.selectById(user.getId());
+        assertEquals("/uploads/banner/new.webp", afterBanner.getBanner());
+        assertEquals("/uploads/avatar/new.jpg", afterBanner.getAvatar(), "反向同理");
+    }
+
+    @Test
+    @DisplayName("头像可以写回 NULL：恢复默认头像")
+    void updateAvatar_canClearToNull() {
+        SysUser user = newUser("clearimg");
+        user.setAvatar("/uploads/avatar/x.png");
+        userMapper.insert(user);
+
+        userMapper.updateAvatar(user.getId(), null);
+
+        assertNull(userMapper.selectById(user.getId()).getAvatar(),
+                "写的是 avatar = #{avatar} 而不是 COALESCE —— 非 null 的语义"
+                        + "正是「恢复默认」，不该被当成「不修改」");
+    }
 
     @Test
     @DisplayName("按登录名与 QQ 号查询")

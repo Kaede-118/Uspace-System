@@ -6,6 +6,7 @@ import com.kaede.uspace.billing.BillingPeriod;
 import com.kaede.uspace.billing.BillingService;
 import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.dto.BillingResult;
+import com.kaede.uspace.billing.dto.NextChange;
 import com.kaede.uspace.billing.dto.SegmentBill;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
@@ -21,6 +22,7 @@ import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
+import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.order.dto.PaymentProofRequest;
 import com.kaede.uspace.order.entity.Order;
@@ -37,6 +39,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -148,6 +151,11 @@ public class OrderService {
      * 万一走到「密码已下发、落库却失败」这一步，会在 catch 里补一次撤销 ——
      * 门锁调用是外部副作用、不回滚，不补的话密码会孤零零留在锁上 12 小时。
      *
+     * <p><b>一人同时只该有一条未结清的订单</b>：已经有 {@code IN_USE} 或
+     * {@code PENDING_PAYMENT} 的订单时不再放行新单（见第 ④ 步）。
+     * 前者是防连点，后者是防「欠着费接着玩」—— 两种情形给的是不同的错误码，
+     * 因为用户看到之后该做的事不一样。
+     *
      * @param userId  当前登录用户 ID
      * @param request 请求体，可携带包场邀请令牌
      * @return 成功时返回密码与有效期；失败时返回具体原因
@@ -185,14 +193,42 @@ public class OrderService {
             if (denied != null) {
                 return denied;
             }
+        } else {
+            // 准入窗口没命中，他现在以散客身份进店 —— 但他可能参与了某场尚未结束的包场，
+            // 只是来得比准入窗口更早（比如提前一小时到店里等人）。
+            // 那一场要挂到订单上：清场与计费剪切读的都是订单上的 bookingId
+            // （见 isBookingParticipant 与 findCoveringBookings），挂上这两条链路就都
+            // 认得出他；不挂，包场开始时他会被当散客清场，结算时那个时段还会被重复计费 ——
+            // 包场费已经付过一次了。
+            //
+            // 挂上一场还没到时间的包场是无害的：billableRanges 会先把包场区间夹到订单
+            // 区间内，夹完为空就整段跳过，不会少收一分钱。
+            booking = bookingService.findUpcomingBookingForParticipant(userId, now);
         }
 
-        // ④ 防连点。点一次就计费，连点两下会拿到两个密码、产生两条并行计费的订单。
+        // ④ 上一单还没了结就不要再开：查的是 IN_USE + PENDING_PAYMENT 两种状态，
+        //    对应两件不同的事，错误码与提示都分开给 ——
+        //      · IN_USE 是「连点两下开门」：点一次就计费，抖一下手指会拿到两个密码、
+        //        产生两条并行计费的订单，用户要付两份钱；
+        //      · PENDING_PAYMENT 是「结算了但不付款」：账单已经出来还欠着，
+        //        再开一单就是欠着费接着玩。这条是本次补上的缺口 ——
+        //        早先只查 IN_USE，所以欠费的账号可以再开一单进场。
+        //    两者对用户的可行动作完全不同（一个去「结束使用」、一个去「去支付」），
+        //    合并成一个错误码的话，前端只能给一句模糊提示，用户不知道该点哪个。
+        //
+        //    ⚠️ 不用 selectActiveByUser：那个只认 IN_USE，是给 GET /api/orders/current 用的
+        //    （首页靠它决定按钮是「开门」还是「查看密码」，把已结算的单塞进去会让用户
+        //    看到一个「查看密码」，而那时密码早随结算撤销了）。两个查询不要合并。
+        //
         //    这道校验必须在【下发密码之前】—— 放在后面就等于白白消耗一次额度。
-        Order active = orderMapper.selectActiveByUser(userId);
-        if (active != null) {
+        Order unsettled = orderMapper.selectUnsettledByUser(userId);
+        if (unsettled != null) {
+            if (OrderStatus.PENDING_PAYMENT.name().equals(unsettled.getStatus())) {
+                return BizResult.fail(ErrorCode.ORDER_UNPAID_EXISTS,
+                        "你有一笔未支付的订单（" + unsettled.getOrderNo() + "），请先完成支付");
+            }
             return BizResult.fail(ErrorCode.ORDER_ALREADY_ACTIVE,
-                    "你有一笔进行中的订单（" + active.getOrderNo() + "），请先点「结束使用」");
+                    "你有一笔进行中的订单（" + unsettled.getOrderNo() + "），请先点「结束使用」");
         }
 
         // ⑤ 单号与密码有效期
@@ -425,7 +461,41 @@ public class OrderService {
 
         return BizResult.ok(OrderPreviewVo.of(order, previewAt, bill,
                 !bookings.isEmpty(), allSegmentsCapped(bill.getSegments()),
-                statusAfterSettle(bill.getTotalAmount())));
+                statusAfterSettle(bill.getTotalAmount()), nextChange(order, bill, previewAt)));
+    }
+
+    /**
+     * 算「下一次账单变化」的预告。
+     *
+     * <p><b>只在真正有段在计费时才给预告</b>：包场时段内不产生计费段，
+     * 此时若照常算，会得出一个只对「包场前那段」成立的时刻 ——
+     * 而那段早已结束，用户看到的是「还有 0 秒进入下一档」这类坏掉的信息。
+     * 判据取账单最后一段的结束时刻是否就是此刻：包场挡在中间时它会更早。
+     *
+     * <p>起点传<b>当前计费段的起点</b>而不是整单的计费起点：订单可能已经跨过时段
+     * （21:00 开始、现在 23:00），拿整单起点去算会得出一个属于日场的答案。
+     *
+     * <p>这里再查一次月卡覆盖范围，虽然 {@link #calculateBill} 刚查过一次 ——
+     * 一次按用户与日期的单表查询，代价远小于为此把计费结果的结构撑大
+     * （那会让模块 7 认识「月卡」这个业务名词，而它刻意不认识）。
+     *
+     * @param order 订单
+     * @param bill  本次预览的账单
+     * @param at    预览时刻
+     * @return 预告；此刻没有正在计费的段时返回 null
+     */
+    private NextChange nextChange(Order order, BillingResult bill, LocalDateTime at) {
+        List<SegmentBill> segments = bill.getSegments();
+        if (segments.isEmpty()) {
+            return null;
+        }
+        SegmentBill ongoing = segments.get(segments.size() - 1);
+        if (ongoing.getEndTime().isBefore(at)) {
+            // 当前时刻落在包场里：最后一段在包场开始那一刻就结束了
+            return null;
+        }
+        return billingService.nextChange(ongoing.getStartTime(), at,
+                bill.getMonthSpentBefore(), queryCardCoverage(order));
     }
 
     // ==================================================================
@@ -565,19 +635,30 @@ public class OrderService {
         BigDecimal dayAmount = amountOf(bill, BillingPeriod.DAY);
         BigDecimal nightAmount = amountOf(bill, BillingPeriod.NIGHT);
 
+        // 在店时长 = 离场时刻 − 开门时刻，与计费时长是两回事（包场时段被剪掉、
+        // 宽限的 5 分钟也不计入）。它只用于展示与累计统计，不参与算钱。
+        //
+        // ⚠️ 起点取 order.getStartTime()（真正的开门时刻），不是 bill.getStartTime()
+        // （实际计费起点）—— 包场人提前到店时后者晚几小时，用它会少算那段时间，
+        // 而那正是「他明明在店里」的证据。同理终点取 endTime 而非 now()：
+        // 包场清场的 endTime 是包场开始时刻，两者差着几十秒，取 now() 会与
+        // end_time 列不自洽（看着像「离场时刻比在店时长算出来的还早」）
+        int stayMinutes = (int) Duration.between(order.getStartTime(), endTime).toMinutes();
+
         BigDecimal cardFree = bill.getCardFreeAmount();
         if (operatorId == null) {
-            orderMapper.updateSettlement(order.getId(), endTime, dayMinutes, dayAmount,
-                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), cardFree,
-                    total, targetStatus);
+            orderMapper.updateSettlement(order.getId(), endTime, stayMinutes, dayMinutes,
+                    dayAmount, nightMinutes, nightAmount, total, bill.getDiscountAmount(),
+                    cardFree, total, targetStatus);
         } else {
-            orderMapper.updateAdjustment(order.getId(), endTime, dayMinutes, dayAmount,
-                    nightMinutes, nightAmount, total, bill.getDiscountAmount(), cardFree,
-                    total, targetStatus, operatorId, adjustReason);
+            orderMapper.updateAdjustment(order.getId(), endTime, stayMinutes, dayMinutes,
+                    dayAmount, nightMinutes, nightAmount, total, bill.getDiscountAmount(),
+                    cardFree, total, targetStatus, operatorId, adjustReason);
         }
 
         // 同步内存对象，供视图构造使用
         order.setEndTime(endTime);
+        order.setStayMinutes(stayMinutes);
         order.setStatus(targetStatus);
         order.setTotalAmount(total);
         order.setPayableAmount(total);
@@ -648,20 +729,50 @@ public class OrderService {
      * @return 本月累计额、门槛、是否已享优惠、还差多少
      */
     public BizResult<MonthSpentVo> monthSpent(Long userId) {
-        LocalDateTime monthStart = LocalDate.now().withDayOfMonth(1).atStartOfDay();
-        BigDecimal spent = orderMapper.selectMonthPaidAmount(
-                userId, monthStart, monthStart.plusMonths(1));
+        MonthRange month = currentMonthRange();
+        BigDecimal spent = orderMapper.selectMonthPaidAmount(userId, month.from(), month.to());
         BigDecimal actual = spent == null ? BigDecimal.ZERO : spent;
 
         BigDecimal threshold = billingService.discountThreshold();
         BigDecimal remaining = threshold.subtract(actual);
 
         MonthSpentVo vo = new MonthSpentVo();
-        vo.setMonthStart(monthStart.toLocalDate());
+        vo.setMonthStart(month.from().toLocalDate());
         vo.setMonthSpent(actual);
         vo.setThreshold(threshold);
         vo.setDiscounted(billingService.isDiscounted(actual));
         vo.setRemaining(remaining.compareTo(BigDecimal.ZERO) > 0 ? remaining : BigDecimal.ZERO);
+        return BizResult.ok(vo);
+    }
+
+    /**
+     * 查询我的累计在店时长与本月累计时长。
+     *
+     * <p>回答「我一共玩了多久、这个月玩了多久」——「我的」页与累计消费并排显示。
+     * 消费答「花了多少钱」、时长答「玩了多久」，两个数字来自同一批订单，
+     * 归月口径也必须一致，否则跨月那一刻会出现「消费算上月、时长算本月」的错位。
+     *
+     * <p><b>与 {@link #monthSpent} 分开而不是合并</b>：一个是时长、一个是金额，
+     * 且后者还要算优惠资格（多两次门槛比较）。前端并发调两个只读聚合即可，
+     * 合成一个接口只会让「只想要时长」的调用方白等一次金额查询。
+     *
+     * <p><b>只算已支付</b>，与消费口径一致 —— 把在店未结账的那一单算进去，
+     * 数字每刷新一次就往上跳一次，而它还没定局。
+     *
+     * @param userId 当前登录用户
+     * @return 累计在店分钟数、本月在店分钟数与本月起始日期
+     */
+    public BizResult<OrderStatsVo> stats(Long userId) {
+        MonthRange month = currentMonthRange();
+        Long total = orderMapper.selectTotalStayMinutes(userId);
+        Long monthMinutes = orderMapper.selectMonthStayMinutes(userId, month.from(), month.to());
+
+        OrderStatsVo vo = new OrderStatsVo();
+        // 两个 COALESCE 兜底在 SQL 里，这里再兜一次 null 只为挡住假 Mapper 与
+        // 将来换实现时的空值 —— 统计接口返回 null 会让前端显示成「--」，看起来像查询失败
+        vo.setTotalMinutes(total == null ? 0L : total);
+        vo.setMonthMinutes(monthMinutes == null ? 0L : monthMinutes);
+        vo.setMonthStart(month.from().toLocalDate());
         return BizResult.ok(vo);
     }
 
@@ -950,15 +1061,19 @@ public class OrderService {
     /**
      * 查询本单适用的月卡覆盖范围。
      *
-     * <p><b>日期由订单的 {@code startTime} 推出，不是 {@code now}</b> ——
+     * <p><b>用哪一天去查由订单的 {@code startTime} 推出，不是 {@code now}</b> ——
      * 与 {@link #queryMonthSpent} 同一套口径：用户 23:00 进场时卡还有效，
-     * 这一单就该按有卡算；管理员事后修正时长，也不会让历史订单的免单结论漂移。
+     * 这一单就该取那张卡；管理员事后修正时长，也不会让历史订单的免单结论漂移。
+     *
+     * <p><b>取回来的不只是「有没有卡」，还有那张卡的完整有效期</b> ——
+     * 计费侧要用它的两个端点切段，跨零点的订单才能被切成
+     * 「卡内免费」与「卡外收费」两段。查询用的那一天只决定取哪张卡。
      *
      * <p>解析放在这里而不是由调用方传入，是为了让「结账预览」与「实际结算」
      * 不可能各判一套 —— 两者都走 {@link #calculateBill}。
      *
      * @param order 订单
-     * @return 覆盖范围；无卡时返回 null
+     * @return 覆盖范围（时段 + 卡的有效期）；无卡时返回 null
      */
     private CardCoverage queryCardCoverage(Order order) {
         return monthlyCardService.findCoverageAt(
@@ -1108,9 +1223,20 @@ public class OrderService {
     /**
      * 判断请求者是否有资格在该包场时段内下单。
      *
-     * <p>两类人放行：<b>包场人本人</b>（按 {@code host_user_id} 认），
-     * 以及<b>持有效邀请令牌的被邀请者</b>。其余人一律拒绝 ——
-     * 准入的落地方式是「不下发密码」，所以他们拿不到密码、进不去。
+     * <p>三条来源，按「权威性」从高到低：
+     * <ol>
+     *   <li><b>参与者表命中</b> —— 主路径。被邀请者点开邀请链接就会在里面留下一行，
+     *       包场人也有一行（{@code HOST}），所以这一条本来就覆盖了包场人</li>
+     *   <li><b>本人是包场人</b> —— 兜底。{@code HOST} 行是付款成功那一刻才写的，
+     *       这条覆盖的是「参与者表上线之前就已付款」的历史包场；
+     *       少了它，那些场次的包场人会被自己的包场挡在门外</li>
+     *   <li><b>令牌匹配</b> —— 兜底。落地页加载后会自动调加入接口，
+     *       万一那一次失败（网络抖动、用户在请求发出前就点了开门），
+     *       被邀请者下单时带上令牌仍能进。令牌从「被邀请者的唯一凭证」
+     *       降级成了这条兜底路径</li>
+     * </ol>
+     * 三条都不命中就拒绝 —— 准入的落地方式是「不下发密码」，
+     * 所以拿不到密码的人进不去，门锁上不需要任何黑名单。
      *
      * @param booking     当前生效的包场
      * @param userId      请求者用户 ID
@@ -1118,6 +1244,9 @@ public class OrderService {
      * @return 放行返回 true
      */
     private boolean isBookingAllowed(Booking booking, Long userId, String inviteToken) {
+        if (bookingService.isParticipant(booking.getId(), userId)) {
+            return true;
+        }
         if (booking.getHostUserId() != null && booking.getHostUserId().equals(userId)) {
             return true;
         }
@@ -1248,5 +1377,39 @@ public class OrderService {
      * @param to   区间终点（不含）
      */
     record TimeRange(LocalDateTime from, LocalDateTime to) {
+    }
+
+    /**
+     * 取当前自然月的半开区间 {@code [本月 1 日 00:00, 次月 1 日 00:00)}。
+     *
+     * <p><b>本月的两个统计口径（消费额、在店时长）必须共用本方法</b>，
+     * 不能各自算一遍：两个数字在「我的」页并排显示，归月区间一旦有出入，
+     * 跨月那一刻就会出现「消费算上月、时长算本月」的错位，而且不报任何错。
+     *
+     * <p>用 {@code LocalDate.now()} 取当天再归到月初，而不是在 {@code now} 上
+     * 逐个字段归零 —— 后者要记得把时分秒全部清掉，漏一处区间起点就变成
+     * 「本月 1 日的此刻」，把这个月第一天的记录整段漏掉。
+     *
+     * <p>注意它取的是<b>当前</b>月份，不是某张订单所属的月份 ——
+     * {@link #queryMonthSpent} 用的是后者（历史订单的优惠判定要跟着订单走），
+     * 两者用途不同，不要合并。
+     *
+     * @return 本月区间
+     */
+    private static MonthRange currentMonthRange() {
+        LocalDateTime from = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        return new MonthRange(from, from.plusMonths(1));
+    }
+
+    /**
+     * 一个自然月的半开区间。
+     *
+     * <p>与 {@link TimeRange} 一样刻意用 record 而不是两个 {@code LocalDateTime} ——
+     * 两个同类型参数挨在一起时，调用处写反了顺序编译器不会吭声。
+     *
+     * @param from 区间起点（含）
+     * @param to   区间终点（不含）
+     */
+    record MonthRange(LocalDateTime from, LocalDateTime to) {
     }
 }

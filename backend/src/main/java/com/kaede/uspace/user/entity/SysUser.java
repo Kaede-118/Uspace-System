@@ -72,6 +72,28 @@ public class SysUser extends BaseEntity {
      */
     private String preference;
 
+    /**
+     * 头像地址，可为空。存<b>站内相对路径</b>，如
+     * {@code /uploads/avatar/20260930/12_a1b2.jpg}。
+     *
+     * <p>存相对路径而非完整 URL：完整 URL 会把域名写进库，换域名要全表刷一遍。
+     * 前端 {@code <img :src="avatar">} 直接加载；为空时前端回落到默认头像。
+     *
+     * <p>它<b>不参与</b> {@code PUT /api/user/me} 的全量替换 ——
+     * 那个接口传 null 表示清空，把头像混进去会导致「只改昵称」的表单
+     * 顺手把头像清掉，而且不报任何错。改头像走独立的
+     * {@code POST /api/user/me/avatar}。
+     */
+    private String avatar;
+
+    /**
+     * 自定义背景图地址，可为空。约 6:1 的横长图，用作个人卡片（{@code UserCard}）的背景。
+     *
+     * <p>与 {@link #avatar} 同款：站内相对路径、不参与全量替换。
+     * 为空时卡片回落到纯色背景（{@code --c-card}），<b>不能是破图</b>。
+     */
+    private String banner;
+
     /** 角色：{@code USER} 普通用户 / {@code ADMIN} 管理员。取值见 {@link com.kaede.uspace.user.UserRole} */
     private String role;
 

@@ -115,6 +115,23 @@ public class FakeBookingMapper implements InvocationHandler {
     }
 
     /**
+     * 取出表中所有未被逻辑删除的包场。
+     *
+     * <p>供 {@link FakeBookingParticipantMapper} 模拟 JOIN 用：真实的
+     * {@code selectPageByUserRole} 与 {@code selectUpcomingByParticipant}
+     * 都要连 {@code biz_booking} 这张表，而假实现里没有 SQL，
+     * 只能由它自己把两张表连起来。
+     *
+     * <p>返回的是内部集合的副本（{@code toList()} 产出不可变列表），
+     * 调用方无法通过它改动假表 —— 与真实 Mapper 的只读查询语义一致。
+     *
+     * @return 未删除的包场，顺序不保证
+     */
+    public List<Booking> allAlive() {
+        return rows.values().stream().filter(this::isAlive).toList();
+    }
+
+    /**
      * 方法分发。方法名唯一，所以按名字匹配即可。
      *
      * @param proxy  代理对象（未使用）

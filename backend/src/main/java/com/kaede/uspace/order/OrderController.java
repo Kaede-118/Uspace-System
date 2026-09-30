@@ -8,6 +8,7 @@ import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
+import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.order.dto.PaymentProofRequest;
 import jakarta.validation.Valid;
@@ -64,13 +65,36 @@ public class OrderController {
     }
 
     /**
+     * 查询我的累计时长与本月时长。
+     *
+     * <p>与月累计消费并排回答「我一共玩了多久、这个月玩了多久」。
+     * 统计的是<b>在店时长</b>（含包场时段、含宽限那 5 分钟），
+     * 不是计费时长 —— 包场用户按计费口径会看到「累计 0 分钟」。
+     *
+     * <p>与 {@code /me/month-spent} 分开两个接口：一个是时长、一个是金额，
+     * 前端并发调即可，谁也不该等谁。
+     *
+     * @param me 当前登录用户
+     * @return 累计在店分钟数、本月在店分钟数与本月起始日期
+     */
+    @GetMapping("/me/stats")
+    public ResponseEntity<ApiResult<OrderStatsVo>> stats(@AuthenticationPrincipal UserPrincipal me) {
+        return ApiResult.of(orderService.stats(me.id()));
+    }
+
+    /**
      * 点击「开门」：创建订单、下发限时密码、开始计费。
      *
      * <p><b>用户端只点这一次</b>，不存在「先下单、再开门」两步。
      * 前端可以加二次确认弹窗，但后端只有这一个入口。
      *
-     * <p>若该用户已有进行中的订单，会返回 {@code ORDER_ALREADY_ACTIVE} ——
-     * 前端应当转而调「查看密码」，而不是把它当成错误展示。
+     * <p><b>上一单未结清时会被挡下，且两种情形给的是不同的码</b>：
+     * <ul>
+     *   <li>{@code ORDER_ALREADY_ACTIVE} —— 人还在店里玩。前端应转而调「查看密码」，
+     *       而不是把它当成错误展示</li>
+     *   <li>{@code ORDER_UNPAID_EXISTS} —— 玩完了但账单还欠着。前端应引导到「去支付」</li>
+     * </ul>
+     * 两者的可行动作不同，前端要分开处置 —— 这是把它们分成两个码的全部理由。
      *
      * @param request 请求体，可携带包场邀请令牌
      * @param me      当前登录用户
@@ -87,6 +111,10 @@ public class OrderController {
      *
      * <p>前端首页靠它决定「开门」按钮的语义：没有进行中的订单就是「开门并开始计费」，
      * 有就是「查看密码」。没有这个接口，前端只能靠试错。
+     *
+     * <p><b>只返回使用中的订单，不含待支付的</b>：待支付的单已经结算、
+     * 密码也撤销了，塞进来会让用户看到一个点不动的「查看密码」。
+     * 首页要展示「你有 N 笔未付款」，另调 {@code GET /api/orders/me?status=PENDING_PAYMENT}。
      *
      * @param me 当前登录用户
      * @return 订单视图；没有进行中的订单时 {@code data} 为 null

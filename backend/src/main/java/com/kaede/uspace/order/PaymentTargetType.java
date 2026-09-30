@@ -1,5 +1,6 @@
 package com.kaede.uspace.order;
 
+import com.kaede.uspace.product.ProductNo;
 import com.kaede.uspace.promotion.MonthlyCardNo;
 
 import java.util.Arrays;
@@ -42,7 +43,19 @@ public enum PaymentTargetType {
      * 就成了 {@code promotion → order} 与 {@code order → promotion} 同时成立的
      * 包级循环。字面量仍然只有一处，只是放在被引用方 —— 别把它挪回来。
      */
-    MONTHLY_CARD(MonthlyCardNo.PREFIX);
+    MONTHLY_CARD(MonthlyCardNo.PREFIX),
+
+    /**
+     * 商品购买单（{@code biz_product_order}）。商户订单号 = {@code order_no}，
+     * 前缀引用自 {@link com.kaede.uspace.product.ProductNo#PREFIX}。
+     *
+     * <p>前缀常量定义在 {@code product} 包，理由与月卡同款：
+     * 本枚举所在的 order 包要引用 {@code product} 的购买单（
+     * {@code ProductPaymentTargetHandler} 住在这里），依赖方向固定为
+     * 单向的 {@code order → product}。前缀反过来定义在这里，
+     * 就成了两个方向同时成立的包级循环。
+     */
+    PRODUCT(ProductNo.PREFIX);
 
     /**
      * 单号前缀。

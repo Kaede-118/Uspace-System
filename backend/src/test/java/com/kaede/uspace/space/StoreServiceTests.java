@@ -53,7 +53,8 @@ class StoreServiceTests {
 
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
-            new FakeSysUserMapper().asMapper());
+            new FakeSysUserMapper().asMapper(),
+            new FakeBookingParticipantMapper(bookingMapper).asMapper());
 
     /** 被测服务 */
     private final StoreService storeService =

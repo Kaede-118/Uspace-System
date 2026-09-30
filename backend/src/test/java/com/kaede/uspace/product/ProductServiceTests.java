@@ -1,0 +1,491 @@
+package com.kaede.uspace.product;
+
+import com.kaede.uspace.common.result.BizResult;
+import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.product.dto.CreateProductOrderRequest;
+import com.kaede.uspace.product.dto.ProductOrderVo;
+import com.kaede.uspace.product.dto.ProductSaveRequest;
+import com.kaede.uspace.product.dto.ProductVo;
+import com.kaede.uspace.product.entity.Product;
+import com.kaede.uspace.product.entity.ProductOrder;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * {@link ProductService} 的单元测试。
+ *
+ * <p><b>纯单测，不启动 Spring、不连数据库。</b>两张表的数据访问由
+ * {@link FakeProductMapper} 与 {@link FakeProductOrderMapper} 顶替。
+ *
+ * <p>覆盖重点全在「写错了不报错、只会静默算错」的地方：
+ * <ul>
+ *   <li><b>可售量的口径</b> —— 库存减去「未支付的待支付单数」。
+ *       少减了会让两人同时买最后一件都下单成功；多减了（比如把超时的单也算上）
+ *       会让一件商品被一笔无人认领的旧单永久占住，而界面上看不出任何异常</li>
+ *   <li><b>超时的待支付单不再占库存</b> —— 商品单不会像月卡那样被自动关闭，
+ *       所以这条过滤是「旧单不再挡路」的唯一出口</li>
+ *   <li><b>价格与名称的快照</b> —— 商品调价改名之后，历史订单必须还是当时的数字。
+ *       这一条错了，用户会看到一个自己从没同意过的金额</li>
+ *   <li><b>{@code enabled} 是全量替换语义的唯一例外</b> —— 传 null 时保持原值。
+ *       改了这条，管理员改个商品名就会顺手把商品下架，而他毫无察觉</li>
+ * </ul>
+ *
+ * <p>另有一条钉住下单接口的价格<b>只认服务端</b>：
+ * 前端传不了价格，改请求体也换不来一件 1 分钱的商品。
+ */
+class ProductServiceTests {
+
+    private static final Long USER_ID = 1001L;
+    private static final Long OTHER_USER_ID = 1002L;
+
+    private final FakeProductMapper productMapper = new FakeProductMapper();
+    private final FakeProductOrderMapper orderMapper = new FakeProductOrderMapper();
+    private final ProductProperties properties = new ProductProperties();
+
+    /** 被测服务，每个用例前重建 */
+    private ProductService service;
+
+    @BeforeEach
+    void setUp() {
+        service = new ProductService(productMapper.asMapper(), orderMapper.asMapper(), properties);
+    }
+
+    // ==================================================================
+    // 造数据的小工具
+    // ==================================================================
+
+    /**
+     * 造一件上架商品并放进假表。
+     *
+     * @param name  名称
+     * @param price 售价（元）
+     * @param stock 库存
+     * @return 带自增 ID 的商品
+     */
+    private Product seedProduct(String name, String price, int stock) {
+        Product product = new Product();
+        product.setName(name);
+        product.setPrice(new BigDecimal(price));
+        product.setStock(stock);
+        product.setEnabled(1);
+        product.setSortNo(0);
+        return productMapper.seed(product);
+    }
+
+    /**
+     * 造一笔待支付单并放进假表。
+     *
+     * @param userId    下单人
+     * @param productId 商品 ID
+     * @param quantity  数量
+     * @param createdAt 下单时刻，用来构造「已超时」的单据
+     * @return 带自增 ID 的购买单
+     */
+    private ProductOrder seedPendingOrder(Long userId, Long productId, int quantity,
+                                          LocalDateTime createdAt) {
+        ProductOrder order = new ProductOrder();
+        order.setOrderNo(ProductNo.generate());
+        order.setUserId(userId);
+        order.setProductId(productId);
+        order.setProductName("占位商品");
+        order.setUnitPrice(new BigDecimal("2.00"));
+        order.setQuantity(quantity);
+        order.setAmount(new BigDecimal("2.00").multiply(BigDecimal.valueOf(quantity)));
+        order.setStatus(ProductOrderStatus.PENDING_PAYMENT.name());
+        order.setCreatedAt(createdAt);
+        return orderMapper.seed(order);
+    }
+
+    /**
+     * 构造一个下单请求。
+     *
+     * @param productId 商品 ID
+     * @param quantity  数量
+     * @return 请求对象
+     */
+    private static CreateProductOrderRequest request(Long productId, int quantity) {
+        CreateProductOrderRequest request = new CreateProductOrderRequest();
+        request.setProductId(productId);
+        request.setQuantity(quantity);
+        return request;
+    }
+
+    // ==================================================================
+    // 下单
+    // ==================================================================
+
+    @Test
+    @DisplayName("下单：落一条待支付单，金额 = 单价 × 数量，此时库存未扣")
+    void createOrder_snapshotsPriceAndKeepsStock() {
+        Product product = seedProduct("矿泉水", "2.00", 10);
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 3));
+
+        assertTrue(result.isSuccess(), "有货就该下单成功");
+        ProductOrderVo vo = result.getData();
+        assertNotNull(vo.getOrderNo(), "要返回单号 —— 付款时它充当商户订单号");
+        assertTrue(vo.getOrderNo().startsWith(ProductNo.PREFIX),
+                "单号前缀必须对，它是支付回调路由的依据");
+        assertEquals("2.00", vo.getUnitPrice().toPlainString());
+        assertEquals(3, vo.getQuantity());
+        assertEquals("6.00", vo.getAmount().toPlainString(), "金额用 BigDecimal 算，不能有浮点误差");
+        assertEquals(ProductOrderStatus.PENDING_PAYMENT.name(), vo.getStatus());
+
+        assertEquals(10, productMapper.get(product.getId()).getStock(),
+                "库存是【支付成功时】才扣的，下单这一刻不能动它");
+    }
+
+    @Test
+    @DisplayName("下单：库存为 0 时拒绝，且不留下任何单据")
+    void createOrder_rejectsSoldOut() {
+        Product product = seedProduct("已售罄", "15.00", 0);
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertEquals(ErrorCode.PRODUCT_SOLD_OUT, result.getError());
+        assertEquals(0, orderMapper.size(), "被拒绝的请求不该留下购买单");
+    }
+
+    @Test
+    @DisplayName("下单：数量超过可售量时拒绝，提示里带上剩余件数")
+    void createOrder_rejectsWhenQuantityExceedsAvailable() {
+        Product product = seedProduct("能量饮料", "6.50", 2);
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 3));
+
+        assertEquals(ErrorCode.PRODUCT_SOLD_OUT, result.getError());
+        assertTrue(result.resolveMessage().contains("2"),
+                "要告诉用户还剩几件 —— 只说「售罄」的话他会以为一件都没有了");
+        assertEquals(0, orderMapper.size());
+    }
+
+    @Test
+    @DisplayName("下单：别人未支付的单子也算占着库存")
+    void createOrder_countsOthersPendingOrders() {
+        Product product = seedProduct("能量饮料", "6.50", 2);
+        // 别人下了一单还没付款，占掉 1 件
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 1, LocalDateTime.now());
+
+        // 表面上库存还有 2 件，但可售量只有 1 件
+        BizResult<ProductOrderVo> one = service.createOrder(USER_ID, request(product.getId(), 1));
+        assertTrue(one.isSuccess(), "可售量还剩 1 件，买 1 件应当成功");
+
+        BizResult<ProductOrderVo> two = service.createOrder(USER_ID, request(product.getId(), 2));
+        assertEquals(ErrorCode.PRODUCT_SOLD_OUT, two.getError(),
+                "守住「两人同时买最后一件都能成功」那道时间差");
+    }
+
+    @Test
+    @DisplayName("占用按件数算：一笔买 5 件的单占 5 件，不是 1 件")
+    void pendingQuantity_isSummedNotCounted() {
+        // ⚠️ 这条用例钉住一个「写错了不报错」的地方：统计占用量若用
+        // COUNT(*) 而不是 SUM(quantity)，一笔买 5 件的单只会占掉 1 件，
+        // 可售量因此虚高 4 件 —— 表现为「明明下单成功了，付款后却说没货」。
+        // 它是在写这个模块时被一条更宽的用例顺带发现的，留一条专测守着
+        Product product = seedProduct("能量饮料", "6.50", 10);
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 5, LocalDateTime.now());
+
+        ProductVo vo = service.listOnSale().getData().get(0);
+
+        assertEquals(10, vo.getStock());
+        assertEquals(5, vo.getAvailableStock(), "10 件被占掉 5 件，还剩 5 件");
+    }
+
+    @Test
+    @DisplayName("下单：超时的待支付单不再占库存")
+    void createOrder_ignoresTimedOutPendingOrders() {
+        Product product = seedProduct("限量周边", "15.00", 1);
+        // 40 分钟前的未付单 —— 超过默认的 30 分钟存活时长。
+        // 商品单不像月卡那样会被自动关闭，所以这条过滤是「旧单不再挡路」的唯一出口
+        LocalDateTime longAgo = LocalDateTime.now().minusMinutes(40);
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 1, longAgo);
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertTrue(result.isSuccess(),
+                "超时的单子不再占位 —— 否则一笔无人认领的旧单会把商品永久占住，"
+                        + "而且界面上看不出任何异常");
+    }
+
+    @Test
+    @DisplayName("下单：商品已下架时拒绝")
+    void createOrder_rejectsDisabledProduct() {
+        Product product = seedProduct("下架货", "9.90", 10);
+        product.setEnabled(0);
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertEquals(ErrorCode.PRODUCT_STATUS_INVALID, result.getError(),
+                "下架是「暂时不卖」，与不存在要分开 —— 用户该做的是换个东西买");
+        assertEquals(0, orderMapper.size());
+    }
+
+    @Test
+    @DisplayName("下单：商品不存在")
+    void createOrder_rejectsUnknownProduct() {
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(9999L, 1));
+
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, result.getError());
+    }
+
+    // ==================================================================
+    // 陈列与详情
+    // ==================================================================
+
+    @Test
+    @DisplayName("列表：不含下架商品，但含已售罄的")
+    void listOnSale_excludesDisabledButKeepsSoldOut() {
+        seedProduct("在售", "2.00", 10);
+        seedProduct("已售罄", "15.00", 0);
+        Product disabled = seedProduct("下架了", "5.00", 10);
+        disabled.setEnabled(0);
+
+        BizResult<List<ProductVo>> result = service.listOnSale();
+
+        List<String> names = result.getData().stream().map(ProductVo::getName).toList();
+        assertEquals(List.of("在售", "已售罄"), names,
+                "下架的要从列表里消失；售罄的要留着 —— 直接消失会让顾客以为这东西不卖了");
+        assertTrue(result.getData().get(1).getSoldOut(), "售罄的要带上标记，前端据此把卡片置灰");
+        assertFalse(result.getData().get(0).getSoldOut());
+    }
+
+    @Test
+    @DisplayName("列表：可售量扣掉未支付的占用，与下单校验同一个口径")
+    void listOnSale_availableStockMatchesOrderCheck() {
+        Product product = seedProduct("能量饮料", "6.50", 3);
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 2, LocalDateTime.now());
+
+        ProductVo vo = service.listOnSale().getData().get(0);
+
+        assertEquals(3, vo.getStock(), "实际库存照实给");
+        assertEquals(1, vo.getAvailableStock(), "可售量要扣掉别人占着的 2 件");
+        assertFalse(vo.getSoldOut(), "还剩 1 件，不算售罄");
+
+        // 口径一致的验证：说剩 1 件，就真的只能买 1 件
+        assertTrue(service.createOrder(USER_ID, request(product.getId(), 1)).isSuccess());
+        assertEquals(ErrorCode.PRODUCT_SOLD_OUT,
+                service.createOrder(USER_ID, request(product.getId(), 1)).getError(),
+                "页面说还剩几件，下单就得能买几件 —— 两处口径不一致会让人以为系统坏了");
+    }
+
+    @Test
+    @DisplayName("详情：已下架的商品仍能查到")
+    void detail_returnsDisabledProduct() {
+        Product product = seedProduct("下架了", "5.00", 10);
+        product.setEnabled(0);
+
+        BizResult<ProductVo> result = service.detail(product.getId());
+
+        assertTrue(result.isSuccess(),
+                "用户的订单里可能还指着它，点进去看不了会很莫名其妙");
+        assertFalse(result.getData().getEnabled());
+    }
+
+    @Test
+    @DisplayName("详情：商品不存在")
+    void detail_rejectsUnknownProduct() {
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.detail(9999L).getError());
+    }
+
+    // ==================================================================
+    // 取消
+    // ==================================================================
+
+    @Test
+    @DisplayName("取消：待支付单转已关闭，释放它占着的可售量")
+    void cancelOrder_releasesAvailability() {
+        Product product = seedProduct("限量周边", "15.00", 1);
+        ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+        assertEquals(ErrorCode.PRODUCT_SOLD_OUT,
+                service.createOrder(OTHER_USER_ID, request(product.getId(), 1)).getError(),
+                "先确认这一件确实被占着");
+
+        assertTrue(service.cancelOrder(USER_ID, order.getId()).isSuccess());
+
+        assertEquals(ProductOrderStatus.CLOSED.name(), orderMapper.get(order.getId()).getStatus());
+        assertTrue(service.createOrder(OTHER_USER_ID, request(product.getId(), 1)).isSuccess(),
+                "取消之后可售量要还回来 —— 这正是「取消」这个动作的意义");
+    }
+
+    @Test
+    @DisplayName("取消：已支付的单不能取消")
+    void cancelOrder_rejectsPaidOrder() {
+        Product product = seedProduct("矿泉水", "2.00", 10);
+        ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+        order.setStatus(ProductOrderStatus.PAID.name());
+
+        BizResult<Void> result = service.cancelOrder(USER_ID, order.getId());
+
+        assertEquals(ErrorCode.PRODUCT_STATUS_INVALID, result.getError(),
+                "关掉一笔付过款的单会造成「单子关闭、库存少了」的不一致");
+        assertEquals(ProductOrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "被拒绝的取消不该改动任何状态");
+    }
+
+    @Test
+    @DisplayName("取消：别人的单按「不存在」处理，不用 403")
+    void cancelOrder_treatsOthersOrderAsNotFound() {
+        Product product = seedProduct("矿泉水", "2.00", 10);
+        ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+
+        BizResult<Void> result = service.cancelOrder(OTHER_USER_ID, order.getId());
+
+        assertEquals(ErrorCode.PRODUCT_ORDER_NOT_FOUND, result.getError(),
+                "403 等于承认「这个单子存在，只是不归你」，可以被用来枚举单号");
+        assertEquals(ProductOrderStatus.PENDING_PAYMENT.name(),
+                orderMapper.get(order.getId()).getStatus());
+    }
+
+    // ==================================================================
+    // 我的订单
+    // ==================================================================
+
+    @Test
+    @DisplayName("我的订单：只返回自己的，且按最新在前")
+    void myOrders_returnsOnlyOwnOrders() {
+        Product product = seedProduct("矿泉水", "2.00", 100);
+        ProductOrder mine = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 2, LocalDateTime.now());
+
+        BizResult<PageResult<ProductOrderVo>> result =
+                service.myOrders(USER_ID, 1, 10, null);
+
+        assertEquals(1, result.getData().getTotal(), "别人的单不该出现在我的列表里");
+        assertEquals(mine.getOrderNo(), result.getData().getRecords().get(0).getOrderNo());
+    }
+
+    @Test
+    @DisplayName("我的订单：状态筛选传了非法值时返回参数错误，而不是静默返回全部")
+    void myOrders_rejectsInvalidStatus() {
+        BizResult<PageResult<ProductOrderVo>> result =
+                service.myOrders(USER_ID, 1, 10, "NOT_A_STATUS");
+
+        assertEquals(ErrorCode.PARAM_INVALID, result.getError(),
+                "静默忽略非法筛选值会让前端以为自己筛对了，实际问题被藏起来");
+    }
+
+    // ==================================================================
+    // 后台维护
+    // ==================================================================
+
+    @Test
+    @DisplayName("后台改商品：不传 enabled 时保持原值")
+    void update_keepsEnabledWhenNotProvided() {
+        Product product = seedProduct("在售", "2.00", 10);
+        product.setEnabled(0);
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("改了个名字");
+        request.setPrice(new BigDecimal("3.00"));
+        request.setStock(20);
+        // enabled 不传
+
+        assertTrue(service.update(product.getId(), request).isSuccess());
+
+        assertEquals(0, productMapper.get(product.getId()).getEnabled(),
+                "全量替换语义的唯一例外：改个名字顺手把商品下架了、管理员却毫无察觉，"
+                        + "比「多写一个字段」严重得多");
+        assertEquals("改了个名字", productMapper.get(product.getId()).getName());
+        assertEquals(20, productMapper.get(product.getId()).getStock());
+    }
+
+    @Test
+    @DisplayName("后台改商品：传了 enabled 就按传的来")
+    void update_appliesEnabledWhenProvided() {
+        Product product = seedProduct("在售", "2.00", 10);
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("在售");
+        request.setPrice(new BigDecimal("2.00"));
+        request.setStock(10);
+        request.setEnabled(0);
+
+        service.update(product.getId(), request);
+
+        assertEquals(0, productMapper.get(product.getId()).getEnabled());
+    }
+
+    @Test
+    @DisplayName("后台改商品：没传的可选字段按清空处理（全量替换）")
+    void update_clearsOptionalFieldsWhenMissing() {
+        Product product = seedProduct("在售", "2.00", 10);
+        product.setCover("/uploads/product/a.jpg");
+        product.setDescription("原来的描述");
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("在售");
+        request.setPrice(new BigDecimal("2.00"));
+        request.setStock(10);
+
+        service.update(product.getId(), request);
+
+        assertNull(productMapper.get(product.getId()).getCover(),
+                "PUT 是全量替换：没传就是清掉，而不是保持原值");
+        assertNull(productMapper.get(product.getId()).getDescription());
+    }
+
+    @Test
+    @DisplayName("后台新增：不传 enabled 时默认上架，不传 sortNo 按 0")
+    void create_defaultsEnabledAndSortNo() {
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("新品");
+        request.setPrice(new BigDecimal("9.90"));
+        request.setStock(5);
+
+        BizResult<ProductVo> result = service.create(request);
+
+        assertTrue(result.isSuccess());
+        Product saved = productMapper.get(result.getData().getId());
+        assertEquals(1, saved.getEnabled(), "新商品默认上架");
+        assertEquals(0, saved.getSortNo());
+    }
+
+    @Test
+    @DisplayName("后台列表：含已下架商品，且可按状态筛选")
+    void listAll_includesDisabled() {
+        seedProduct("在售", "2.00", 10);
+        Product disabled = seedProduct("下架了", "5.00", 10);
+        disabled.setEnabled(0);
+
+        assertEquals(2, service.listAll(1, 10, null, null).getData().getTotal(),
+                "后台要能看到下架的商品，否则没法重新上架");
+        assertEquals(1, service.listAll(1, 10, null, 1).getData().getTotal(), "只看上架的");
+        assertEquals(1, service.listAll(1, 10, null, 0).getData().getTotal(), "只看下架的");
+    }
+
+    @Test
+    @DisplayName("后台删除：商品从两个列表里都消失，但历史订单不受影响")
+    void delete_hidesProductButKeepsOrderSnapshot() {
+        Product product = seedProduct("矿泉水", "2.00", 10);
+        ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 2, LocalDateTime.now());
+
+        assertTrue(service.delete(product.getId()).isSuccess());
+
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.detail(product.getId()).getError());
+        assertTrue(service.listOnSale().getData().isEmpty());
+        assertEquals(0, service.listAll(1, 10, null, null).getData().getTotal());
+
+        // 订单上存的是下单时的名称与价格快照，不依赖商品记录还在不在
+        BizResult<PageResult<ProductOrderVo>> orders = service.myOrders(USER_ID, 1, 10, null);
+        assertEquals(1, orders.getData().getTotal(), "历史订单不因商品被删而消失");
+        assertEquals("占位商品", orders.getData().getRecords().get(0).getProductName());
+    }
+
+    @Test
+    @DisplayName("后台删除：不存在的商品返回 404")
+    void delete_rejectsUnknownProduct() {
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.delete(9999L).getError());
+    }
+}

@@ -84,6 +84,52 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
                       @Param("preference") String preference);
 
     /**
+     * 更新头像地址。
+     *
+     * <p><b>刻意单独成一个方法，而不是并进 {@link #updateProfile}</b>：
+     * 那个方法是 PUT 的全量替换语义（传 null 即清空），而头像走的是
+     * 「上传成功就换掉」这一条独立路径。合进去的话，前端提交「只改昵称」的表单时
+     * 会因为没带 avatar 而<b>把头像清空，且不报任何错</b>。
+     * 两者语义不同，就不该共用一条 SQL。
+     *
+     * <p>写成 {@code #{avatar}} 而非 {@code COALESCE(*, avatar)}：本方法的调用方
+     * 永远是「刚把新图写进磁盘、拿到了新路径」，不存在「不传就不改」的需求。
+     *
+     * @param id     用户 ID
+     * @param avatar 新的头像地址（站内相对路径），可为 null 表示恢复默认头像
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    @Update("""
+            UPDATE sys_user
+               SET avatar     = #{avatar},
+                   updated_at = NOW()
+             WHERE id = #{id}
+               AND deleted = 0
+            """)
+    int updateAvatar(@Param("id") Long id, @Param("avatar") String avatar);
+
+    /**
+     * 更新自定义背景图地址。
+     *
+     * <p>与 {@link #updateAvatar} 严格对称、同样独立成方法，理由见那边的注释。
+     * <b>两列分开更新而不是合成一个方法</b>：换头像不该顺带把背景图也写一遍 ——
+     * 那会在并发上传时出现「换头像的请求把背景图改回旧值」这类丢更新，
+     * 且因为两列都被显式赋值，连 {@code COALESCE} 都救不了。
+     *
+     * @param id     用户 ID
+     * @param banner 新的背景图地址（站内相对路径），可为 null 表示回落纯色背景
+     * @return 受影响行数；0 表示用户不存在或已删除
+     */
+    @Update("""
+            UPDATE sys_user
+               SET banner     = #{banner},
+                   updated_at = NOW()
+             WHERE id = #{id}
+               AND deleted = 0
+            """)
+    int updateBanner(@Param("id") Long id, @Param("banner") String banner);
+
+    /**
      * 更新密码，同时把 token 版本号加一。
      *
      * <p>两件事必须在<b>同一条 SQL</b> 里完成：改完密码却漏了升版本号，

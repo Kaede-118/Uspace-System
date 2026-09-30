@@ -39,6 +39,18 @@ public class UserProfileVo {
     /** 游玩偏好，逗号分隔的设备类型 code，可为空 */
     private String preference;
 
+    /**
+     * 头像地址（站内相对路径），可为空。
+     *
+     * <p>前端直接 {@code <img :src="avatar">}；为空时回落到默认头像。
+     * 改它走独立的 {@code POST /api/user/me/avatar}，<b>不走本 VO 对应的 PUT 接口</b> ——
+     * 那个是全量替换，混进来会让「只改昵称」顺手清空头像。
+     */
+    private String avatar;
+
+    /** 自定义背景图地址（站内相对路径，约 6:1 横长图），可为空。为空时卡片用纯色兜底 */
+    private String banner;
+
     /** 角色：USER / ADMIN。前端据此决定是否显示「运营后台」入口 */
     private String role;
 
@@ -71,6 +83,8 @@ public class UserProfileVo {
         vo.setPhone(user.getPhone());
         vo.setQq(user.getQq());
         vo.setPreference(user.getPreference());
+        vo.setAvatar(user.getAvatar());
+        vo.setBanner(user.getBanner());
         vo.setRole(user.getRole());
         vo.setTotalPaid(user.getTotalPaid());
         vo.setCreatedAt(user.getCreatedAt());

@@ -71,18 +71,32 @@ public class BookingVo {
             return null;
         }
         BookingVo vo = new BookingVo();
-        vo.setId(booking.getId());
-        vo.setBookingNo(booking.getBookingNo());
-        vo.setHostUserId(booking.getHostUserId());
-        vo.setStartAt(booking.getStartAt());
-        vo.setEndAt(booking.getEndAt());
-        vo.setPrice(booking.getPrice());
-        vo.setStatus(booking.getStatus());
-        vo.setPaymentMethod(booking.getPaymentMethod());
-        vo.setPaidAt(booking.getPaidAt());
-        vo.setRemark(booking.getRemark());
-        vo.setCreatedBy(booking.getCreatedBy());
-        vo.setCreatedAt(booking.getCreatedAt());
+        vo.fillFrom(booking);
         return vo;
+    }
+
+    /**
+     * 把实体的字段填进当前实例。
+     *
+     * <p><b>抽出来是给子类复用的</b>：{@link BookingInviteVo} 要在同样这些字段
+     * 之上再加一个参与者名单。若它自己重写一遍这十二行赋值，将来本类加了字段，
+     * 子类那份就会悄悄漏掉，且不报任何错 —— 表现为「邀请页少了某个字段」，
+     * 而列表页一切正常。
+     *
+     * @param booking 包场实体，不可为 null
+     */
+    protected void fillFrom(Booking booking) {
+        setId(booking.getId());
+        setBookingNo(booking.getBookingNo());
+        setHostUserId(booking.getHostUserId());
+        setStartAt(booking.getStartAt());
+        setEndAt(booking.getEndAt());
+        setPrice(booking.getPrice());
+        setStatus(booking.getStatus());
+        setPaymentMethod(booking.getPaymentMethod());
+        setPaidAt(booking.getPaidAt());
+        setRemark(booking.getRemark());
+        setCreatedBy(booking.getCreatedBy());
+        setCreatedAt(booking.getCreatedAt());
     }
 }

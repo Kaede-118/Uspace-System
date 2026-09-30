@@ -1,7 +1,6 @@
 package com.kaede.uspace.order;
 
 import java.util.Arrays;
-import java.util.Set;
 
 /**
  * 支付通道。
@@ -80,10 +79,21 @@ public enum PaymentChannel {
      * <p>线上通道要调支付网关下单、要等回调；{@link #QR_UPLOAD} 不走网关，
      * 发起支付时不该去调网关（调了必然失败）。
      *
+     * <p><b>刻意不写成 {@code Set.of(...).contains(name)}</b>：JDK 的不可变集合
+     * 对 {@code null} 查询会抛 {@link NullPointerException}（它们用
+     * {@code requireNonNull} 挡住 null），而本方法的契约是「不是线上通道就返回 false」。
+     * 用 {@code equals} 逐个比则天生安全 —— {@code payment_method} 列可空，
+     * 0 元结清或尚未支付的订单在读到它时就是 null，
+     * 那时问一句「这是不是线上通道」是正常调用，不该崩。
+     *
+     * <p>与 {@code DeviceStatus.isUsable} 是同一套写法，改动时两处一起改。
+     *
      * @param name 通道名，可为 null
-     * @return 线上通道返回 true
+     * @return 线上通道返回 true；null、{@link #QR_UPLOAD} 或认不出的取值返回 false
      */
     public static boolean isOnline(String name) {
-        return Set.of(WXPAY_JSAPI.name(), WXPAY_H5.name(), ALIPAY_WAP.name()).contains(name);
+        return WXPAY_JSAPI.name().equals(name)
+                || WXPAY_H5.name().equals(name)
+                || ALIPAY_WAP.name().equals(name);
     }
 }

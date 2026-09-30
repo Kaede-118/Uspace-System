@@ -1,6 +1,7 @@
 package com.kaede.uspace.order.dto;
 
 import com.kaede.uspace.billing.dto.BillingResult;
+import com.kaede.uspace.billing.dto.NextChange;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.entity.Order;
 import lombok.Data;
@@ -110,6 +111,35 @@ public class OrderPreviewVo {
     private boolean willAutoSettle;
 
     /**
+     * 距下一次账单变化的剩余秒数；{@code null} 表示当前计费段内不会再变化
+     * （已到封顶价、或该段被月卡覆盖 —— 那时看 {@link #nextChangeText} 的说明）。
+     *
+     * <p>用户看着计时器时最关心的就是这个：现在停，还是再玩一会儿。
+     * <b>由后端算而不是前端拿 {@link #bill} 的分段自己推</b> ——
+     * 档位边界里的「30 分钟一档」与「5 分钟宽限」都是配置项，
+     * 前端算等于把计费规则复制一份，改配置时静默算错。
+     *
+     * <p><b>用剩余秒数而不是绝对时刻</b>：绝对时刻会带上客户端与服务端的时钟偏差，
+     * 用户手机时间不准时倒计时会算出荒谬的值。
+     *
+     * <p>前端每秒本地递减即可（后端把秒数算好，前端不必再问），
+     * 配合预览轮询刷新校正 —— 与 {@link #previewAt} 那套是同一个思路。
+     */
+    private Long nextChangeInSeconds;
+
+    /**
+     * 下一次变化的说明，<b>不含时间</b>：前端拼成「还有 12:30 进入下一档 ¥20.00」。
+     *
+     * <p>三种取值：<b>段内跳档</b>（「进入下一档 ¥20.00」）、
+     * <b>跨时段</b>（「跨入夜场，按夜场重新计价」）、
+     * <b>段内不再变化</b>（「当前已到封顶价」/「当前时段月卡免费」，此时秒数为 null）。
+     *
+     * <p>与 {@link #nextChangeInSeconds} 同为 null 表示没有可预告的变化
+     * （例如此刻处于包场时段，压根没有正在计费的段）。
+     */
+    private String nextChangeText;
+
+    /**
      * 停止计时后订单将处于的状态名，取值 {@code PENDING_PAYMENT} 或 {@code PAID}。
      *
      * <p>由后端直接给出，而不是让前端按金额自己判：0 元直通已支付是<b>结算的规则</b>，
@@ -140,11 +170,13 @@ public class OrderPreviewVo {
      * @param freeByBooking   本次是否命中包场而减免了时长
      * @param cappedNow       当前账单是否已全部达到封顶
      * @param statusAfterStop 停止计时后订单将处于的状态名
+     * @param nextChange      下一次账单变化的预告；为 null 表示此刻没有可预告的
+     *                        （例如此刻处于包场时段，没有正在计费的段）
      * @return 结账预览视图
      */
     public static OrderPreviewVo of(Order order, LocalDateTime previewAt, BillingResult bill,
                                     boolean freeByBooking, boolean cappedNow,
-                                    String statusAfterStop) {
+                                    String statusAfterStop, NextChange nextChange) {
         OrderPreviewVo vo = new OrderPreviewVo();
         vo.setOrderId(order.getId());
         vo.setOrderNo(order.getOrderNo());
@@ -159,6 +191,13 @@ public class OrderPreviewVo {
         vo.setStatusAfterStop(statusAfterStop);
         vo.setStatusAfterStopText(OrderStatus.labelOf(statusAfterStop));
         vo.setWillAutoSettle(OrderStatus.PAID.name().equals(statusAfterStop));
+        if (nextChange != null) {
+            // 整体可空：null 表示「此刻没有正在计费的段」（如包场时段内），
+            // 与「段内不再变化」（秒数 null、说明非 null）是两回事，前端据此区分
+            // 「不显示」与「显示这句说明」
+            vo.setNextChangeInSeconds(nextChange.getInSeconds());
+            vo.setNextChangeText(nextChange.getText());
+        }
         vo.setBill(bill);
         return vo;
     }

@@ -189,6 +189,68 @@ class OrderMapperIntegrationTests {
     }
 
     // ==================================================================
+    // 在店时长统计（「我的」页的累计 / 本月时长）
+    // ==================================================================
+
+    @Test
+    @DisplayName("时长统计：只算已支付，且与计费时长各算各的")
+    void stayMinutes_countsOnlyPaid() {
+        LocalDateTime start = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+
+        // 在店 150 分钟、但计费时长为 0 —— 包场单的样子。若 SQL 误用了
+        // day_minutes + night_minutes，这里会算成 0 而不报任何错
+        Order paid = paidOrder(start.plusHours(1), "100.00");
+        paid.setStayMinutes(150);
+        paid.setDayMinutes(0);
+        orderMapper.insert(paid);
+
+        Order pending = orderOf(start.plusHours(2), OrderStatus.PENDING_PAYMENT, "50.00");
+        pending.setStayMinutes(999);
+        orderMapper.insert(pending);
+
+        assertEquals(150L, orderMapper.selectTotalStayMinutes(USER_ID).longValue(),
+                "欠着费的那一单不算 —— 计进去会让「我的」页的累计时长每刷新一次就跳一次");
+    }
+
+    @Test
+    @DisplayName("时长统计：归月口径与月累计消费逐字一致（按 start_time 的半开区间）")
+    void stayMinutes_groupsByStartTimeLikeMonthPaidAmount() {
+        LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        LocalDateTime lastMonth = thisMonth.minusMonths(1);
+
+        Order last = paidOrder(lastMonth.plusDays(14), "200.00");
+        last.setStayMinutes(60);
+        orderMapper.insert(last);
+
+        // 紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
+        Order edge = paidOrder(thisMonth.plusMonths(1).minusSeconds(1), "66.00");
+        edge.setStayMinutes(30);
+        orderMapper.insert(edge);
+
+        assertEquals(30L, orderMapper.selectMonthStayMinutes(
+                        USER_ID, thisMonth, thisMonth.plusMonths(1)).longValue(),
+                "两个数字在「我的」页并排显示，归月口径必须与 selectMonthPaidAmount 一致 —— "
+                        + "一个按 start_time、另一个按 end_time 的话，跨月那一刻就错位了");
+        assertEquals(60L, orderMapper.selectMonthStayMinutes(
+                        USER_ID, lastMonth, thisMonth).longValue(),
+                "上个月那单应当算在上个月");
+        assertEquals(90L, orderMapper.selectTotalStayMinutes(USER_ID).longValue(),
+                "累计是全部历史，不受月份区间影响");
+    }
+
+    @Test
+    @DisplayName("时长统计：没有任何记录时返回 0 而不是 null")
+    void stayMinutes_returnsZeroWhenEmpty() {
+        LocalDateTime start = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+
+        assertEquals(0L, orderMapper.selectTotalStayMinutes(USER_ID + 1).longValue(),
+                "COALESCE 让空结果返回 0；返回 null 会让调用方在累加时抛 NPE");
+        assertEquals(0L, orderMapper.selectMonthStayMinutes(
+                        USER_ID + 1, start, start.plusMonths(1)).longValue(),
+                "本月同理");
+    }
+
+    // ==================================================================
     // 状态守卫
     // ==================================================================
 
@@ -220,18 +282,37 @@ class OrderMapperIntegrationTests {
         Order inUse = newOrder(OrderStatus.IN_USE);
         orderMapper.insert(inUse);
 
-        int affected = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(),
+        int affected = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 120,
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
                 new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
                 OrderStatus.PENDING_PAYMENT.name());
         assertEquals(1, affected, "使用中的订单应当能被结算");
 
         // 再结算一次 —— 模拟用户重复点击
-        int again = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(),
+        int again = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 120,
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
                 new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
                 OrderStatus.PENDING_PAYMENT.name());
         assertEquals(0, again, "第二次应当拿到 0 行，而不是把账单重算一遍");
+    }
+
+    @Test
+    @DisplayName("在店时长：新列能落库并读出，且与计费时长各记各的")
+    void updateSettlement_writesStayMinutesSeparately() {
+        Order inUse = newOrder(OrderStatus.IN_USE);
+        orderMapper.insert(inUse);
+
+        // 结算为「在店 180 分钟、但计费只有 0 分钟」—— 这正是包场单的样子：
+        // 一行代码算错就会让这一列悄悄变成 null 或与计费时长混同，而不会报任何错
+        orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 180,
+                0, BigDecimal.ZERO, 0, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                OrderStatus.PAID.name());
+
+        Order loaded = orderMapper.selectById(inUse.getId());
+        assertEquals(180, loaded.getStayMinutes(),
+                "新列是模块 8 后加的，列名映射写错或忘了加字段都不会报错，只有查回来才知道");
+        assertEquals(0, loaded.getDayMinutes(), "计费时长照旧，两个口径不能互相覆盖");
     }
 
     @Test
@@ -243,13 +324,13 @@ class OrderMapperIntegrationTests {
         orderMapper.insert(paid);
 
         int adjusted = orderMapper.updateAdjustment(pending.getId(),
-                LocalDateTime.now().minusHours(1), 90, new BigDecimal("12.00"),
+                LocalDateTime.now().minusHours(1), 90, 90, new BigDecimal("12.00"),
                 0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
                 new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
         assertEquals(1, adjusted, "待支付的订单可以调整");
 
         int rejected = orderMapper.updateAdjustment(paid.getId(),
-                LocalDateTime.now().minusHours(1), 90, new BigDecimal("12.00"),
+                LocalDateTime.now().minusHours(1), 90, 90, new BigDecimal("12.00"),
                 0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
                 new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
         assertEquals(0, rejected,
@@ -297,6 +378,49 @@ class OrderMapperIntegrationTests {
 
         assertNotNull(active, "有一笔进行中的订单应当查得到");
         assertEquals(inUse.getId(), active.getId(), "拿到的应当是那笔使用中的");
+    }
+
+    @Test
+    @DisplayName("未结清查询：待支付的订单算「未结清」，而 current 用的那条查询看不见它")
+    void selectUnsettledByUser_coversPendingPayment() {
+        orderMapper.insert(paidOrder(LocalDateTime.now().minusDays(1), "22.00"));
+        Order pending = newOrder(OrderStatus.PENDING_PAYMENT);
+        orderMapper.insert(pending);
+
+        Order active = orderMapper.selectActiveByUser(USER_ID);
+        Order unsettled = orderMapper.selectUnsettledByUser(USER_ID);
+
+        assertNull(active,
+                "首页的「当前订单」只认使用中：待支付的单已结算、密码已撤销，"
+                        + "返回它会给出一个点不动的「查看密码」");
+        assertNotNull(unsettled, "待支付的订单属于「未结清」—— 防连点要连它一起拦");
+        assertEquals(pending.getId(), unsettled.getId(), "拿到的应当是那笔待支付的");
+    }
+
+    @Test
+    @DisplayName("未结清查询：同时有使用中与待支付时取最近一条")
+    void selectUnsettledByUser_picksLatestOne() {
+        Order pending = newOrder(OrderStatus.PENDING_PAYMENT);
+        orderMapper.insert(pending);
+        Order inUse = newOrder(OrderStatus.IN_USE);
+        orderMapper.insert(inUse);
+
+        Order unsettled = orderMapper.selectUnsettledByUser(USER_ID);
+
+        assertNotNull(unsettled);
+        assertEquals(inUse.getId(), unsettled.getId(),
+                "同一个人同时挂着两种未结清状态（修复前的老数据才会这样）时取最近的一条，"
+                        + "提示用户先处理它");
+    }
+
+    @Test
+    @DisplayName("未结清查询：已结清的历史订单不返回")
+    void selectUnsettledByUser_ignoresPaid() {
+        orderMapper.insert(paidOrder(LocalDateTime.now().minusHours(3), "16.00"));
+
+        Order unsettled = orderMapper.selectUnsettledByUser(USER_ID);
+
+        assertNull(unsettled, "付过的单是已经了结的 —— 算进去会让所有老顾客都进不了门");
     }
 
     // ==================================================================

@@ -5,16 +5,21 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.space.dto.BookingParticipantVo;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.CreateBookingRequest;
+import com.kaede.uspace.space.dto.JoinResultVo;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import com.kaede.uspace.space.entity.Booking;
+import com.kaede.uspace.space.entity.BookingParticipant;
 import com.kaede.uspace.space.mapper.BookingMapper;
+import com.kaede.uspace.space.mapper.BookingParticipantMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
 import com.kaede.uspace.user.entity.SysUser;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,7 +28,9 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 
 /**
  * 包场服务（模块 3）。
@@ -74,14 +81,25 @@ public class BookingService {
      */
     private final SysUserMapper userMapper;
 
+    /**
+     * 包场参与者：谁在这场包场里。
+     *
+     * <p>下单准入、包场开始的清场、结算时的包场时段剪切，三处的「谁是参与者」
+     * 都以这张表为权威来源。它补上的是「被邀请者」这个过去没有落库的身份 ——
+     * 在那之前，被邀请者的唯一凭证是分享出去的令牌链接，而链接进不了 SQL。
+     */
+    private final BookingParticipantMapper participantMapper;
+
     public BookingService(BookingMapper bookingMapper,
                           StoreMapper storeMapper,
                           ClosureService closureService,
-                          SysUserMapper userMapper) {
+                          SysUserMapper userMapper,
+                          BookingParticipantMapper participantMapper) {
         this.bookingMapper = bookingMapper;
         this.storeMapper = storeMapper;
         this.closureService = closureService;
         this.userMapper = userMapper;
+        this.participantMapper = participantMapper;
     }
 
     // ==================================================================
@@ -128,20 +146,123 @@ public class BookingService {
     }
 
     /**
-     * 分页查询某人作为包场人的场次（含待付款的）。
+     * 分页查询某人<b>作为包场人</b>的场次（含待付款的）。
      *
      * <p>供模块 8 的用户端使用：包场人要能看到自己名下的场、对未付款的发起支付。
-     * <b>被邀请者不在返回范围内</b> —— 他不记在 {@code host_user_id} 上，
-     * 只能凭邀请链接查看那一场（见模块 8 的邀请令牌入口）。
+     * <b>被邀请者不在返回范围内</b>，他走 {@link #listJoinedBookings}。
+     *
+     * <p><b>为什么不改读参与者表</b>：{@code HOST} 行是包场<b>付款成功</b>那一刻
+     * 才写入的（与邀请令牌同一事务），改读它就会漏掉所有待付款的场次 ——
+     * 而包场人恰恰要靠这个列表找到待付款的场、点进付款入口。
+     * 两个列表因此各走各的数据源：本方法按 {@code biz_booking.host_user_id} 查，
+     * {@link #listJoinedBookings} 按参与者表的 {@code role} 查。
      *
      * @param userId   包场人用户 ID
      * @param pageNum  页码，从 1 开始
      * @param pageSize 每页条数
      * @return 分页结果，按开始时间倒序
      */
-    public BizResult<PageResult<BookingVo>> listMyBookings(Long userId, long pageNum, long pageSize) {
+    public BizResult<PageResult<BookingVo>> listHostBookings(Long userId, long pageNum, long pageSize) {
         IPage<Booking> page = bookingMapper.selectPageByHost(new Page<>(pageNum, pageSize), userId);
         return BizResult.ok(PageResult.of(page, BookingVo::from));
+    }
+
+    /**
+     * 分页查询某人<b>作为被邀请者</b>参与的场次。
+     *
+     * <p>与 {@link #listHostBookings} 的区别只有角色一个变量 ——
+     * 两个列表都从参与者表出发，将来要支持包场人转让、或多发起人时，
+     * 这里不必改查询。
+     *
+     * <p><b>只查 {@code PARTICIPANT}，不含自己发起的场</b>：
+     * 「我参与的」与「我创建的」是两个列表，同一个人可能两边都有，
+     * 若这里把 {@code HOST} 也算进来，同一场会在两个列表里各出现一次。
+     *
+     * @param userId   用户 ID
+     * @param pageNum  页码，从 1 开始
+     * @param pageSize 每页条数
+     * @return 分页结果，按开始时间倒序
+     */
+    public BizResult<PageResult<BookingVo>> listJoinedBookings(Long userId, long pageNum, long pageSize) {
+        IPage<Booking> page = participantMapper.selectPageByUserRole(
+                new Page<>(pageNum, pageSize), userId, BookingParticipantRole.PARTICIPANT.name());
+        return BizResult.ok(PageResult.of(page, BookingVo::from));
+    }
+
+    /**
+     * 判断某人是不是这场包场的参与者（包场人也算）。
+     *
+     * <p><b>这是「谁是参与者」的唯一判定入口</b>，供 order 包的下单准入使用。
+     * 三处判定（准入、清场、计费剪切）里，只有准入必须要问这个问题 ——
+     * 另外两处读的是订单上的 {@code bookingId}，而下单时就把它挂好了
+     * （见 {@link #findUpcomingBookingForParticipant}），主链路因此一行未改。
+     *
+     * @param bookingId 包场 ID，可为 null
+     * @param userId    用户 ID，可为 null
+     * @return 是参与者返回 true；任一参数为 null 时返回 false
+     */
+    public boolean isParticipant(Long bookingId, Long userId) {
+        if (bookingId == null || userId == null) {
+            return false;
+        }
+        return participantMapper.countByBookingAndUser(bookingId, userId) > 0;
+    }
+
+    /**
+     * 查某人参与的、尚未结束的已付款包场，取最近的一场。
+     *
+     * <p><b>供下单时决定往订单上挂哪个 {@code bookingId}</b>。参与者可能比准入窗口
+     * 更早到店（那时包场还没进窗口，准入判定走「普通」分支，订单本不会挂包场），
+     * 若不主动挂上，包场开始时他会被当散客清场、结算时还会被重复计费。
+     *
+     * <p>挂上一场<b>还没到时间</b>的包场是无害的：计费剪区间时会先把包场区间夹到
+     * 订单区间内，夹完为空就整段跳过（见 {@code OrderService#billableRanges}）。
+     *
+     * @param userId 用户 ID
+     * @param now    当前时刻
+     * @return 最近的一场；门店未初始化或他没有任何未结束的包场时返回 null
+     */
+    public Booking findUpcomingBookingForParticipant(Long userId, LocalDateTime now) {
+        if (userId == null) {
+            return null;
+        }
+        Long storeId = storeMapper.selectCurrentId();
+        if (storeId == null) {
+            return null;
+        }
+        return participantMapper.selectUpcomingByParticipant(storeId, userId, now);
+    }
+
+    /**
+     * 查某场包场的参与者名单（含昵称与头像）。
+     *
+     * <p>昵称与头像<b>批量</b>查一次 {@code sys_user} 补齐，不逐条查 ——
+     * 名单通常只有几个人，但这是接口每次刷新都会走的热路径，
+     * N+1 在这里没有任何必要。
+     *
+     * <p>用户已被逻辑删除时，他在名单里仍占一行、只是昵称为空
+     * （见 {@link BookingParticipantVo#of}）—— 名单要如实反映「这场有谁」，
+     * 不该因为一个人注销了就把整行抹掉。
+     *
+     * @param bookingId 包场 ID
+     * @return 参与者名单，发起人排在最前；没有任何参与者时返回空列表
+     */
+    public List<BookingParticipantVo> listParticipants(Long bookingId) {
+        List<BookingParticipant> rows = participantMapper.selectByBookingId(bookingId);
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        List<Long> userIds = rows.stream()
+                .map(BookingParticipant::getUserId)
+                .distinct()
+                .toList();
+        Map<Long, SysUser> users = userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, user -> user));
+
+        return rows.stream()
+                .map(row -> BookingParticipantVo.of(row, users.get(row.getUserId())))
+                .toList();
     }
 
     /**
@@ -329,6 +450,58 @@ public class BookingService {
         log.info("[空间] 取消包场 {} 原时段 {} ~ {}",
                 existing.getBookingNo(), existing.getStartAt(), existing.getEndAt());
         return BizResult.ok(null);
+    }
+
+    /**
+     * 加入包场（被邀请者点开邀请链接时调用）。
+     *
+     * <p><b>重复加入不是错误</b>：刷新页面、从聊天记录里再点一次、落地页加载后
+     * 自动重发，都会走到这里，而用户看到的应当始终是「你在这场的名单里」。
+     * 所以两种情形都返回成功，靠 {@link JoinResultVo} 里的两个布尔值区分，
+     * 让前端决定是「欢迎」还是「你已经进入过了」。
+     *
+     * <p><b>唯一键冲突在这里是答案，不是异常</b>：两个人同时点同一条链接时，
+     * 双方都会先查到「还没加入」，然后都去插入，后到的那个撞上
+     * {@code uk_booking_user}。此时捕获它并当作「已加入」返回即可 ——
+     * 若改成靠应用层「先查后插」防重，那点时间差正好是并发窗口，
+     * 而唯一键是数据库给的、挡得住。这与 {@code BookingPaymentTargetHandler}
+     * 里捕获令牌冲突重试是同一套思路，区别只在撞上之后该重试还是该当成功。
+     *
+     * <p>这里捕获异常不会破坏事务：MySQL 遇到唯一键冲突只是让这一条语句失败，
+     * 事务本身仍可继续；而异常没有传播出本方法，Spring 也就不会标记回滚。
+     *
+     * @param booking 包场实体，由令牌解析而来（必然是已付款的）
+     * @param userId  加入者用户 ID
+     * @return 加入结果；包场为空时返回 404
+     */
+    @Transactional
+    public BizResult<JoinResultVo> joinByBooking(Booking booking, Long userId) {
+        if (booking == null || booking.getId() == null) {
+            return BizResult.fail(ErrorCode.NOT_FOUND, "邀请链接无效或已失效");
+        }
+        Long bookingId = booking.getId();
+
+        if (participantMapper.countByBookingAndUser(bookingId, userId) > 0) {
+            return BizResult.ok(JoinResultVo.alreadyJoined(participantMapper.countByBooking(bookingId)));
+        }
+
+        BookingParticipant row = new BookingParticipant();
+        row.setBookingId(bookingId);
+        row.setUserId(userId);
+        row.setRole(BookingParticipantRole.PARTICIPANT.name());
+        // 截断到秒：库列是 DATETIME（秒精度），而 MySQL 对亚秒是四舍五入而非截断，
+        // 不截断会让写进去的值与内存里的值差最多 1 秒。项目里其他地方同此习惯。
+        row.setJoinedAt(LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS));
+
+        try {
+            participantMapper.insert(row);
+        } catch (DuplicateKeyException e) {
+            log.info("[空间] 重复加入包场（并发撞唯一键）bookingId={} userId={}", bookingId, userId);
+            return BizResult.ok(JoinResultVo.alreadyJoined(participantMapper.countByBooking(bookingId)));
+        }
+
+        log.info("[空间] 加入包场 bookingId={} userId={}", bookingId, userId);
+        return BizResult.ok(JoinResultVo.joined(participantMapper.countByBooking(bookingId)));
     }
 
     // ==================================================================

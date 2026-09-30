@@ -2,8 +2,11 @@ package com.kaede.uspace.space;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.space.dto.BookingParticipantVo;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.CreateBookingRequest;
+import com.kaede.uspace.space.dto.JoinResultVo;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.Store;
@@ -16,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -48,6 +52,9 @@ class BookingServiceTests {
     /** 测试包场人 ID */
     private static final Long HOST_ID = 7L;
 
+    /** 测试被邀请者 ID */
+    private static final Long GUEST_ID = 8L;
+
     /** 测试管理员 ID */
     private static final Long ADMIN_ID = 99L;
 
@@ -57,13 +64,22 @@ class BookingServiceTests {
     private final FakeClosureMapper closureMapper = new FakeClosureMapper();
     private final FakeSysUserMapper userMapper = new FakeSysUserMapper();
 
+    /**
+     * 参与者表。它与 {@code bookingMapper} <b>共享同一份包场数据</b> ——
+     * 因为它的「我参与的列表」与「下单时该挂哪一场」两条查询在真实 SQL 里
+     * 都要连 {@code biz_booking}，两个假实现各存一份的话，JOIN 出来永远是空。
+     */
+    private final FakeBookingParticipantMapper participantMapper =
+            new FakeBookingParticipantMapper(bookingMapper);
+
     /** 停业服务，供包场校验「不与停业时段撞车」 */
     private final ClosureService closureService =
             new ClosureService(closureMapper.asMapper(), storeMapper.asMapper());
 
     /** 被测服务 */
     private final BookingService bookingService = new BookingService(
-            bookingMapper.asMapper(), storeMapper.asMapper(), closureService, userMapper.asMapper());
+            bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
+            userMapper.asMapper(), participantMapper.asMapper());
 
     /**
      * 每个用例前预置门店与包场人 —— 两者缺一都会让 Service 提前返回错误，
@@ -360,6 +376,161 @@ class BookingServiceTests {
     }
 
     // ==================================================================
+    // ==================================================================
+    // 参与者
+    // ==================================================================
+
+    @Test
+    @DisplayName("加入：首次点开邀请链接即写入一行 PARTICIPANT")
+    void joinByBooking_insertsParticipant() {
+        Booking paid = seedPaidBooking();
+
+        BizResult<JoinResultVo> result = bookingService.joinByBooking(paid, GUEST_ID);
+
+        assertTrue(result.isSuccess(), "有效包场应当能加入");
+        assertTrue(result.getData().isJoined(), "首次加入应当报告「新加入」");
+        assertFalse(result.getData().isAlreadyJoined(),
+                "joined 与 alreadyJoined 恒为一真一假，不能同时为真");
+        assertEquals(1, result.getData().getParticipantCount(), "此时名单里只有他一个");
+    }
+
+    @Test
+    @DisplayName("加入：重复点同一条链接返回「已加入」，而不是报错")
+    void joinByBooking_reportsAlreadyJoinedWhenCalledTwice() {
+        Booking paid = seedPaidBooking();
+
+        bookingService.joinByBooking(paid, GUEST_ID);
+        BizResult<JoinResultVo> second = bookingService.joinByBooking(paid, GUEST_ID);
+
+        assertTrue(second.isSuccess(),
+                "刷新页面、从聊天记录里再点一次，都不该弹一个错误框");
+        assertTrue(second.getData().isAlreadyJoined(), "第二次应当报告「你已经在了」");
+        assertFalse(second.getData().isJoined(), "第二次不是新加入");
+        assertEquals(1, second.getData().getParticipantCount(),
+                "重复加入不会把人数算成两个 —— 唯一键挡住了第二行");
+    }
+
+    @Test
+    @DisplayName("加入：并发下撞唯一键也当作「已加入」，不让请求失败")
+    void joinByBooking_treatsDuplicateKeyAsAlreadyJoined() {
+        Booking paid = seedPaidBooking();
+
+        // 模拟并发窗口：查的时候还没有，插的时候别人已经插进去了
+        participantMapper.failNextInsertWithDuplicateKey();
+        BizResult<JoinResultVo> result = bookingService.joinByBooking(paid, GUEST_ID);
+
+        assertTrue(result.isSuccess(),
+                "这条路径只在并发下走到，而它恰恰是唯一正确的那条 —— 撞键不是错误，是答案");
+        assertTrue(result.getData().isAlreadyJoined(),
+                "撞键说明别人先插进去了，对本次调用者而言就是「已加入」");
+    }
+
+    @Test
+    @DisplayName("加入：解析不出包场时返回 404，而不是抛异常")
+    void joinByBooking_failsForMissingBooking() {
+        assertEquals(ErrorCode.NOT_FOUND, bookingService.joinByBooking(null, GUEST_ID).getError(),
+                "令牌无效时调用方拿到的应当是 404");
+    }
+
+    @Test
+    @DisplayName("名单：发起人固定排在最前，其后按加入时刻升序")
+    void listParticipants_putsHostFirst() {
+        Booking paid = seedPaidBooking();
+
+        // 刻意把顺序颠倒：被邀请者先加入（时刻更早），包场人「付款」时才写入
+        participantMapper.seed(paid.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name(),
+                LocalDateTime.of(2026, 9, 30, 10, 0));
+        participantMapper.seed(paid.getId(), HOST_ID, BookingParticipantRole.HOST.name(),
+                LocalDateTime.of(2026, 9, 30, 18, 0));
+
+        List<BookingParticipantVo> participants = bookingService.listParticipants(paid.getId());
+
+        assertEquals(2, participants.size(), "两个人都应当在名单里");
+        assertEquals(HOST_ID, participants.get(0).getUserId(),
+                "发起人必须排在最前 —— 只按加入时刻排的话，"
+                        + "包场人付款晚于别人点链接时他就会跑到名单中间去");
+        assertEquals(BookingParticipantRole.HOST.getText(), participants.get(0).getRoleText(),
+                "角色文案由后端翻译好，前端不必再维护一份映射");
+    }
+
+    @Test
+    @DisplayName("判定：包场人与被邀请者都算参与者，外人不是")
+    void isParticipant_coversBothRolesAndRejectsOutsider() {
+        Booking paid = seedPaidBooking();
+        participantMapper.seed(paid.getId(), HOST_ID, BookingParticipantRole.HOST.name());
+        participantMapper.seed(paid.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        assertTrue(bookingService.isParticipant(paid.getId(), HOST_ID), "包场人也是参与者");
+        assertTrue(bookingService.isParticipant(paid.getId(), GUEST_ID), "被邀请者是参与者");
+        assertFalse(bookingService.isParticipant(paid.getId(), ADMIN_ID),
+                "没加入过的人不是参与者 —— 准入就是靠这一条把他挡在门外");
+        assertFalse(bookingService.isParticipant(null, GUEST_ID), "包场 ID 为空时返回 false");
+        assertFalse(bookingService.isParticipant(paid.getId(), null), "用户 ID 为空时返回 false");
+    }
+
+    @Test
+    @DisplayName("下单前查包场：取最近的、尚未结束的已付款场次")
+    void findUpcomingBookingForParticipant_picksNearestUnfinished() {
+        LocalDateTime now = LocalDateTime.now();
+        Booking later = bookingMapper.seed(booking(now.plusDays(2),
+                now.plusDays(2).plusHours(4), BookingStatus.PAID));
+        Booking nearer = bookingMapper.seed(booking(now.plusHours(3),
+                now.plusHours(7), BookingStatus.PAID));
+        participantMapper.seed(later.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name());
+        participantMapper.seed(nearer.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        Booking found = bookingService.findUpcomingBookingForParticipant(GUEST_ID, now);
+
+        assertEquals(nearer.getId(), found.getId(),
+                "取最近的一场 —— 挂哪一场对计费都无害（不相交会整段跳过），但越近越贴近他的意图");
+    }
+
+    @Test
+    @DisplayName("下单前查包场：未付款与已结束的都不算")
+    void findUpcomingBookingForParticipant_ignoresUnpaidAndEnded() {
+        LocalDateTime now = LocalDateTime.now();
+        Booking unpaid = bookingMapper.seed(booking(now.plusHours(1), now.plusHours(5),
+                BookingStatus.PENDING_PAYMENT));
+        Booking ended = bookingMapper.seed(booking(now.minusHours(5), now.minusHours(1),
+                BookingStatus.PAID));
+        participantMapper.seed(unpaid.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name());
+        participantMapper.seed(ended.getId(), GUEST_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        assertNull(bookingService.findUpcomingBookingForParticipant(GUEST_ID, now),
+                "未付款的不产生排他性、已结束的也没有意义 —— 挂上它们只会让订单"
+                        + "凭空多出一个出处不明的包场 ID");
+    }
+
+    @Test
+    @DisplayName("我参与的：只含被邀请的场次，不含自己发起的")
+    void listJoinedBookings_returnsOnlyInvitedOnes() {
+        LocalDateTime now = LocalDateTime.now();
+        Booking mine = bookingMapper.seed(booking(now.plusHours(1), now.plusHours(5),
+                BookingStatus.PAID));
+        Booking invited = bookingMapper.seed(booking(now.plusHours(8), now.plusHours(12),
+                BookingStatus.PAID));
+        participantMapper.seed(mine.getId(), HOST_ID, BookingParticipantRole.HOST.name());
+        participantMapper.seed(invited.getId(), HOST_ID, BookingParticipantRole.PARTICIPANT.name());
+
+        BizResult<PageResult<BookingVo>> result = bookingService.listJoinedBookings(HOST_ID, 1, 10);
+
+        assertTrue(result.isSuccess(), "查询应当成功");
+        assertEquals(1, result.getData().getRecords().size(),
+                "「我参与的」与「我创建的」是两个列表，同一场不该在两边各出现一次");
+        assertEquals(invited.getId(), result.getData().getRecords().get(0).getId(),
+                "只剩被邀请的那一场");
+    }
+
+    /**
+     * 预置一场已付款的包场（一小时后开始）。
+     *
+     * @return 已落库的包场
+     */
+    private Booking seedPaidBooking() {
+        LocalDateTime start = LocalDateTime.now().plusHours(1);
+        return bookingMapper.seed(booking(start, start.plusHours(4), BookingStatus.PAID));
+    }
+
     // 辅助
     // ==================================================================
 

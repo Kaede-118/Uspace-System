@@ -39,6 +39,15 @@ public class OrderVo {
     /** 离场时刻。使用中为 null */
     private LocalDateTime endTime;
 
+    /**
+     * 在店时长（分钟）= 离场时刻 − 开门时刻。使用中为 null。
+     *
+     * <p><b>它不是「计费时长」</b>：包场时段被剪掉、宽限的 5 分钟也不计入，
+     * 两者可以差很多（见 {@link Order#getStayMinutes()}）。
+     * 前端展示时不要拿 {@code dayMinutes + nightMinutes} 冒充它。
+     */
+    private Integer stayMinutes;
+
     /** 日场时长（分钟） */
     private Integer dayMinutes;
 
@@ -112,6 +121,7 @@ public class OrderVo {
         vo.setBookingId(order.getBookingId());
         vo.setStartTime(order.getStartTime());
         vo.setEndTime(order.getEndTime());
+        vo.setStayMinutes(order.getStayMinutes());
         vo.setDayMinutes(order.getDayMinutes());
         vo.setDayAmount(order.getDayAmount());
         vo.setNightMinutes(order.getNightMinutes());

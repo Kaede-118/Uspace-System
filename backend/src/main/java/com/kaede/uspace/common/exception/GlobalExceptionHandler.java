@@ -9,11 +9,14 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
@@ -187,6 +190,65 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResult<Void>> handleAccessDenied(AccessDeniedException e) {
         log.warn("[异常] 权限不足：{}", e.getMessage());
         return ApiResult.of(ErrorCode.FORBIDDEN);
+    }
+
+    /**
+     * 处理上传文件超过大小上限。
+     *
+     * <p><b>不加这个分支的后果</b>：上传一张 5MB 的图会落到最后的兜底分支，
+     * 返回 500「服务异常，请稍后重试」—— 而真正的事实是「你的图太大了」。
+     * 用户的可行动作是换张小图或压缩一下，不是「稍后重试」。
+     * <b>让用户去重试一件永远不会成功的事，比不提示更糟。</b>
+     *
+     * <p>本异常由 Spring 在处理 multipart 时抛出（对应
+     * {@code spring.servlet.multipart.max-file-size}），
+     * 走不到 Service 层那道同样的大小的校验 —— 所以两条路都得有归宿：
+     * 这条负责「超了 Spring 的闸门」，Service 里那条负责「超了业务配置的上限」。
+     *
+     * <p>日志用 warn 而非 error：这是用户操作不当，不是服务端故障。
+     *
+     * @param e 上传超限异常
+     * @return 413 响应
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiResult<Void>> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+        log.warn("[异常] 上传文件超过大小上限：{}", e.getMessage());
+        return ApiResult.of(ErrorCode.UPLOAD_FILE_TOO_LARGE);
+    }
+
+    /**
+     * 处理「上传请求本身就不合法」：压根不是 multipart 请求，或 multipart 报文残缺。
+     *
+     * <p><b>两个异常类型合在一处，是因为它们描述的是同一件事</b> ——
+     * 调用方没按「以 {@code multipart/form-data} 上传」这个约定来。区别只在
+     * Spring 判定得早还是晚：
+     * <ul>
+     *   <li>{@link HttpMediaTypeNotSupportedException} —— 接口上声明了
+     *       {@code consumes = MULTIPART_FORM_DATA_VALUE}，请求的 {@code Content-Type}
+     *       不是 multipart（比如一个没有任何请求体的 POST），映射阶段就被挡下</li>
+     *   <li>{@link MultipartException} —— {@code Content-Type} 声称是 multipart，
+     *       但报文本身残缺（boundary 对不上、缺少结束标记）</li>
+     * </ul>
+     *
+     * <p><b>这条分支是实测发现的</b>：不加它，一个不带请求体的 POST 会落到兜底分支
+     * 返回 500「服务异常，请稍后重试」。而真机实测之前它<b>骗过了集成测试</b> ——
+     * MockMvc 的 {@code multipart()} 构造器永远会造出一个合法的 multipart 请求，
+     * 走不到「压根不是 multipart」这条路上。所以补这条分支时，
+     * 集成测试里也补了一条用普通 {@code post()} 发起的用例。
+     *
+     * <p>严格说第一个该用 415，但错误码表里没有单列它，归入参数类问题
+     * （与 {@link #handleMethodNotSupported} 对 405 的处理同一套做法）。
+     *
+     * <p>注意它<b>不会抢走</b> {@code MaxUploadSizeExceededException} 的分支：
+     * 那个异常是 {@code MultipartException} 的子类，Spring 按「最贴近的父类」选处理器。
+     *
+     * @param e 上传请求异常
+     * @return 400 响应
+     */
+    @ExceptionHandler({HttpMediaTypeNotSupportedException.class, MultipartException.class})
+    public ResponseEntity<ApiResult<Void>> handleBadUploadRequest(Exception e) {
+        log.warn("[异常] 文件上传请求不合法：{}", e.getMessage());
+        return ApiResult.of(ErrorCode.PARAM_INVALID, "请以 multipart/form-data 方式上传文件");
     }
 
     /**

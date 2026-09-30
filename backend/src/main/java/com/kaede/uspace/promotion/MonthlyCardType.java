@@ -1,6 +1,6 @@
 package com.kaede.uspace.promotion;
 
-import com.kaede.uspace.billing.CardCoverage;
+import com.kaede.uspace.billing.CardScope;
 
 import java.util.Arrays;
 
@@ -13,11 +13,16 @@ import java.util.Arrays;
  * <p><b>覆盖范围为什么不放进配置</b>：那样就允许把「全天卡」配成只免夜场、
  * 或者两张卡配成一模一样的覆盖范围 —— 这种配置没有任何意义，
  * 却会实实在在地卖出去。它是卡种的定义，属于代码事实。
+ *
+ * <p><b>这里只定义「免哪些时段」，不定义「哪几天免」</b> ——
+ * 后者每张卡各不相同，由卡上的生效与失效日期给出，
+ * 两者在计费侧合起来才是完整的
+ * {@link com.kaede.uspace.billing.CardCoverage 覆盖范围}。
  */
 public enum MonthlyCardType {
 
-    /** 全天月卡：不限时段，订单的所有段都免费 */
-    ALL_DAY("全天月卡", CardCoverage.ALL),
+    /** 全天月卡：不限时段，在有效期内订单的所有段都免费 */
+    ALL_DAY("全天月卡", CardScope.ALL),
 
     /**
      * 夜间月卡：只覆盖夜场时段。
@@ -27,17 +32,17 @@ public enum MonthlyCardType {
      * 与计费本身共用同一套边界。若在别处再定义一次「什么算夜场」，
      * 两套边界迟早漂移，而漂移的后果是顾客账单与月卡权益对不上。
      */
-    NIGHT("夜间月卡", CardCoverage.NIGHT);
+    NIGHT("夜间月卡", CardScope.NIGHT);
 
     /** 面向用户的中文名称，供前端展示 */
     private final String label;
 
     /** 该卡种覆盖哪些计费时段，供计费侧判定 */
-    private final CardCoverage coverage;
+    private final CardScope scope;
 
-    MonthlyCardType(String label, CardCoverage coverage) {
+    MonthlyCardType(String label, CardScope scope) {
         this.label = label;
-        this.coverage = coverage;
+        this.scope = scope;
     }
 
     /**
@@ -52,10 +57,10 @@ public enum MonthlyCardType {
     /**
      * 取该卡种覆盖的计费时段范围。
      *
-     * @return 计费侧的覆盖范围枚举
+     * @return 计费侧的时段范围枚举（不含日期）
      */
-    public CardCoverage getCoverage() {
-        return coverage;
+    public CardScope getScope() {
+        return scope;
     }
 
     /**

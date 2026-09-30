@@ -94,7 +94,7 @@ public class MonthlyCardVo {
      */
     private static String coverageLabelOf(String cardType) {
         return MonthlyCardType.isValid(cardType)
-                ? MonthlyCardType.valueOf(cardType).getCoverage().getLabel()
+                ? MonthlyCardType.valueOf(cardType).getScope().getLabel()
                 : null;
     }
 
