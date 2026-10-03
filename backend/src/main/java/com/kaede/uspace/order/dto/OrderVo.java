@@ -1,6 +1,8 @@
 package com.kaede.uspace.order.dto;
 
+import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.order.OrderStatus;
+import com.kaede.uspace.order.PaymentChannel;
 import com.kaede.uspace.order.entity.Order;
 import lombok.Data;
 
@@ -76,8 +78,46 @@ public class OrderVo {
      */
     private BigDecimal cardFreeAmount;
 
+    /**
+     * 免费活动为本单免掉的金额（元）。不在活动区间内时为 0。
+     *
+     * <p>说明性字段，<b>已从合计中扣除</b>，不要从合计里再减一次。
+     *
+     * <p>⚠️ 与 {@link #cardFreeAmount} <b>互斥</b>：被月卡覆盖的段只记月卡 ——
+     * 月卡用户本来就免费，活动并没有为他省下什么。
+     */
+    private BigDecimal activityFreeAmount;
+
     /** 应付金额。发起支付时用它 */
     private BigDecimal payableAmount;
+
+    /**
+     * 分段账单（几档 × 单价），<b>只有详情接口有它</b>。
+     *
+     * <p>展示结构与结账页的 {@link OrderSettleVo#getBill()} 完全一致
+     * （同一份 {@link BillingResult}），前端用同一套 props 渲染账单组件。
+     * 数据来源是订单上的快照（结算时落库）；快照为空的老订单由
+     * {@code OrderService} 按当前规则重算，且只有金额与落库完全一致才会给到这里。
+     *
+     * <p><b>{@link #from} 刻意不填它</b>——列表接口（{@code /api/orders/me}、
+     * {@code /api/admin/orders}）因此不带账单：一页 20 条各带一份既白占响应体，
+     * 老订单还要逐条重算。要看分段明细就进详情页。
+     *
+     * <p>为 null 的三种情形（前端一律回落到日场/夜场汇总行）：使用中的订单
+     * （费用还在走，估算看结账预览接口）、老订单重算与落库金额对不上、
+     * 快照损坏且重算也失败。
+     */
+    private BillingResult bill;
+
+    /**
+     * 本单是否因命中包场而减免了计费时长。
+     *
+     * <p>与 {@link #bill} 同来同去（由详情接口的账单装配一起给出），没有账单时为 null。
+     * 它<b>不是</b>从 {@link #bookingId} 推出来的：订单挂着包场、而结算发生在
+     * 包场开始之前时，并没有任何时长被减免 —— 靠 ID 推断会凭空多出一句
+     * 「包场时段不计费」的解释。
+     */
+    private Boolean freeByBooking;
 
     /** 状态名，取值见 {@link OrderStatus} */
     private String status;
@@ -87,6 +127,19 @@ public class OrderVo {
 
     /** 支付通道名，未支付时为 null */
     private String paymentMethod;
+
+    /**
+     * 支付通道的用户口径中文名，供前端直接展示。
+     *
+     * <p><b>由后端给而不是前端自己映射</b>：订单详情页曾经自己维护过一张
+     * 「通道名 → 中文」的表，而它写着 {@code QR_UPLOAD: '转账核销'}，
+     * 与后端口径的「扫码转账」对不上 —— 同一个枚举在两处各有一个名字，
+     * 迟早分岔，且不会有任何报错。现在只有
+     * {@link PaymentChannel#userLabelOf(String)} 一处定义。
+     *
+     * <p>未支付（含 0 元自动结清）时为 null，前端按「—」展示即可。
+     */
+    private String paymentMethodLabel;
 
     /** 支付完成时刻 */
     private LocalDateTime paidAt;
@@ -129,10 +182,12 @@ public class OrderVo {
         vo.setTotalAmount(order.getTotalAmount());
         vo.setDiscountAmount(order.getDiscountAmount());
         vo.setCardFreeAmount(order.getCardFreeAmount());
+        vo.setActivityFreeAmount(order.getActivityFreeAmount());
         vo.setPayableAmount(order.getPayableAmount());
         vo.setStatus(order.getStatus());
         vo.setStatusText(OrderStatus.labelOf(order.getStatus()));
         vo.setPaymentMethod(order.getPaymentMethod());
+        vo.setPaymentMethodLabel(PaymentChannel.userLabelOf(order.getPaymentMethod()));
         vo.setPaidAt(order.getPaidAt());
         vo.setAdjusted(order.getAdjusted());
         vo.setAdjustReason(order.getAdjustReason());

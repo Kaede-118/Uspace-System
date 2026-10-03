@@ -1,16 +1,33 @@
 <script setup>
 /**
- * 用户卡片（banner 做背景）。
+ * 用户卡片（banner / 头像与标签 / 信息行 / 偏好，四行堆叠）。
  *
  * <p>「在店用户」列表与「我的」页面<b>共用这一个组件</b> ——
- * 两个页面的卡片长得一样，只有右侧的信息不同（在店列表显示进店时间与时长，
- * 我的页面显示消费与时长统计），所以右侧做成具名插槽 {@code #info}。
+ * 两个页面的卡片长得一样，只有第三行的信息不同（在店列表显示到店时刻与在店时长，
+ * 我的页面显示消费与时长统计），所以第三行做成具名插槽 {@code #info}。
  *
- * <p><b>内容整体浮在 banner 之上</b>：头像是卡片的视觉主体（占高度的 80%），
- * 昵称与月卡状态紧挨着它，右侧是调用方决定的信息。
- * 卡片高度固定，不再让 banner 按 6:1 撑开 ——
- * 6:1 在手机上只有 60px 高（内容放不下），在电脑上却有 230px 高（一大块空白），
- * 同一个比例两头都不合适。
+ * <p><b>六行结构（2026-10-03 定稿）</b>：
+ * <ol>
+ *   <li>自定义 banner（3:1）—— <b>右侧不叠任何东西</b>：店里是音游机，
+ *       顾客传的多半是舞萌 DX 姓名框素材，右侧往往是段位、Rating 这些要看的内容</li>
+ *   <li>头像 · STAFF · 昵称</li>
+ *   <li>游玩偏好的文字标签</li>
+ *   <li>到店时刻 —— 由调用方放进插槽（跨天时带「昨天 / 前天 / 几月几日」，
+ *       见 {@code utils/format.js} 的 {@code formatArrivalTime}）</li>
+ *   <li>在店时长 —— 同上，<b>两段各占一行</b></li>
+ *   <li>月卡标签（放最下面）</li>
+ * </ol>
+ *
+ * <p>⚠️ <b>偏好与月卡这两行「没内容也占位」</b>（CSS 用 min-height 撑住）：
+ * 卡片在名册里是并排的，有的一行有、有的没有，同一行的卡片就会高矮不一，
+ * 而名册要的正是「扫一眼就能比」。代价是没卡没偏好的人，卡片里有一段空着。
+ *
+ * <p>⚠️ 月卡不挤进头像那一行是刻意的：半宽卡片一行放不下
+ * 「头像 + 月卡 + STAFF + 昵称」，挤在一起的结果是昵称只剩一两个字。
+ *
+ * <p>⚠️ 素材区的 3:1 与 {@code utils/image.js} 的 BANNER_HEIGHT（背景图成品
+ * 的裁剪比例）必须一致；{@code object-position: right center} 与那里的
+ * 「超宽图保留右半」也是同一条规则 —— <b>三处改一处就要一起改</b>。
  */
 import { ref, watch, computed } from 'vue'
 import { versionedUrl } from '@/utils/image'
@@ -18,19 +35,34 @@ import { versionedUrl } from '@/utils/image'
 const props = defineProps({
   /** 用户对象：至少含 nickname、avatar、banner */
   user: { type: Object, default: () => ({}) },
-  /** 月卡类型：ALL_DAY / NIGHT，未持卡为 null */
+  /** 月卡类型：ALL_DAY / NIGHT，未持卡为 null（决定第二行的月卡标签渲不渲染） */
   cardType: { type: String, default: null },
   /** 月卡类型的中文名（后端返回，不要在前端硬编码文案） */
   cardTypeLabel: { type: String, default: '' },
-  /** 是否显示月卡标签 */
-  showCard: { type: Boolean, default: true },
   /**
-   * 附加标签（游玩偏好），与月卡标签并排显示在中文名下方。
+   * 游玩偏好的中文名数组，显示在第四行（每个偏好一个胶囊标签）。
    *
-   * <p>传的是<b>已经翻好的中文名数组</b>：偏好 code → 中文名的映射要用到设备类型字典，
+   * <p>传的是<b>已经翻好的中文名</b>：偏好 code → 中文名的映射要用到设备类型字典，
    * 那是调用方的事，卡片组件不认识设备包。
+   * 由 {@code utils/labels.js} 的 {@code preferenceLabels} 统一生成
+   *（含「字典里查不到就原样显示 code」的兜底）。
    */
-  tags: { type: Array, default: () => [] }
+  tags: { type: Array, default: () => [] },
+  /**
+   * 尺寸档。
+   *
+   * <ul>
+   *   <li>{@code compact}（默认）—— 半宽卡片用（「在店用户」名册，约 160px）</li>
+   *   <li>{@code roomy} —— 整列宽的卡片用（「我的」页面，约 328px）：
+   *       同一套小字号放进整列宽的卡片里会显得空</li>
+   * </ul>
+   *
+   * <p>⚠️ <b>用 props 而不是媒体查询</b>：两种卡片宽度在<b>同一个视口</b>下共存
+   *（「我的」的 328px 与在店名册的 160px 都是手机布局），视口级的断点分不开它们 ——
+   * 早先那版「宽屏放大字号」正是栽在这里：它按视口放大，
+   * 而视口宽的那一端（在店名册）卡片反而更窄。
+   */
+  size: { type: String, default: 'compact' }
 })
 
 /** banner 加载失败标记。用户传的图后来被删了、或网络抖动都会走到这里。 */
@@ -79,7 +111,7 @@ const name = computed(() => props.user?.nickname || props.user?.username || '顾
 const isStaff = computed(() => props.user?.role === 'ADMIN')
 
 /**
- * 头像的兜底：取昵称首字。
+ * 头像与 banner 兜底用的首字母。
  *
  * <p>用文字而不是默认头像图片 —— 少一次网络请求，而且不同用户有区分度。
  */
@@ -92,37 +124,39 @@ const showAvatarImage = computed(() => !!avatar.value && !avatarFailed.value)
  * 月卡标签的中文。
  *
  * <p>优先用后端返回的 {@code cardTypeLabel}，这里的兜底文案只在后端没给时才生效。
+ * 认不出的卡种回落到中性的「月卡」—— 与 {@code labels.js} 那些
+ * 「认不出就原样显示」的做法不同，是因为这是一枚要挤进昵称前的胶囊，
+ * 露出 code（如 "WEEKEND"）更长也更看不懂。
  */
-const cardText = computed(() => {
+const FALLBACK_LABELS = { ALL_DAY: '全天月卡', NIGHT: '夜间月卡' }
+const cardLabel = computed(() => {
   if (!props.cardType) return ''
-  if (props.cardTypeLabel) return props.cardTypeLabel
-  return props.cardType === 'ALL_DAY' ? '全天月卡' : '夜间月卡'
+  return props.cardTypeLabel || FALLBACK_LABELS[props.cardType] || '月卡'
 })
 
 /**
- * 标签最多显示几个（含月卡）。
+ * 第四行最多显示几个偏好标签，超出的收成「+N」。
  *
- * <p>卡片是<b>固定高度</b>的（头像是它的 80%），标签换行会溢出卡片，
- * 所以超出部分收成「+N」而不是让它挤出去。放不下的信息点进详情还能看到。
- * 5 个是在 375px 宽的手机上实测能排下的数量。
+ * <p>取 3 是因为设备类型字典目前就三条（拍拍机 / 抬手乐 / 日麻，
+ * 见 schema.sql 的初始数据）—— 也就是说这里<b>实际上永远不会截断</b>。
+ * 3 个三字标签按收紧后的内边距约 131px，而半宽卡片的内容宽约 136px，
+ * 恰好排得下；再多就要换行了，所以才留这个上限。
  */
-const MAX_TAGS = 5
+const MAX_TAGS = 3
 
-/** 实际渲染的附加标签。 */
-const visibleTags = computed(() => {
-  const room = Math.max(0, MAX_TAGS - (props.showCard && cardText.value ? 1 : 0))
-  return props.tags.slice(0, room)
-})
+/** 实际渲染的偏好标签。 */
+const visibleTags = computed(() => props.tags.slice(0, MAX_TAGS))
 
 /** 被收起来的标签数量。 */
 const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags.value.length))
 </script>
 
 <template>
-  <div class="user-card">
+  <div class="user-card" :class="{ 'user-card--roomy': size === 'roomy' }">
     <!--
-      banner 未设置、或加载失败时回落到纯色底 —— 绝不能是破图。
-      两种失败用同一个 :class 处理：用户不需要知道「你是没传」还是「传了但加载失败」。
+      第一行：素材区。banner 未设置、或加载失败时回落到纯色底 + 一个淡的首字母 ——
+      绝不能是破图。两种失败用同一个 :class 处理：用户不需要知道
+      「你是没传」还是「传了但加载失败」。
     -->
     <img
       v-if="showBannerImage"
@@ -131,185 +165,164 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
       alt=""
       @error="bannerFailed = true"
     />
-    <div v-else class="user-card__banner user-card__banner--fallback" />
+    <div v-else class="user-card__banner user-card__banner--fallback">
+      <span class="user-card__banner-initial">{{ avatarInitial }}</span>
+    </div>
+
+    <!-- 第二行：头像 · STAFF · 昵称 -->
+    <div class="user-card__identity">
+      <img
+        v-if="showAvatarImage"
+        class="user-card__avatar"
+        :src="versionedUrl(avatar)"
+        alt=""
+        @error="avatarFailed = true"
+      />
+      <div v-else class="user-card__avatar user-card__avatar--fallback">
+        {{ avatarInitial }}
+      </div>
+
+      <span v-if="isStaff" class="badge-staff">STAFF</span>
+      <span class="user-card__name">{{ name }}</span>
+    </div>
 
     <!--
-      压暗/提亮层。banner 是用户上传的任意图片，可能是纯白、也可能是花哨的风景照 ——
-      没有这一层的话，浅色文字压在浅色图上会完全看不清。
-      两端接近实白（文字都在两端），中间留出 45% 透出图片本身。
+      第三行：偏好标签。**没设偏好也占这一行**（只渲染一个空容器）——
+      卡片在名册里是并排的，有的一行有、有的没有，同一行的卡片就会高矮不一，
+      而名册要的正是「扫一眼就能比」。高度由 CSS 的 min-height 撑住。
     -->
-    <div class="user-card__scrim" />
+    <div class="user-card__tags">
+      <span v-for="t in visibleTags" :key="t" class="tag">{{ t }}</span>
+      <span v-if="overflowCount" class="tag tag-more">+{{ overflowCount }}</span>
+    </div>
 
-    <div class="user-card__body">
-      <div class="user-card__left">
-        <img
-          v-if="showAvatarImage"
-          class="user-card__avatar"
-          :src="versionedUrl(avatar)"
-          alt=""
-          @error="avatarFailed = true"
-        />
-        <div v-else class="user-card__avatar user-card__avatar--fallback">
-          {{ avatarInitial }}
-        </div>
+    <!--
+      第四、五行：调用方给的两段信息，**各占一行** ——
+      在店列表是「到店时刻 / 在店时长」，我的页面是「累计消费 / 累计时长」。
+    -->
+    <div class="user-card__foot">
+      <slot name="info" />
+    </div>
 
-        <div class="user-card__ident">
-          <div class="user-card__name-row">
-            <span v-if="isStaff" class="badge-staff">STAFF</span>
-            <span class="user-card__name">{{ name }}</span>
-          </div>
-          <!-- 月卡与偏好并排成一列标签：月卡用绿色（「今天免单」是个状态），偏好用主色淡紫 -->
-          <div v-if="(showCard && cardText) || visibleTags.length" class="user-card__tags">
-            <span v-if="showCard && cardText" class="tag tag-success">{{ cardText }}</span>
-            <span v-for="t in visibleTags" :key="t" class="tag">{{ t }}</span>
-            <span v-if="overflowCount" class="tag tag-more">+{{ overflowCount }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="user-card__right">
-        <slot name="info" />
-      </div>
+    <!--
+      第六行：月卡标签，放在最下面。同样**没持卡也占这一行**（与偏好同理）。
+    -->
+    <div class="user-card__card-row">
+      <span v-if="cardLabel" class="tag tag-success">{{ cardLabel }}</span>
     </div>
   </div>
 </template>
 
 <style scoped>
 .user-card {
-  position: relative;
-  border-radius: var(--r-card);
+  /*
+   * 宽度由容器决定：在店名册里是栅格单元（约 160px），「我的」页面里是整行。
+   *
+   * ⚠️ 原来这里写的是 width: min(90vw, 100%) —— 90vw 是【视口】单位，
+   * 放进栅格就会大过单元本身（一屏宽 390px 时 90vw = 351px，而单元只有 175px），
+   * 卡片会撑破栅格、叠在一起。改由容器定宽之后两边都对。
+   */
+  width: 100%;
+  /* 半宽卡片下 --r-card 的 16px 显得过圆，收一档 */
+  border-radius: 12px;
   overflow: hidden;
   background: var(--c-card);
-  /*
-   * 固定高度。内容整体绝对定位在它上面，所以这个值就是 banner 的高度 ——
-   * 头像按它的 80% 算（见 .user-card__avatar）。
-   */
-  height: 132px;
 }
 
-/* 宽屏上给一点余量，免得卡片显得比周围的文字块还矮 */
-@media (min-width: 768px) {
-  .user-card {
-    height: 148px;
-  }
-}
+/* ---------- 第一行：素材区 ---------- */
 
 .user-card__banner {
-  position: absolute;
-  inset: 0;
   display: block;
   width: 100%;
-  height: 100%;
+  /*
+   * ⚠️ 3:1 —— 与背景图成品（utils/image.js 的 BANNER_HEIGHT）是同一个数，
+   * 改一个必须一起改。图本身也是 3:1，这里的比例给兜底与旧数据钉形状用
+   *（万一某张图不是 3:1）。
+   */
+  aspect-ratio: 3 / 1;
   /*
    * ⚠️ cover 是三种裁切方式里唯一合理的：
    * 用户传的图比例不会正好合上卡片，contain 会留白、拉伸会变形。
+   *
+   * ⚠️ object-position: right center 是【刻意的】，不是默认值 ——
+   * 与上传裁剪的「超宽图保留右半」（utils/image.js 的 processBanner）
+   * 是同一条规则。少了它，cover 会按默认的居中裁，改版前传的老图
+   *（6:1 成品）在卡片上裁出的就是中间一段，与新图对不上。
    */
   object-fit: cover;
+  object-position: right center;
 }
 
 .user-card__banner--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: linear-gradient(120deg, var(--c-primary-pale), var(--c-icon-bg));
 }
 
-.user-card__scrim {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    rgba(255, 255, 255, 0.94) 0%,
-    rgba(255, 255, 255, 0.45) 38%,
-    rgba(255, 255, 255, 0.45) 62%,
-    rgba(255, 255, 255, 0.94) 100%
-  );
+/*
+ * 没传背景图时，素材区正中放一个淡的大首字母 —— 空着一块纯色比有内容的更显突兀。
+ *
+ * ⚠️ 用 opacity 而不是把主题色调淡：那是另一处写死的颜色，
+ * 换配色时要多改一个地方，而这里要的本来就是「整体透明一点」。
+ */
+.user-card__banner-initial {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--c-primary);
+  opacity: 0.3;
 }
 
-.user-card__body {
-  position: absolute;
-  inset: 0;
+/* ---------- 第六行：月卡（放最下面） ---------- */
+
+/*
+ * 月卡标签独占一行，放在卡片最下面。
+ *
+ * ⚠️ 不挤进头像那一行是刻意的：它是顾客之间会看的信息（谁今天免单），
+ * 而半宽卡片一行放不下「头像 + 月卡 + STAFF + 昵称」—— 挤在一起的结果
+ * 是昵称只剩一两个字。分开之后两边都完整。
+ *
+ * ⚠️ 没持卡时这一行【仍然占位】（min-height 撑住）：
+ * 卡片在名册里是并排的，高矮不一会让整个栅格看起来参差。
+ * 高度构成 = 标签本身 20px（base.css 的 .tag）+ 下内边距 8px。
+ */
+.user-card__card-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  /*
-   * ⚠️ 只有左右 padding，上下留 0 ——
-   * 头像的 height: 80% 是按内容盒算的，若这里再给上下 padding，
-   * 内容盒变矮，头像就够不到卡片高度的 80%。
-   */
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-2) var(--sp-2);
+  min-height: calc(20px + var(--sp-2));
 }
 
-.user-card__left {
+/* ---------- 第二行：头像 · STAFF · 昵称 ---------- */
+
+.user-card__identity {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: 5px;
+  /* 左右 8px（--sp-2）比别处的 12px 紧一档：半宽卡片本来就只有一百多像素宽，
+     让给内容比让给留白值 */
+  padding: var(--sp-2) var(--sp-2) 0;
   min-width: 0;
-  /*
-   * ⚠️ 这一行不能少。头像的 height: 80% 是相对【父元素】算的，
-   * 而 .user-card__left 作为 flex item 的高度默认是 auto ——
-   * 百分比没有依据时浏览器会退回图片的自然尺寸（一张 648px 的头像
-   * 就会撑爆整张卡片，把昵称挤成一个「系…」）。
-   * 给它一个确定高度，百分比才有意义。
-   */
-  height: 100%;
 }
 
 .user-card__avatar {
-  /* 卡片高度的 80% */
-  height: 80%;
-  aspect-ratio: 1 / 1;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   object-fit: cover;
   background: var(--c-icon-bg);
-  flex-shrink: 0;
-  /* 描一圈白边，让它从 banner 上「浮」起来 */
+  /* 描一圈白边，让它从卡片底色上「浮」起来 */
   border: 2px solid #fff;
-  box-shadow: 0 2px 8px rgba(43, 35, 64, 0.12);
+  box-shadow: 0 1px 4px rgba(43, 35, 64, 0.12);
+  flex-shrink: 0;
 }
 
 .user-card__avatar--fallback {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 26px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--c-primary);
-}
-
-.user-card__ident {
-  min-width: 0;
-}
-
-/*
- * 标签一行排开。卡片是固定高度的，所以这里【不换行】——
- * 放不下的由 +N 收起来（见 visibleTags）。
- */
-.user-card__tags {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.user-card__tags .tag {
-  /* 窄屏上不被压缩，宁可让 +N 去承担 */
-  flex-shrink: 0;
-  /* 标签本身的间距比默认胶囊紧一点，一行能多放一个 */
-  padding: 0 6px;
-}
-
-.tag-more {
-  background: #e4e0ec;
-  color: #5d5476;
-}
-
-/* 徽章固定在左、昵称在右截断 —— 昵称再长也不会把徽章挤没 */
-.user-card__name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin-bottom: var(--sp-1);
 }
 
 /*
@@ -322,19 +335,25 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
  */
 .badge-staff {
   flex-shrink: 0;
-  height: 16px;
-  padding: 0 5px;
+  height: 14px;
+  padding: 0 4px;
   border-radius: 4px;
   background: #5fc08f;
   color: #fff;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.4px;
-  line-height: 16px;
+  letter-spacing: 0.3px;
+  line-height: 14px;
 }
 
 .user-card__name {
-  font-size: 17px;
+  /*
+   * flex: 1 1 auto —— 昵称吃掉剩余宽度（截断发生在昵称上，而不是把
+   * 标签或徽章挤变形）；min-width: 0 才允许它真的缩到省略号。
+   */
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
   font-weight: 600;
   color: var(--c-text);
   /* 昵称过长时截断，不要撑破卡片 */
@@ -343,27 +362,129 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
   white-space: nowrap;
 }
 
-/*
- * 右侧信息块。
- *
- * 给它一层实底（白底 + 一点点阴影）而不是让文字直接浮在 banner 上 ——
- * banner 是用户上传的任意图片，浅色文字压在浅色图或花哨的图上都读不稳。
- * 有了底就与图长什么样无关了。
- *
- * ⚠️ align-self: flex-end 让它【单独】沉到卡片底部（父容器是居中对齐，
- * 左侧的头像与昵称不受影响）；margin-bottom 是别让它贴着卡片边缘。
- */
-.user-card__right {
-  align-self: flex-end;
-  margin-bottom: var(--sp-3);
-  flex-shrink: 0;
-  padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--r-btn);
-  background: rgba(255, 255, 255, 0.92);
+/* ---------- 第五、六行：到店 / 在店 ---------- */
+
+.user-card__foot {
+  display: flex;
+  /* 每段各占一行：「到店」一行、「在店」一行 —— 每段因此都能用回 11px，
+     不必为了塞进一行而降字号（那是「两段挤一行」时的妥协） */
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
   color: var(--c-text-sub);
-  font-size: 13px;
-  line-height: 1.6;
-  text-align: right;
-  box-shadow: 0 1px 3px rgba(43, 35, 64, 0.08);
+  font-size: 11px;
+  line-height: 1.35;
 }
+
+/* 段内不折行：一行就是一段，别把「2 小时 / 15 分钟」拆开 */
+.user-card__foot > * {
+  white-space: nowrap;
+}
+
+/* ---------- 尺寸档：整列宽的卡片（「我的」页面，约 328px） ---------- */
+
+/*
+ * ⚠️ 为什么不用媒体查询：两种卡片宽度在【同一个视口】下共存 ——
+ * 「我的」的 328px 与在店名册的 160px 都是手机布局，视口级的断点分不开它们。
+ *（早先那版「宽屏放大字号」正是栽在这里：它按视口放大，
+ * 而视口宽的那一端也就是在店名册，卡片反而更窄。）
+ *
+ * ⚠️ 放大幅度【不是等比例的】：同一个小字号放进 328px 的卡片里显得空，
+ * 但按 328 ÷ 160 的倍率放大又会大得离谱 —— 取「比正文大一档」为止。
+ *
+ * ⚠️ 与 padding / min-height 是【一对】：留空行的高度由 padding 累加而来，
+ * 改了 padding 不改 min-height，有内容与没内容的卡片就会差几个像素。
+ */
+.user-card--roomy .user-card__banner-initial {
+  font-size: 40px;
+}
+
+.user-card--roomy .user-card__identity {
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) 0;
+}
+
+.user-card--roomy .user-card__avatar {
+  width: 44px;
+  height: 44px;
+}
+
+.user-card--roomy .user-card__avatar--fallback {
+  font-size: 18px;
+}
+
+.user-card--roomy .badge-staff {
+  height: 16px;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.user-card--roomy .user-card__name {
+  font-size: 16px;
+}
+
+.user-card--roomy .user-card__tags {
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4) 0;
+  min-height: calc(20px + var(--sp-2));
+}
+
+.user-card--roomy .user-card__tags .tag {
+  padding: 0 var(--sp-2);
+  font-size: 12px;
+}
+
+.user-card--roomy .user-card__foot {
+  padding: var(--sp-2) var(--sp-4) 0;
+  font-size: 13px;
+}
+
+.user-card--roomy .user-card__card-row {
+  padding: 0 var(--sp-4) var(--sp-3);
+  min-height: calc(20px + var(--sp-3));
+}
+
+/* ---------- 第四行：偏好标签 ---------- */
+
+/*
+ * ⚠️ 标签的左右内边距收到 4px（通用 .tag 是 8px）：半宽卡片的内容宽
+ * 只有约 144px，而「拍拍机 + 抬手乐 + 日麻」按通用内边距要 147px ——
+ * 正好放不下。收到 4px 后约 123px，三个标签能排成一行还有余量。
+ *
+ * flex-wrap 是兜底：更窄的屏（320px）上仍会换行 —— 那是可接受的，
+ * 换行只是卡片高一点，而裁掉标签会真的丢信息。
+ */
+.user-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px var(--sp-2) 0;
+  /*
+   * ⚠️ 没设偏好时这一行【仍然占位】（见模板注释）：与月卡那一行同理，
+   * 撑住高度是为了让同一行的卡片等高。高度 = 标签 20px + 上内边距 6px。
+   */
+  min-height: calc(20px + 6px);
+}
+
+.user-card__tags .tag {
+  /* 胶囊本身不压缩：压了会变形，宁可换行 */
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.tag-more {
+  background: #e4e0ec;
+  color: #5d5476;
+}
+
+/*
+ * ⚠️ 本组件【没有媒体查询】—— 一套尺寸走天下（2026-10-03 定）。
+ *
+ * 此前宽屏（≥768px）另有一套放大的字号与内边距，它与「在店用户」栅格的
+ * 加宽是一对，必须同步改；而两套规则各改各的就会出现
+ *「15px 昵称塞进 165px 卡片」这类错配 —— 实机截图报过两次。
+ *
+ * 现在页面宽度本身就按手机来（见 base.css 的 --page-max），
+ * 卡片只管填满容器：名册里是栅格单元、我的页面里是整列。
+ */
 </style>

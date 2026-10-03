@@ -158,6 +158,31 @@ class InviteTokenServiceTests {
                         + "否则被邀请者能在包场人还没付钱时就进店");
     }
 
+    @Test
+    @DisplayName("查询：包场已结束时返回 404（时段过了，排他性就没了）")
+    void findByToken_returns404ForFinishedBooking() {
+        Booking finished = booking("token-old");
+        finished.setStartAt(LocalDateTime.now().minusHours(5));
+        finished.setEndAt(LocalDateTime.now().minusHours(1));
+        bookingMapper.seed(finished);
+
+        assertEquals(ErrorCode.NOT_FOUND, service.findByToken("token-old").getError(),
+                "包场结束之后链接不该还能把人放进名单 —— 这一条原先只写在注释里"
+                        + "（「令牌的有效性由包场时段界定」），代码一行都没实现");
+    }
+
+    @Test
+    @DisplayName("查询：包场已撤销退款时返回 404（钱都退了，更不该还能加人）")
+    void findByToken_returns404ForRefundedBooking() {
+        Booking refunded = booking("token-refund");
+        refunded.setStatus(BookingStatus.REFUNDED.name());
+        bookingMapper.seed(refunded);
+
+        assertEquals(ErrorCode.NOT_FOUND, service.findByToken("token-refund").getError(),
+                "撤销退款之后令牌必须失效 —— 此前 BookingRefundService 根本不碰 invite_token，"
+                        + "那条链接照样能打开、照样能把自己加进名单");
+    }
+
     // ==================================================================
     // 邀请链接（包场人取链接）
     // ==================================================================

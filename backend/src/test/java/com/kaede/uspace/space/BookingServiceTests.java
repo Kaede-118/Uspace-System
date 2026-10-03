@@ -132,6 +132,26 @@ class BookingServiceTests {
     }
 
     @Test
+    @DisplayName("创建包场：包场费为 0 的即刻生效，不走支付")
+    void createBooking_freeBookingActivatesImmediately() {
+        LocalDateTime start = tomorrowAt(14, 0);
+        LocalDateTime end = tomorrowAt(18, 0);
+
+        BizResult<BookingVo> result = bookingService.createBooking(
+                newRequest(start, end, BigDecimal.ZERO), ADMIN_ID);
+
+        assertTrue(result.isSuccess(), "0 元包场应当创建成功");
+
+        Booking stored = bookingMapper.get(result.getData().getId());
+        assertEquals(BookingStatus.PAID.name(), stored.getStatus(),
+                "没有钱要收，就不该卡在待付款 —— 卡住的话时段占着、邀请链接取不出来，"
+                        + "而且没有任何办法把它推进去（支付回调会校验金额，0 元的单子走不到那一步）");
+        assertNotNull(stored.getInviteToken(), "生效的同时就要有令牌，否则被邀请者进不来");
+        assertNotNull(stored.getPaidAt(), "记一个结清时刻，列表上才不会显示成「尚未付款」");
+        assertNull(stored.getPaymentNo(), "确实没有支付过，不该凭空有个流水号");
+    }
+
+    @Test
     @DisplayName("创建包场：结束时刻不晚于开始时刻时拒绝")
     void createBooking_rejectsReversedRange() {
         LocalDateTime start = tomorrowAt(14, 0);

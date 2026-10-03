@@ -3,13 +3,13 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
-import com.kaede.uspace.order.dto.ConfirmPaymentRequest;
 import com.kaede.uspace.order.dto.CreatePaymentRequest;
 import com.kaede.uspace.order.dto.PaymentCreateVo;
 import com.kaede.uspace.order.dto.PaymentNotifyRequest;
 import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
 import com.kaede.uspace.order.dto.PaymentStatusVo;
+import com.kaede.uspace.order.dto.PaymentTarget;
 import com.kaede.uspace.order.entity.Order;
 import com.kaede.uspace.promotion.CardOrderStatus;
 import com.kaede.uspace.promotion.FakeMonthlyCardMapper;
@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -106,17 +107,43 @@ class PaymentServiceTests {
     private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
     private final PromotionProperties promotionProperties = new PromotionProperties();
 
+    /**
+     * 支付配置。
+     *
+     * <p><b>刻意把四条通道全开</b>：本类测的是支付链路本身（发起、回调、查单、核销），
+     * 而 {@code PaymentProperties} 的默认值只开放扫码转账 —— 那是投产态的配置。
+     * 不配置的话，本类里所有走线上通道的用例都会撞上
+     * {@code PAYMENT_CHANNEL_DISABLED}。通道准入本身由
+     * {@code PaymentChannelServiceTests} 单独覆盖，不在这里重复测。
+     */
+    private final PaymentProperties paymentProperties = allChannelsEnabled();
+
     private PaymentService service;
 
     @BeforeEach
     void setUp() {
-        service = new PaymentService(gateway,
+        service = new PaymentService(gateway, paymentProperties,
                 List.of(new OrderPaymentTargetHandler(orderMapper.asMapper()),
                         new BookingPaymentTargetHandler(bookingMapper.asMapper(),
                                 inviteTokenService, participantMapper.asMapper()),
                         new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
                                 cardMapper.asMapper(), promotionProperties)),
-                orderMapper.asMapper(), userMapper.asMapper());
+                userMapper.asMapper());
+    }
+
+    /**
+     * 造一份「四条通道全开」的配置。
+     *
+     * <p>用 {@code values()} 而不是逐个列出：新增通道时本类会自动跟上，
+     * 不必记得回来改 —— 这个配置的意图本就是「不受通道开关影响」。
+     *
+     * @return 全部通道都启用的配置对象
+     */
+    private static PaymentProperties allChannelsEnabled() {
+        PaymentProperties properties = new PaymentProperties();
+        properties.setEnabledChannels(
+                Arrays.stream(PaymentChannel.values()).map(Enum::name).toList());
+        return properties;
     }
 
     // ==================================================================
@@ -592,49 +619,60 @@ class PaymentServiceTests {
     }
 
     // ==================================================================
-    // 人工核销
+    // 凭证落账（扫码转账，2026-09-30 起投产的唯一收款方式）
     // ==================================================================
 
     @Test
-    @DisplayName("核销：没有支付凭证时拒绝")
-    void confirmPayment_requiresProof() {
+    @DisplayName("凭证落账：写支付字段、记确认人并累加消费额")
+    void settleByProof_marksPaidAndAccumulates() {
         Order order = seedPendingOrder(USER_ID);
-
-        BizResult<Void> result = service.confirmPayment(order.getId(), 9L, confirmRequest("TX-1"));
-
-        assertEquals(ErrorCode.PAYMENT_PROOF_REQUIRED, result.getError(),
-                "没有凭证就核销等于凭空把订单标成已支付，这条校验拦的是误操作");
-    }
-
-    @Test
-    @DisplayName("核销：正常核销写支付字段、记核销人并累加消费额")
-    void confirmPayment_marksPaidWithAdmin() {
-        Order order = seedPendingOrder(USER_ID);
-        order.setPaymentProof("/uploads/proof/abc.png");
         seedUser(USER_ID, BigDecimal.ZERO);
 
-        BizResult<Void> result = service.confirmPayment(order.getId(), 9L, confirmRequest("WX-TX-9"));
+        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L);
 
-        assertTrue(result.isSuccess(), "有凭证时应当可以核销");
         Order saved = orderMapper.get(order.getId());
-        assertEquals(OrderStatus.PAID.name(), saved.getStatus(), "核销后转已支付");
-        assertEquals("QR_UPLOAD", saved.getPaymentMethod(), "通道记为人工核销");
+        assertEquals(OrderStatus.PAID.name(), saved.getStatus(), "落账后转已支付");
+        assertEquals("QR_UPLOAD", saved.getPaymentMethod(), "通道记为扫码转账");
+        assertEquals("WX-TX-9", saved.getPaymentNo(), "流水号原样写入，对账时要用到它");
         assertEquals(9L, saved.getConfirmedBy(),
-                "记下是哪位管理员确认的 —— 与线上回调的「系统自动」区分得开");
+                "记下是哪位管理员确认的 —— 订单「提交即交付」时这里是 null（系统自动）");
         assertEquals(0, AMOUNT.compareTo(userMapper.asMapper().selectById(USER_ID).getOrderPaid()),
-                "人工核销也要累加消费额，否则用户的累计消费会少算");
+                "凭证落账也要累加消费额，否则用户的累计消费会少算");
     }
 
     @Test
-    @DisplayName("核销：订单不在待支付状态时拒绝")
-    void confirmPayment_rejectsNonPendingOrder() {
+    @DisplayName("凭证落账：同一笔调两次只累加一次消费额")
+    void settleByProof_accumulatesOnlyOnce() {
         Order order = seedPendingOrder(USER_ID);
-        order.setPaymentProof("/uploads/proof/abc.png");
-        order.setStatus(OrderStatus.IN_USE.name());
+        seedUser(USER_ID, BigDecimal.ZERO);
+        PaymentTarget target = targetOf(order);
 
-        BizResult<Void> result = service.confirmPayment(order.getId(), 9L, confirmRequest("WX-TX-9"));
+        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null);
+        // 第二次拿的是同一个 target 对象（status 仍是 PENDING_PAYMENT 的快照），
+        // 所以挡下它的是 markPaid 的状态守卫，而不是 isPaid() 那个前置判断 ——
+        // 两道防线各测各的
+        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null);
 
-        assertEquals(ErrorCode.ORDER_STATUS_INVALID, result.getError(), "还在玩的订单没有账单可核销");
+        assertEquals(0, AMOUNT.compareTo(userMapper.asMapper().selectById(USER_ID).getOrderPaid()),
+                "重复累加会让用户的累计消费凭空翻倍，而订单本身看不出任何异常");
+    }
+
+    @Test
+    @DisplayName("凭证落账：目标已是已支付时直接跳过（订单提交即交付后复核的那条路）")
+    void settleByProof_skipsAlreadyPaidTarget() {
+        Order order = seedPendingOrder(USER_ID);
+        // 模拟「订单在用户提交凭证那一刻就已落账，管理员随后复核」的情形。
+        // ⚠️ 改的是假 Mapper 里那一份而不是 seed 返回的那个对象 ——
+        // targetOf 会按单号重新读库，改前者才有效果（踩过一次）
+        orderMapper.get(order.getId()).setStatus(OrderStatus.PAID.name());
+        seedUser(USER_ID, BigDecimal.ZERO);
+
+        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L);
+
+        // 用 signum() 判「是不是零」而不是 equals —— BigDecimal 的 equals 连标度
+        // 一起比，0 与 0.00 不相等，而这里只关心数值
+        assertEquals(0, userMapper.asMapper().selectById(USER_ID).getOrderPaid().signum(),
+                "已支付的一律跳过 —— 复核只是登记，不能把钱再记一遍");
     }
 
     // ==================================================================
@@ -758,14 +796,16 @@ class PaymentServiceTests {
     }
 
     /**
-     * 构造一个人工核销请求。
+     * 把订单实体翻译成支付目标，走真实的处理器。
      *
-     * @param paymentNo 平台交易号
-     * @return 请求对象
+     * <p>不手搓一个 PaymentTarget：那个处理器是「实体 → 统一结构」的唯一真相，
+     * 测试里再写一份的话，处理器改了而测试没改，两边就会各测各的。
+     *
+     * @param order 订单实体
+     * @return 支付目标；订单不在 FakeMapper 里时返回 null
      */
-    private static ConfirmPaymentRequest confirmRequest(String paymentNo) {
-        ConfirmPaymentRequest request = new ConfirmPaymentRequest();
-        request.setPaymentNo(paymentNo);
-        return request;
+    private PaymentTarget targetOf(Order order) {
+        return new OrderPaymentTargetHandler(orderMapper.asMapper())
+                .loadByOutTradeNo(order.getOrderNo());
     }
 }

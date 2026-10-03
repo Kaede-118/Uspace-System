@@ -1,6 +1,7 @@
 package com.kaede.uspace.order.mapper;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.entity.Order;
 import org.junit.jupiter.api.DisplayName;
@@ -49,6 +50,10 @@ class OrderMapperIntegrationTests {
 
     @Autowired
     private OrderMapper orderMapper;
+
+    /** 比较账单快照用 —— MySQL 的 JSON 列会规范化存储，只能按 JSON 语义比 */
+    @Autowired
+    private ObjectMapper objectMapper;
 
     // ==================================================================
     // 落库与映射
@@ -284,16 +289,41 @@ class OrderMapperIntegrationTests {
 
         int affected = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 120,
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
-                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
-                OrderStatus.PENDING_PAYMENT.name());
+                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("16.00"), OrderStatus.PENDING_PAYMENT.name(), null);
         assertEquals(1, affected, "使用中的订单应当能被结算");
 
         // 再结算一次 —— 模拟用户重复点击
         int again = orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 120,
                 120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
-                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, new BigDecimal("16.00"),
-                OrderStatus.PENDING_PAYMENT.name());
+                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("16.00"), OrderStatus.PENDING_PAYMENT.name(), null);
         assertEquals(0, again, "第二次应当拿到 0 行，而不是把账单重算一遍");
+    }
+
+    @Test
+    @DisplayName("账单快照：JSON 列原样往返，分段明细读回来不走样")
+    void updateSettlement_writesBillSnapshot() throws Exception {
+        Order inUse = newOrder(OrderStatus.IN_USE);
+        orderMapper.insert(inUse);
+
+        // 与 OrderService 真正写进去的形状一致：枚举名 + 带格式的时间戳
+        String snapshot = """
+                {"bill":{"totalMinutes":120,"segments":[{"period":"DAY","units":4,
+                "startTime":"2026-10-01 10:00:00"}],"discounted":false},"freeByBooking":false}""";
+
+        orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 120,
+                120, new BigDecimal("16.00"), 0, BigDecimal.ZERO,
+                new BigDecimal("16.00"), BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                new BigDecimal("16.00"), OrderStatus.PENDING_PAYMENT.name(), snapshot);
+
+        Order loaded = orderMapper.selectById(inUse.getId());
+        assertNotNull(loaded.getBillSnapshot(),
+                "快照写不进去时接口报的是「成功」、列上却是 null —— 只有查回来才知道");
+        // ⚠️ 逐字比较不行：MySQL 的 JSON 列会规范化存储（键排序、补空格），
+        //    所以按 JSON 语义比较
+        assertEquals(objectMapper.readTree(snapshot), objectMapper.readTree(loaded.getBillSnapshot()),
+                "分段明细是订单详情展示的唯一数据源，往返丢一个字段页面上就少一块");
     }
 
     @Test
@@ -306,8 +336,8 @@ class OrderMapperIntegrationTests {
         // 一行代码算错就会让这一列悄悄变成 null 或与计费时长混同，而不会报任何错
         orderMapper.updateSettlement(inUse.getId(), LocalDateTime.now(), 180,
                 0, BigDecimal.ZERO, 0, BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-                OrderStatus.PAID.name());
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+                OrderStatus.PAID.name(), null);
 
         Order loaded = orderMapper.selectById(inUse.getId());
         assertEquals(180, loaded.getStayMinutes(),
@@ -326,13 +356,15 @@ class OrderMapperIntegrationTests {
         int adjusted = orderMapper.updateAdjustment(pending.getId(),
                 LocalDateTime.now().minusHours(1), 90, 90, new BigDecimal("12.00"),
                 0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
-                new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
+                BigDecimal.ZERO, new BigDecimal("12.00"),
+                OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场", null);
         assertEquals(1, adjusted, "待支付的订单可以调整");
 
         int rejected = orderMapper.updateAdjustment(paid.getId(),
                 LocalDateTime.now().minusHours(1), 90, 90, new BigDecimal("12.00"),
                 0, BigDecimal.ZERO, new BigDecimal("12.00"), BigDecimal.ZERO, BigDecimal.ZERO,
-                new BigDecimal("12.00"), OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场");
+                BigDecimal.ZERO, new BigDecimal("12.00"),
+                OrderStatus.PENDING_PAYMENT.name(), 9L, "监控核实已离场", null);
         assertEquals(0, rejected,
                 "已支付的不允许调整 —— 那必然涉及退款，属于人工运营流程");
 

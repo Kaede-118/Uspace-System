@@ -3,6 +3,7 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.security.TokenGenerator;
 import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.dto.BookingInviteVo;
@@ -15,8 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.SecureRandom;
-import java.util.Base64;
+import java.time.LocalDateTime;
 
 /**
  * 包场邀请令牌（模块 8）。
@@ -38,7 +38,10 @@ import java.util.Base64;
  * 那时下单带上令牌仍能进场。
  *
  * <p><b>令牌不单独设过期时间</b>：它的有效性完全由包场时段界定 ——
- * 时段一过，那场包场的排他性自然消失，令牌也就没有意义了。
+ * 时段一过（或包场被撤销退款），令牌立即失效。
+ * ⚠️ 这两条原先只写在注释里、代码一行都没实现（包场结束之后甚至被撤销之后，
+ * 链接照样能打开、照样能加进名单），**2026-09-30 才真正落地**，
+ * 判在 {@link #findBookingByToken} 里。
  *
  * <p><b>令牌只在下单请求体里传</b>（见 {@code CreateOrderRequest}），
  * 不进 URL 路径 —— 路径会进 access log、浏览器历史、Referer 头。
@@ -47,18 +50,6 @@ import java.util.Base64;
 @Slf4j
 @Service
 public class InviteTokenService {
-
-    /**
-     * 令牌的随机字节数。
-     *
-     * <p>32 字节 = 256 位，Base64 URL 编码（去填充）后是 43 个字符，
-     * 恰好填满 {@code biz_booking.invite_token} 的 {@code VARCHAR(64)}。
-     * 这个长度的暴力猜测概率低到可以忽略，所以不需要额外的限流。
-     */
-    private static final int TOKEN_BYTES = 32;
-
-    /** 随机源。用 SecureRandom 而非 Random —— 令牌即凭证，可预测的凭证等于没有凭证 */
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     /**
      * 邀请落地页的前端路由前缀。
@@ -83,10 +74,9 @@ public class InviteTokenService {
     /**
      * 生成一个邀请令牌（不落库）。
      *
-     * <p>用 URL-safe 的 Base64 变体且去掉填充：令牌要塞进分享链接，
-     * 标准 Base64 的 {@code +} {@code /} {@code =} 在 URL 里需要转义，
-     * 多一层转义就多一处可能出错的地方（尤其是被聊天软件自动加空格、
-     * 抑或被用户手动复制时截断）。
+     * <p><b>具体怎么生成见 {@link TokenGenerator}</b> —— 那段规格是全项目共用的：
+     * <b>0 元包场</b>在 {@code space} 包的 {@code BookingService} 里创建时也要生成一个，
+     * 而本类住在 {@code order}（依赖方向是 {@code order → space}），那边调不到本类。
      *
      * <p>调用方负责落库，因为落库要与「包场转已付款」在<b>同一条 UPDATE</b> 里完成
      * （见 {@code BookingMapper#markPaid}）—— 分成两步就可能出现
@@ -96,9 +86,7 @@ public class InviteTokenService {
      * @return 43 字符的 URL-safe 随机令牌
      */
     public String generate() {
-        byte[] raw = new byte[TOKEN_BYTES];
-        SECURE_RANDOM.nextBytes(raw);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+        return TokenGenerator.generate();
     }
 
     /**
@@ -211,16 +199,39 @@ public class InviteTokenService {
      * 凭令牌取出包场实体。
      *
      * <p>用私有方法而不是 public 的「先查实体再判断」，是为了让下游拿不到
-     * 「查得到但已经取消」的中间状态 —— 本类对外只暴露三种完整的结果。
+     * 「查得到但已经结束 / 已撤销」的中间状态 —— 本类对外只暴露三种完整的结果。
      *
      * @param token 邀请令牌，可为 null
-     * @return 包场实体；令牌为空、空白或查不到时返回 null
+     * @return 包场实体；令牌为空、空白、查不到、场次已结束、场次已撤销退款时一律返回 null
      */
     private Booking findBookingByToken(String token) {
         if (token == null || token.isBlank()) {
             return null;
         }
-        return bookingMapper.selectByInviteToken(token);
+        Booking booking = bookingMapper.selectByInviteToken(token);
+        if (booking == null) {
+            return null;
+        }
+        /*
+         * 查得到 ≠ 还能用 —— 下面两条才是「令牌的有效性由包场时段界定」这句
+         * 承诺的落地。缺了它们，selectByInviteToken 的「只按令牌查」就等于「永久有效」：
+         *
+         *   ① 包场结束之后，那场的排他性已经消失，链接不该再把人放进名单
+         *   ② 被撤销 / 退款的包场，钱都退回去了，更不该还能加人
+         *
+         * 两者都返回 null，由上游统一翻成 404 +「邀请链接无效或已失效」——
+         * 刻意不区分「令牌不存在」与「场次已失效」：对调用方而言处置动作是一样的
+         * （找包场人要条新链接），分开反而泄露了「这个令牌曾经存在过」。
+         */
+        if (!BookingStatus.PAID.name().equals(booking.getStatus())) {
+            return null;
+        }
+        LocalDateTime endAt = booking.getEndAt();
+        // 半开区间 [start, end) 的口径：结束时刻当刻即失效
+        if (endAt == null || !endAt.isAfter(LocalDateTime.now())) {
+            return null;
+        }
+        return booking;
     }
 
     /**

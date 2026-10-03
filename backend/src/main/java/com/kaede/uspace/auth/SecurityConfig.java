@@ -93,12 +93,25 @@ public class SecurityConfig {
      */
     private static final String[] PUBLIC_PATHS = {
             "/api/user/register",
+            // QQ 号验证的两个端点。注册之前用户没有任何凭证，不放行就没法取码、
+            // 也没法轮询确认结果 —— 而它们正是「注册」这一步的前置。
+            //
+            // 安全性由三样东西承担，不靠认证：签发有数量上限（超了返回 40936）、
+            // 验证码本身不是凭证（群里谁都能看见，但只有持有那个 QQ 的人
+            // 查得到自己那条记录）、challengeId 只走请求体（见 QqVerifyController）。
+            "/api/user/qq-verify",
+            "/api/user/qq-verify/status",
             "/api/auth/login",
             "/api/store/status",
             "/api/store/notices",
             "/api/store/bookings",
+            "/api/store/free-periods",
             "/api/devices",
             "/api/devices/types",
+            // 价目表（模块 7）。与上面几条同理 —— 价格是店门口就该看得见的信息，
+            // 想进店的人应该先能查到要花多少钱，而不是注册完才看得到。
+            // 它只读计费配置，不含任何用户数据。
+            "/api/billing/rules",
             // 用户上传的头像与背景图。图是 <img src> 加载的，
             // 浏览器不会为图片请求带 Authorization 头 —— 不放行的话，
             // 页面上所有头像与背景图都会裂，而后端日志里一行都看不到。
@@ -107,6 +120,18 @@ public class SecurityConfig {
             "/uploads/**",
             "/api/payments/notify/wxpay",
             "/api/payments/notify/alipay",
+            // QQ 机器人的反向 WebSocket 端点（模块 11）。NapCat 是个常驻进程，
+            // 当然带不了本系统的 JWT —— 不放行就握不上手。
+            // 与上面两个回调同理：这里放开的只是【端点】，鉴权并没有被取消，
+            // 而是换了一种 —— 改由握手阶段的 `Authorization: Bearer <token>` 承担，
+            // 令牌不对直接拒绝握手（见 OneBotHandshakeInterceptor）。
+            //
+            // ⚠️ 这一条与 uspace.qqbot.ws-path 必须一致，改一个要改另一个：
+            // 本类在 auth 包，按「其他模块禁止 import qqbot」的单向依赖规则，
+            // 它读不到那个配置项，所以这里只能写字面量。
+            // 另外 uspace.qqbot.enabled=false 时端点是【不存在】的（404），
+            // 而不是「存在但放行」—— 那一层保证在 QqbotConfig 上。
+            "/onebot/v11/ws",
     };
 
     /**

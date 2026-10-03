@@ -132,7 +132,6 @@ public class FakeOrderMapper implements InvocationHandler {
             case "updateSettlement" -> updateSettlement(args);
             case "updateAdjustment" -> updateAdjustment(args);
             case "markPaid" -> markPaid(args);
-            case "updatePaymentProof" -> updatePaymentProof(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -366,8 +365,8 @@ public class FakeOrderMapper implements InvocationHandler {
     /**
      * 写入结算结果。带「使用中」状态守卫。
      *
-     * @param args 依次为 id、endTime、日场分钟、日场金额、夜场分钟、夜场金额、
-     *             合计、优惠额、月卡免单额、应付、目标状态
+     * @param args 依次为 id、endTime、在店分钟、日场分钟、日场金额、夜场分钟、夜场金额、
+     *             合计、优惠额、月卡免单额、活动免单额、应付、目标状态、账单快照
      * @return 受影响行数
      */
     private int updateSettlement(Object[] args) {
@@ -376,15 +375,16 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[11]);
+        order.setStatus((String) args[12]);
+        order.setBillSnapshot((String) args[13]);
         return 1;
     }
 
     /**
      * 人工调整时长与金额。带「未付款」状态守卫，并写下四个调整字段。
      *
-     * @param args 依次为 id、endTime、日场分钟、日场金额、夜场分钟、夜场金额、
-     *             合计、优惠额、月卡免单额、应付、目标状态、调整人、调整原因
+     * @param args 依次为 id、endTime、在店分钟、日场分钟、日场金额、夜场分钟、夜场金额、
+     *             合计、优惠额、月卡免单额、活动免单额、应付、目标状态、调整人、调整原因、账单快照
      * @return 受影响行数
      */
     private int updateAdjustment(Object[] args) {
@@ -393,11 +393,12 @@ public class FakeOrderMapper implements InvocationHandler {
             return 0;
         }
         applyAmounts(order, args, 1);
-        order.setStatus((String) args[11]);
+        order.setStatus((String) args[12]);
         order.setAdjusted(1);
-        order.setAdjustedBy((Long) args[12]);
-        order.setAdjustReason((String) args[13]);
+        order.setAdjustedBy((Long) args[13]);
+        order.setAdjustReason((String) args[14]);
         order.setAdjustedAt(LocalDateTime.now());
+        order.setBillSnapshot((String) args[15]);
         return 1;
     }
 
@@ -417,22 +418,6 @@ public class FakeOrderMapper implements InvocationHandler {
         order.setPaymentNo((String) args[2]);
         order.setPaidAt((LocalDateTime) args[3]);
         order.setConfirmedBy((Long) args[4]);
-        return 1;
-    }
-
-    /**
-     * 写入支付凭证。带「待支付」状态守卫。
-     *
-     * @param args 依次为 id、paymentProof
-     * @return 受影响行数
-     */
-    private int updatePaymentProof(Object[] args) {
-        Order order = guard((Long) args[0], OrderStatus.PENDING_PAYMENT.name()::equals);
-        if (order == null) {
-            return 0;
-        }
-        order.setPaymentProof((String) args[1]);
-        order.setPaymentMethod("QR_UPLOAD");
         return 1;
     }
 
@@ -472,7 +457,8 @@ public class FakeOrderMapper implements InvocationHandler {
         order.setTotalAmount((BigDecimal) args[offset + 6]);
         order.setDiscountAmount((BigDecimal) args[offset + 7]);
         order.setCardFreeAmount((BigDecimal) args[offset + 8]);
-        order.setPayableAmount((BigDecimal) args[offset + 9]);
+        order.setActivityFreeAmount((BigDecimal) args[offset + 9]);
+        order.setPayableAmount((BigDecimal) args[offset + 10]);
     }
 
     /**

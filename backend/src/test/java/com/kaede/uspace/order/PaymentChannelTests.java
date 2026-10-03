@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -76,6 +77,42 @@ class PaymentChannelTests {
         assertEquals("微信外手机浏览器", PaymentChannel.WXPAY_H5.getLabel());
         assertEquals("支付宝手机网站支付", PaymentChannel.ALIPAY_WAP.getLabel());
         assertEquals("传截图人工核销", PaymentChannel.QR_UPLOAD.getLabel(),
-                "降级路径的标签要写得直白，前端展示时用户才知道这不是线上支付");
+                "这是技术口径、给管理后台看的 —— 说明这笔钱从哪个入口进来的");
+    }
+
+    @Test
+    @DisplayName("用户口径中文名：微信两个通道都叫「微信支付」")
+    void getUserLabel() {
+        assertEquals("微信支付", PaymentChannel.WXPAY_JSAPI.getUserLabel());
+        assertEquals("微信支付", PaymentChannel.WXPAY_H5.getUserLabel(),
+                "用户不需要知道 JSAPI 与 H5 的区别 —— 在他那里都是微信支付");
+
+        assertEquals("支付宝", PaymentChannel.ALIPAY_WAP.getUserLabel());
+        assertEquals("扫码转账", PaymentChannel.QR_UPLOAD.getUserLabel(),
+                "写的是用户自己做的动作（扫码转账），不是系统内部的叫法（传截图人工核销）");
+    }
+
+    @Test
+    @DisplayName("按名取用户口径：认不出的原样返回，null 不抛异常")
+    void userLabelOf() {
+        assertEquals("微信支付", PaymentChannel.userLabelOf("WXPAY_JSAPI"));
+        assertEquals("扫码转账", PaymentChannel.userLabelOf("QR_UPLOAD"));
+
+        assertEquals("WXPAY_NATIVE", PaymentChannel.userLabelOf("WXPAY_NATIVE"),
+                "认不出的取值原样返回 —— 让库里存的异常数据在界面上一眼看得出来，"
+                        + "与 OrderStatus.labelOf 是同一条契约");
+        assertNull(PaymentChannel.userLabelOf(null),
+                "payment_method 列可空，null 要安全地落到「认不出」这一支而不是抛 NPE");
+    }
+
+    @Test
+    @DisplayName("是否要上传付款凭证：只有扫码转账要")
+    void requiresProof() {
+        assertTrue(PaymentChannel.QR_UPLOAD.requiresProof());
+
+        assertFalse(PaymentChannel.WXPAY_JSAPI.requiresProof());
+        assertFalse(PaymentChannel.WXPAY_H5.requiresProof());
+        assertFalse(PaymentChannel.ALIPAY_WAP.requiresProof(),
+                "线上通道靠回调确认到账，不需要用户传凭证");
     }
 }

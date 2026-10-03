@@ -6,8 +6,9 @@
  * 「axios 拦截器 → 路由 → store → 组件 → 设计 token」整条链路跑一遍。
  * 首页通了，剩下的页面就只是重复这个模式。
  *
- * <p>页面结构自上而下：欢迎语 → 门店状态 → 进行中订单 → 未付款提醒 →
- * 公告 → 包场时间表 → 快捷入口。
+ * <p>页面结构自上而下：欢迎语 → 营业状态与进行中订单（同一张卡片）→ 未付款提醒 →
+ * 快捷入口 → 公告 → 包场时间表。⚠️ 快捷入口在公告【之前】：顾客进门是带着
+ * 目的来的，先给「要做什么」，再给「发生了什么」（2026-10-03 调整）。
  *
  * <p><b>公告与包场时间表是两张不同的卡片，不合并</b>：公告记「已经发生了什么」，
  * 时间表回答「接下来哪些时段进不去」。混在一条流里，用户分不清哪条是通知、
@@ -19,13 +20,14 @@
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getStoreStatus, getNotices, getBookingSchedule } from '@/api/store'
+import { getStoreStatus, getNotices, getBookingSchedule, getFreePeriods } from '@/api/store'
 import { getCurrentOrder, createOrder, listMyOrders, getPasscode } from '@/api/order'
 import { usePreviewPolling } from '@/composables/usePreviewPolling'
 import { toastSuccess, toastError, toastInfo } from '@/composables/useToast'
 import { errorMessage, isCode, ErrorCode } from '@/utils/error'
 import { displayName } from '@/stores/user'
 import { formatDuration, formatCountdown, formatTime, formatShortDate, formatYuan } from '@/utils/format'
+import { periodPhaseOf } from '@/utils/labels'
 import NoticeItem from '@/components/NoticeItem.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
@@ -43,8 +45,22 @@ const notices = ref([])
  */
 const HOME_NOTICE_LIMIT = 4
 const schedule = ref([])
+
+/**
+ * 近期免费活动（含正在进行的那一场）。没有时整张卡不出现 —— 与包场安排同理：
+ * 一张只会说「没事发生」的空卡片不值得占首页一块显眼的位置。
+ */
+const freePeriods = ref([])
 const currentOrder = ref(null)
 const unpaidCount = ref(0)
+/**
+ * 第一笔未付款订单，用来给「去支付」当跳转目标。
+ *
+ * <p>与 {@link unpaidCount} 是同一次请求的两个字段（列表接口的
+ * {@code size: 1} 只要一条，{@code total} 是总数）——
+ * 页面只显示数量，但要能跳，所以那条记录也得留着。
+ */
+const unpaidOrder = ref(null)
 const loading = ref(true)
 const opening = ref(false)
 
@@ -95,28 +111,34 @@ const nextChangeText = computed(() => preview.value?.nextChangeText || '')
 /* ---------------- 数据加载 ---------------- */
 
 /**
- * 并发拉取首页需要的五路数据。
+ * 并发拉取首页需要的六路数据。
  *
  * <p>用 {@code allSettled} 而不是 {@code all}：公告接口挂了不该让整个首页白屏，
  * 门店状态、进行中订单这些更要紧的东西仍然要显示出来。
  *
- * <p>⚠️ 公告、包场时间表、门店状态三个接口<b>匿名可访问</b>；
+ * <p>⚠️ 公告、包场时间表、免费活动、门店状态四个接口<b>匿名可访问</b>；
  * 进行中订单与未付款查询需要登录 —— 但本页本来就在登录守卫之内。
  */
 async function loadAll() {
-  const [statusRes, noticesRes, scheduleRes, currentRes, unpaidRes] = await Promise.allSettled([
-    getStoreStatus(),
-    getNotices({ page: 1, size: HOME_NOTICE_LIMIT }),
-    getBookingSchedule(5),
-    getCurrentOrder(),
-    listMyOrders({ status: 'PENDING_PAYMENT', size: 1 })
-  ])
+  const [statusRes, noticesRes, scheduleRes, freeRes, currentRes, unpaidRes] =
+    await Promise.allSettled([
+      getStoreStatus(),
+      getNotices({ page: 1, size: HOME_NOTICE_LIMIT }),
+      getBookingSchedule(5),
+      getFreePeriods(3),
+      getCurrentOrder(),
+      listMyOrders({ status: 'PENDING_PAYMENT', size: 1 })
+    ])
 
   if (statusRes.status === 'fulfilled') storeStatus.value = statusRes.value.data
   if (noticesRes.status === 'fulfilled') notices.value = noticesRes.value.data?.records || []
   if (scheduleRes.status === 'fulfilled') schedule.value = scheduleRes.value.data || []
+  if (freeRes.status === 'fulfilled') freePeriods.value = freeRes.value.data || []
   if (currentRes.status === 'fulfilled') currentOrder.value = currentRes.value.data || null
-  if (unpaidRes.status === 'fulfilled') unpaidCount.value = unpaidRes.value.data?.total || 0
+  if (unpaidRes.status === 'fulfilled') {
+    unpaidCount.value = unpaidRes.value.data?.total || 0
+    unpaidOrder.value = unpaidRes.value.data?.records?.[0] || null
+  }
 
   // 只有真有进行中的订单时才启动预览轮询 —— 无单时不轮询，别白白打接口
   if (currentOrder.value?.id) {
@@ -228,6 +250,27 @@ function onQuickAction(action) {
   }
 }
 
+/**
+ * 点了「未付款提醒」的卡片：跳到那笔订单去付款。
+ *
+ * <p>⚠️ <b>支付入口在订单详情页</b>（{@code /orders/:id}，那里挂着
+ * {@code PaymentPanel}），<b>不在结账页</b> —— 结账页是「停止计时」的流程，
+ * 只对进行中的订单有意义；欠着费的订单早已结算完，去那里没有东西可结。
+ *
+ * <p>多笔未付款时也跳第一笔：订单列表页没有「只看未付款」的筛选，
+ * 跳过去反而要用户自己在列表里翻。付完一笔回到首页，提醒里的数字会少一
+ *（首页每次进入都重新拉数据，不是缓存的）。
+ */
+function onGoPay() {
+  if (unpaidOrder.value?.id) {
+    router.push(`/orders/${unpaidOrder.value.id}`)
+    return
+  }
+  // 拿不到具体订单（理论上只可能是别处刚把这笔付掉了）——
+  // 给一句提示，而不是点了没反应
+  toastInfo('订单状态已变化，请稍后刷新')
+}
+
 onMounted(async () => {
   try {
     await loadAll()
@@ -243,85 +286,65 @@ onUnmounted(() => {
 
 <template>
   <div class="page page-with-tabbar">
-    <!--
-      欢迎语 + 营业状态。
-      营业状态原本单独占一张卡片，但它只是一行状态文字 ——
-      为它撑起一整块卡片，等于把首页最值钱的那块位置花在了「此刻开着门」上。
-      挪到欢迎语下面做一行小字，卡片留给真正有事要说的东西。
-    -->
+    <!-- 欢迎语 -->
     <header class="home__head">
       <h1 class="home__title">
         欢迎您，<span class="text-primary">{{ displayName }}</span>
       </h1>
-      <p v-if="storeStatus" class="home__status-line">
-        <span class="dot" :class="statusDotClass" />
-        <span>{{ storeStatus.statusText }}</span>
-        <span v-if="storeStatus.statusEndAt" class="home__status-until">
-          至 {{ formatTime(storeStatus.statusEndAt) }}
-        </span>
-      </p>
       <p class="home__sub">今天想做点什么？</p>
     </header>
 
-    <!-- 进行中订单：压成两行 —— 第一行时长与金额，第二行跳档预告 -->
-    <div v-if="currentOrder" class="card home__running" @click="onViewPasscode">
-      <div class="home__running-line">
-        <span class="home__running-label">⏱ 正在计费</span>
-        <span class="home__amount">{{ payableText }}</span>
-        <span class="home__running-time">在店 {{ elapsedText }}</span>
+    <!--
+      营业状态 + 进行中订单，共用一张卡片（2026-10-03 定）：
+      左边是「此刻开没开门」，右边是「你正在花多少钱」——
+      两件都是进门先要看的事，摆在一行里。
+      ⚠️ 卡片【始终渲染】：没有进行中订单时它只剩左边的营业状态。
+      营业状态若跟着订单一起藏起来，顾客在没单的时候反而看不到店开没开。
+    -->
+    <div
+      class="card home__status"
+      :class="{ 'home__status--tappable': currentOrder }"
+      @click="currentOrder && onViewPasscode()"
+    >
+      <div class="home__status-row">
+        <p v-if="storeStatus" class="home__status-line">
+          <span class="dot" :class="statusDotClass" />
+          <span>{{ storeStatus.statusText }}</span>
+          <span v-if="storeStatus.statusEndAt" class="home__status-until">
+            至 {{ formatTime(storeStatus.statusEndAt) }}
+          </span>
+        </p>
+
+        <!-- 进行中订单：右端两行 —— 标签与金额一行、在店时长一行 -->
+        <div v-if="currentOrder" class="home__running">
+          <div class="home__running-line">
+            <span class="home__running-label">⏱ 正在计费</span>
+            <span class="home__amount">{{ payableText }}</span>
+          </div>
+          <div class="home__running-time">在店 {{ elapsedText }}</div>
+        </div>
       </div>
 
-      <p v-if="showCountdown || nextChangeText" class="home__running-next">
+      <!-- 跳档预告：只有进行中订单才有 -->
+      <p v-if="currentOrder && (showCountdown || nextChangeText)" class="home__running-next">
         <template v-if="showCountdown">还有 {{ formatCountdown(countdownSeconds) }} </template>
         {{ nextChangeText }}
       </p>
     </div>
 
-    <!-- 未付款提醒 -->
-    <div v-if="unpaidCount > 0" class="card home__unpaid">
+    <!--
+      未付款提醒。整张卡都可点（不只是「去支付」四个字那一段）——
+      那截小字在手机上只有几十像素宽，要求顾客点准它是为难人。
+    -->
+    <div v-if="unpaidCount > 0" class="card home__unpaid" @click="onGoPay">
       <span>💰 你有 {{ unpaidCount }} 笔未付款的订单</span>
       <span class="text-primary">去支付 ›</span>
     </div>
 
     <!--
-      公告与包场时间表并排。
-      两者仍是【两张不同的卡片】（一个是已发生的事、一个是接下来的安排），
-      只是宽屏下摆在同一行 —— 变成两列是布局，合并成一张才是设计错误。
-      窄屏（手机）下 auto-fit 会自动退回单列。
+      快捷入口。**放在公告之前**（2026-10-03 调整）：这四个是「要做什么」，
+      公告是「发生了什么」—— 顾客进门是带着目的来的，先给动作、再给消息。
     -->
-    <div class="home__panels">
-      <!-- 公告（消息流）。只显示前几条，看全部去「全部公告」页 -->
-      <div class="card">
-        <div class="card-title">
-          📢 门店公告
-          <router-link v-if="notices.length" class="home__more" to="/notices">
-            查看全部 ›
-          </router-link>
-        </div>
-        <template v-if="notices.length">
-          <NoticeItem v-for="item in notices" :key="item.id" :notice="item" />
-        </template>
-        <EmptyState v-else text="暂无公告" />
-      </div>
-
-      <!--
-        包场时间表（日程）：没有安排时【整张卡不出现】，而不是留一句「近期没有包场安排」。
-        那张空卡片会一直占着首页一块显眼的位置，说的却只是「没事发生」——
-        公告栏也同理，但公告一般总有内容（机台一动就产生一条），所以留了占位。
-      -->
-      <div v-if="schedule.length" class="card">
-        <div class="card-title">📅 近期包场安排</div>
-        <div v-for="(item, index) in schedule" :key="index" class="schedule">
-          <span v-if="item.ongoing" class="schedule__badge">进行中</span>
-          <span v-else class="schedule__date">{{ formatShortDate(item.startAt) }}</span>
-          <span class="schedule__time">
-            {{ formatTime(item.startAt) }} – {{ formatTime(item.endAt) }}
-          </span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 快捷入口 -->
     <div class="home__grid">
       <!--
         「开门计时」与「查看密码」是同一个按钮的两副面孔：有进行中订单时
@@ -346,6 +369,64 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!--
+      公告与包场时间表。两者是【两张不同的卡片】（一个是已发生的事、
+      一个是接下来的安排），**合并成一张才是设计错误** —— 并列摆放只是布局。
+      ⚠️ 页面宽度锚定手机竖屏之后（见 base.css 的 --page-max，内容 328px），
+      它们在任何设备上都是上下两张（栅格下限 300px 判定了这一点），
+      不再有「宽屏并排」那一档。
+    -->
+    <div class="home__panels">
+      <!-- 公告（消息流）。只显示前几条，看全部去「全部公告」页 -->
+      <div class="card">
+        <div class="card-title">
+          📢 门店公告
+          <router-link v-if="notices.length" class="home__more" to="/notices">
+            查看全部 ›
+          </router-link>
+        </div>
+        <template v-if="notices.length">
+          <NoticeItem v-for="item in notices" :key="item.id" :notice="item" />
+        </template>
+        <EmptyState v-else text="暂无公告" />
+      </div>
+
+      <!--
+        免费活动（正在进行 / 即将开始）。没有活动时【整张卡不出现】，与包场安排同理。
+        ⚠️ 排在包场之前：它说的是「这些时段不收钱」，对顾客是好事，也该更显眼；
+        包场说的是「这些时段进不去」，是限制信息。
+      -->
+      <div v-if="freePeriods.length" class="card">
+        <div class="card-title">🎉 免费活动</div>
+        <div v-for="item in freePeriods" :key="item.id" class="freebie">
+          <span v-if="periodPhaseOf(item.startAt, item.endAt).ongoing" class="freebie__badge">
+            进行中
+          </span>
+          <span v-else class="freebie__date">{{ formatShortDate(item.startAt) }}</span>
+          <span class="freebie__time">
+            {{ formatTime(item.startAt) }} – {{ formatTime(item.endAt) }}
+          </span>
+          <span v-if="item.reason" class="freebie__name">{{ item.reason }}</span>
+        </div>
+      </div>
+
+      <!--
+        包场时间表（日程）：没有安排时【整张卡不出现】，而不是留一句「近期没有包场安排」。
+        那张空卡片会一直占着首页一块显眼的位置，说的却只是「没事发生」——
+        公告栏也同理，但公告一般总有内容（机台一动就产生一条），所以留了占位。
+      -->
+      <div v-if="schedule.length" class="card">
+        <div class="card-title">📅 近期包场安排</div>
+        <div v-for="(item, index) in schedule" :key="index" class="schedule">
+          <span v-if="item.ongoing" class="schedule__badge">进行中</span>
+          <span v-else class="schedule__date">{{ formatShortDate(item.startAt) }}</span>
+          <span class="schedule__time">
+            {{ formatTime(item.startAt) }} – {{ formatTime(item.endAt) }}
+          </span>
+        </div>
+      </div>
+    </div>
+
     <LoadingMask :loading="opening" :text="busyText" />
 
     <!-- 密码弹层 -->
@@ -355,6 +436,15 @@ onUnmounted(() => {
         <div class="modal__passcode">{{ passcodeInfo?.passcode }}</div>
         <p class="text-sm text-sub">
           密码有效至 {{ formatTime(passcodeInfo?.passcodeEnd) }}
+        </p>
+        <!--
+          包场参与者才看得到的一条规则：包场里「全体各自开门计时、各自离店结账」
+          是核对实际到场人员的办法。散客没有这条规矩 —— 所以按后端的 inBooking
+          条件渲染，而那个标记的判据是「此刻落在包场时段内」，
+          不是「订单挂没挂包场」（提前一天到店的人订单也会挂上，但他此刻在普通消费）。
+        -->
+        <p v-if="passcodeInfo?.inBooking" class="modal__booking">
+          包场参与者全员都要开门计时，离开时各自离店结账，以核对实际到场人员
         </p>
         <p class="modal__hint">进店后如需再次查看，点首页的「查看密码」</p>
         <button class="btn btn-primary" @click="passcodeVisible = false">知道了</button>
@@ -388,12 +478,27 @@ onUnmounted(() => {
   color: var(--c-text-muted);
 }
 
-/* 营业状态：欢迎语下面的一行小字，不再是独立卡片 */
+/*
+ * 营业状态 + 正在计费，同一张卡片的左右两端。
+ * 没订单时右端整个不渲染，左端自然靠左。
+ */
+.home__status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+/* 有进行中订单时整张卡可点（去看密码） */
+.home__status--tappable {
+  cursor: pointer;
+}
+
+/* 营业状态：卡片左端 */
 .home__status-line {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-top: var(--sp-2);
   font-size: 13px;
   color: var(--c-text-sub);
 }
@@ -422,18 +527,17 @@ onUnmounted(() => {
   background: var(--c-danger);
 }
 
-/* 进行中 */
+/* 正在计费：卡片右端，两行（标签 + 金额 / 在店时长） */
 .home__running {
-  cursor: pointer;
+  text-align: right;
 }
 
-/* 第一行：状态 + 金额 + 在店时长，全部左对齐 */
+/* 第一行：标签 + 金额，靠右排 */
 .home__running-line {
   display: flex;
   align-items: baseline;
+  justify-content: flex-end;
   gap: var(--sp-2);
-  /* 窄屏放不下时让「在店 X 分钟」换到下一行，而不是把金额挤没 */
-  flex-wrap: wrap;
 }
 
 .home__running-label {
@@ -449,7 +553,9 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
+/* 第二行：在店时长，与上面那行的金额同处右端 */
 .home__running-time {
+  margin-top: 2px;
   font-size: 13px;
   color: var(--c-text-sub);
 }
@@ -502,7 +608,61 @@ onUnmounted(() => {
   color: var(--c-text);
 }
 
-/* 公告与包场并排。auto-fit 在窄屏下自动退回单列，不必写媒体查询 */
+/*
+ * 免费活动。与包场时间表【同形】（都是「一行时段 + 一个可选徽章」），
+ * 但徽章配色刻意相反：包场的「进行中」是橙色的警示（此刻进不去），
+ * 这里用主色 —— 它是好消息（此刻进来不要钱）。
+ * 两处各留一份样式而不是抽公共类：类名要表达的是「哪张卡的行」，
+ * 硬合成一个名字反而看不出区别（见模板里那段「为什么排在包场之前」）。
+ */
+.freebie {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  font-size: 13px;
+}
+
+.freebie + .freebie {
+  border-top: 1px solid var(--c-border);
+}
+
+.freebie__date {
+  flex-shrink: 0;
+  width: 44px;
+  color: var(--c-text-sub);
+}
+
+.freebie__badge {
+  flex-shrink: 0;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--c-primary);
+  color: #fff;
+  font-size: 11px;
+}
+
+.freebie__time {
+  color: var(--c-text);
+}
+
+/* 活动名称：占掉剩下的位置，长了就省略 —— 但绝不换行把卡片撑高 */
+.freebie__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--c-text-sub);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 公告与包场。minmax 的 300px 下限表达的是「放得下才并排」这条规则 ——
+ * 页面锚定手机竖屏（328px 内容宽）之后它恒为单列，但保留 auto-fit 比写死单列
+ * 更贴近规则本身（见模板里那段注释）。
+ */
 .home__panels {
   display: grid;
   gap: var(--sp-3);
@@ -522,8 +682,11 @@ onUnmounted(() => {
 /* 快捷入口 */
 .home__grid {
   display: grid;
-  /* 两列（手机）到四列（宽屏）之间自适应 */
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  /*
+   * ⚠️ 写死两列（2026-10-03）：页面宽度已锚定手机竖屏（见 base.css 的 --page-max），
+   * 用 auto-fit 的话宽度一变就会漂成三列四列，与手机上看到的对不上。
+   */
+  grid-template-columns: repeat(2, 1fr);
   gap: var(--sp-3);
   margin-top: var(--sp-3);
 }
@@ -593,5 +756,19 @@ onUnmounted(() => {
   margin: var(--sp-3) 0 var(--sp-4);
   font-size: 12px;
   color: var(--c-text-muted);
+}
+/*
+ * 包场参与者的额外提示。用主色（紫）而不是 hint 那种灰 ——
+ * 它说的是一条「请你配合」的规则，不是说明文字，得让人一眼看到。
+ */
+.modal__booking {
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
 }
 </style>

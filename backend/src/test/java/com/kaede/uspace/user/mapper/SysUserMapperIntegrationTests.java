@@ -1,5 +1,9 @@
 package com.kaede.uspace.user.mapper;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.kaede.uspace.user.dto.AdminUserQuery;
+import com.kaede.uspace.user.dto.AdminUserVo;
 import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -7,6 +11,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -45,6 +50,16 @@ class SysUserMapperIntegrationTests {
 
     @Autowired
     private SysUserMapper userMapper;
+
+    /**
+     * 直接写库的通道，只给「后台列表查询」那组用。
+     *
+     * <p>那几条用例要预置 {@code biz_order} 与 {@code biz_monthly_card} 的数据，
+     * 而它们的 Mapper 在另一个包里、本测试不该依赖 —— 用 JdbcTemplate 直插最直接。
+     * 事务同样会回滚，不会留下痕迹。
+     */
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     // ==================================================================
     // 审计字段自动填充
@@ -264,22 +279,86 @@ class SysUserMapperIntegrationTests {
     }
 
     @Test
-    @DisplayName("关键字分页查询：匹配登录名、昵称与 QQ 号")
-    void selectPageByKeyword_matchesMultipleFields() {
+    @DisplayName("后台列表查询：关键字匹配登录名、昵称与 QQ 号")
+    void selectAdminUserPage_matchesMultipleFields() {
         SysUser user = newUser("search");
         user.setNickname("搜索测试昵称");
         user.setQq("666000444");
         userMapper.insert(user);
 
-        com.baomidou.mybatisplus.extension.plugins.pagination.Page<SysUser> page =
-                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(1, 20);
-
-        assertEquals(1, userMapper.selectPageByKeyword(page, "搜索测试昵称").getTotal(),
+        assertEquals(1, queryUsers(keywordOnly("搜索测试昵称")).getTotal(),
                 "昵称也要能搜到 —— 运营未必记得住登录名");
-        assertEquals(1, userMapper.selectPageByKeyword(page, "666000444").getTotal(),
-                "QQ 号同理");
-        assertTrue(userMapper.selectPageByKeyword(page, null).getTotal() >= 1,
-                "不传关键字表示查全部");
+        assertEquals(1, queryUsers(keywordOnly("666000444")).getTotal(), "QQ 号同理");
+        assertTrue(queryUsers(keywordOnly(null)).getTotal() >= 1, "不传关键字表示查全部");
+    }
+
+    @Test
+    @DisplayName("后台列表查询：累计在店时长只累加已结算的订单")
+    void selectAdminUserPage_sumsStayMinutesOfSettledOrdersOnly() {
+        SysUser user = newUser("stay");
+        userMapper.insert(user);
+
+        // 一条已结算的（90 分钟）
+        jdbcTemplate.update("""
+                INSERT INTO biz_order (order_no, user_id, store_id, lock_id, start_time, end_time,
+                                       stay_minutes, status, payable_amount, total_amount,
+                                       discount_amount, card_free_amount, created_at, updated_at, deleted)
+                VALUES (?, ?, 1, 1, NOW(), NOW(), 90, 'PAID', 8.00, 8.00, 0.00, 0.00, NOW(), NOW(), 0)
+                """, "IT-STAY-1", user.getId());
+        // 一条还在店里的（stay_minutes 为 NULL）—— 它不该被算进去
+        jdbcTemplate.update("""
+                INSERT INTO biz_order (order_no, user_id, store_id, lock_id, start_time,
+                                       status, payable_amount, total_amount,
+                                       discount_amount, card_free_amount, created_at, updated_at, deleted)
+                VALUES (?, ?, 1, 1, NOW(), 'IN_USE', 0.00, 0.00, 0.00, 0.00, NOW(), NOW(), 0)
+                """, "IT-STAY-2", user.getId());
+
+        AdminUserVo vo = queryUsers(keywordOnly("stay")).getRecords().get(0);
+
+        assertEquals(90L, vo.getTotalStayMinutes(),
+                "只累加已结算的 —— 还在玩的那一段尚未定局，计入的话刷新一次跳一次");
+    }
+
+    @Test
+    @DisplayName("后台列表查询：月卡状态按「今天落在卡的有效期内」判定")
+    void selectAdminUserPage_resolvesActiveCard() {
+        SysUser withCard = newUser("hascard");
+        userMapper.insert(withCard);
+        jdbcTemplate.update("""
+                INSERT INTO biz_monthly_card (card_no, user_id, card_type, price, start_date, end_date,
+                                              status, created_at, updated_at, deleted)
+                VALUES (?, ?, 'ALL_DAY', 600.00, DATE_SUB(CURDATE(), INTERVAL 1 DAY),
+                        DATE_ADD(CURDATE(), INTERVAL 10 DAY), 'ACTIVE', NOW(), NOW(), 0)
+                """, "IT-CARD-1", withCard.getId());
+
+        assertEquals("ALL_DAY", queryUsers(keywordOnly("hascard")).getRecords().get(0).getCardType());
+
+        // 按「有月卡」筛，能筛出他；按「没有」筛，筛不出
+        AdminUserQuery hasCard = keywordOnly("hascard");
+        hasCard.setHasCard(true);
+        assertEquals(1, queryUsers(hasCard).getTotal());
+
+        AdminUserQuery noCard = keywordOnly("hascard");
+        noCard.setHasCard(false);
+        assertEquals(0, queryUsers(noCard).getTotal(),
+                "「只看没有月卡」必须真的把他排除掉 —— 两个方向都要对，"
+                        + "只测一个方向的话，条件写反了也照样绿");
+    }
+
+    // ==================================================================
+    // 本组辅助
+    // ==================================================================
+
+    /** 只带关键字的查询条件 */
+    private static AdminUserQuery keywordOnly(String keyword) {
+        AdminUserQuery query = new AdminUserQuery();
+        query.setKeyword(keyword);
+        return query;
+    }
+
+    /** 跑一次后台列表查询，取第一页 */
+    private IPage<AdminUserVo> queryUsers(AdminUserQuery query) {
+        return userMapper.selectAdminUserPage(new Page<>(1, 20), query, "u.id DESC");
     }
 
     @Test

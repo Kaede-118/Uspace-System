@@ -1,32 +1,70 @@
 package com.kaede.uspace.order;
 
+import jakarta.annotation.PostConstruct;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 /**
  * 支付模块配置，对应配置文件中的 {@code uspace.payment.*}。
  *
  * <p>与门锁模块（{@link com.kaede.uspace.lock.LockProperties}）是同一套思路：
- * <b>接口按真实规格设计，实现下落为模拟代码</b>，用 {@link #provider} 切换。
+ * <b>接口按真实规格设计，实现下落为模拟代码</b>，只是这里有两个开关而不是一个。
  *
- * <p><b>但开关只有两档，不像门锁那样按通道各配一个</b> —— 因为
- * <b>通道是运行时按用户所处的浏览器环境决定的，不是部署时的配置项</b>。
- * 微信内走 JSAPI、微信外走 H5、支付宝内走 WAP，同一个部署要同时支持三条，
- * 所以只有「整体用模拟实现还是真实实现」这一个维度需要配置。
+ * <h3>两个开关各管一件事，不允许互相推断</h3>
+ * <table border="1">
+ *   <caption>配置项的分工</caption>
+ *   <tr><th>配置项</th><th>管什么</th><th>谁读它</th></tr>
+ *   <tr>
+ *     <td>{@link #provider}</td>
+ *     <td><b>代码能不能对外调用支付平台</b> —— 决定容器里装配哪个
+ *         {@code PaymentGateway} 实现（{@code mock} / {@code disabled} / {@code real}）</td>
+ *     <td>只有各实现类上的 {@code @ConditionalOnProperty} 注解</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@link #enabledChannels}</td>
+ *     <td><b>本店当前收哪几种钱</b> —— 这是业务事实，不是技术开关</td>
+ *     <td>{@code GET /api/payments/channels}（决定给前端展示哪些选项）
+ *         与 {@code PaymentService#createPayment}（准入校验）</td>
+ *   </tr>
+ * </table>
+ *
+ * <p><b>两者不可互相替代</b>。{@code provider=mock} 而 {@code enabled-channels}
+ * 里没有线上通道，是完全正常的组合：模拟收银台还在（开发与测试能用），
+ * 但用户看不到那几个选项 —— 这正是 12 月投产前后的差别。
+ * 反过来 {@code provider=disabled} 而 {@code enabled-channels} 里留着线上通道
+ * 就是配置矛盾了：选项展示得出来，点下去必然失败。{@link #warnOnInconsistentConfig()}
+ * 会在启动时把这种情况喊出来。
+ *
+ * <p>这与门锁模块「按通道各配一个 provider」的做法不同，不是随意为之：
+ * 门锁的通道是<b>部署时就要定死的硬件形态</b>（蓝牙锁还是网关锁），
+ * 而支付的通道是<b>运营决策</b>（这店收不收微信、收不收支付宝），
+ * 与技术实现是否就绪是两件事。
  */
 @Data
+@Slf4j
 @Component
 @ConfigurationProperties(prefix = "uspace.payment")
 public class PaymentProperties {
 
     /**
-     * 支付实现方式：{@code mock} 模拟实现（不访问外网，默认）/ {@code real} 真实支付平台。
+     * 支付实现方式，三档：
+     * <ul>
+     *   <li>{@code mock} —— 模拟实现，不访问外网（默认，供本机开发与答辩演示）</li>
+     *   <li>{@code disabled} —— <b>没有线上支付</b>。装配一个所有方法都返回失败的
+     *       {@code DisabledPaymentGatewayImpl}，让应用照常起得来。
+     *       12 月投产用这一档：收款只走 {@link PaymentChannel#QR_UPLOAD}</li>
+     *   <li>{@code real} —— 真实支付平台（待实现）</li>
+     * </ul>
      *
-     * <p>模拟实现要能脱离外网跑通<b>全部三条通道</b>的完整流程 ——
-     * 包括「拿到 prepay_id / h5_url / form HTML → 模拟用户在微信或支付宝完成支付
-     * → 回调后端 → 订单转 PAID」。演示时可在页面上直接切换通道，
-     * 把三种浏览器环境各演一遍，不必真的准备三个环境。
+     * <p><b>{@code disabled} 这一档是必需的，不是可有可无的占位。</b>
+     * {@code PaymentService} 的构造器依赖一个 {@code PaymentGateway} bean，
+     * 而模拟实现与将来的真实实现都挂在 {@code @ConditionalOnProperty} 上 ——
+     * 少了它，把 provider 改成任何一个非 mock 的值都会让容器装配失败、
+     * <b>应用直接起不来</b>，而不是「优雅地关掉支付」。
      *
      * <p>切到 {@code real} 时还需要微信商户号、API v3 密钥、商户私钥、
      * 支付宝应用私钥与公钥等凭据（个人主体办不了商户号，见建表脚本与设计文档的说明）。
@@ -35,8 +73,79 @@ public class PaymentProperties {
      */
     private String provider = "mock";
 
+    /**
+     * 本店当前收哪几种钱，取值为 {@link PaymentChannel} 的枚举名，逗号分隔。
+     *
+     * <p>默认只收 {@link PaymentChannel#QR_UPLOAD}（扫码转账）——
+     * <b>默认值取「安全侧」</b>：配置文件漏了这一项时，结果是「少收了钱」
+     * 而不是「收了一个根本调不通的通道」。
+     *
+     * <p>本机开发与答辩演示时把它配成四条全开，好把三种浏览器环境各演一遍：
+     * <pre>
+     *   uspace.payment.enabled-channels=QR_UPLOAD,WXPAY_JSAPI,WXPAY_H5,ALIPAY_WAP
+     * </pre>
+     *
+     * <p>用 {@code List<String>} 而不是自己 {@code split(",")}：
+     * Spring Boot 原生支持逗号分隔绑到 List，手写解析会在别处长出第二份。
+     * 与 {@link #provider} 不同，这里的每一项都<b>允许</b>是个非法值 ——
+     * 由 {@link #warnOnInconsistentConfig()} 报警后忽略，而不是让应用起不来
+     * （配置写错一个字就启不了服务，比少收一种钱严重得多）。
+     */
+    private List<String> enabledChannels = List.of(PaymentChannel.QR_UPLOAD.name());
+
     /** 模拟实现的参数，{@code provider=mock} 时生效 */
     private final Mock mock = new Mock();
+
+    /**
+     * 判断某个通道当前是否开放收款。
+     *
+     * <p>{@code createPayment} 的准入校验与 {@code /api/payments/channels} 的
+     * 选项过滤都调它 —— <b>两处必须用同一个判断</b>，否则会出现
+     * 「页面上选得到、点下去报错」这种最让人困惑的组合。所以判断只写在这里。
+     *
+     * <p><b>刻意不写成 {@code enabledChannels.contains(name)}</b>：
+     * {@code payment_method} 列可空，调用方传 null 是正常情形
+     * （判「这个通道开放没有」时手上那个值可能为空），
+     * 而 {@code List.of(...)} 的 {@code contains(null)} 行为随实现而异。
+     * 用 {@code equals} 逐个比则天生安全，与 {@link PaymentChannel#isOnline} 同一套写法。
+     *
+     * @param name 通道名，可为 null
+     * @return 开放返回 true；null、非法名、未列入的通道都返回 false
+     */
+    public boolean isChannelEnabled(String name) {
+        return name != null && enabledChannels.stream().anyMatch(name::equals);
+    }
+
+    /**
+     * 启动时检查配置里有没有「不报错、只会静默失效」的矛盾。
+     *
+     * <p>检查两件事：
+     * <ol>
+     *   <li><b>无法识别的通道名</b> —— 拼错一个字母，那个通道就静默消失了。
+     *       不打日志的话，排查时只会看到「这个选项怎么没了」</li>
+     *   <li><b>网关关了、通道还开着</b> —— 选项会正常展示给用户，
+     *       点下去必然失败。这是纯粹的配置矛盾</li>
+     * </ol>
+     *
+     * <p>刻意只 WARN 不抛异常：配置问题不该让服务起不来，
+     * 而且这一档在 12 月投产前后切换时很容易短暂出现。
+     */
+    @PostConstruct
+    void warnOnInconsistentConfig() {
+        for (String name : enabledChannels) {
+            if (!PaymentChannel.isValid(name)) {
+                log.warn("[支付] uspace.payment.enabled-channels 里有无法识别的通道名「{}」，该项会被忽略", name);
+            }
+        }
+
+        boolean anyOnline = enabledChannels.stream().anyMatch(PaymentChannel::isOnline);
+        if (anyOnline && !"mock".equals(provider) && !"real".equals(provider)) {
+            log.warn("[支付] 配置矛盾：uspace.payment.provider={} 表示没有可用的线上支付实现，"
+                            + "但 uspace.payment.enabled-channels={} 里仍有线上通道 —— "
+                            + "这些选项会展示给用户，点下去必然失败。投产时应把它们去掉",
+                    provider, enabledChannels);
+        }
+    }
 
     /**
      * 模拟实现的参数。

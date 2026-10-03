@@ -147,11 +147,42 @@ public class BillingService {
      * @param endTime      结束使用时间（用户离场或订单结算时刻）
      * @param monthSpent   该用户本月已支付订单的实付额之和（元），null 视同 0
      * @param cardCoverage 月卡的覆盖范围（时段 + 有效日期区间）；无卡传 null
-     * @return 含分段明细、总金额与两种优惠金额的计费结果
+     * @return 含分段明细、总金额与三种优惠金额的计费结果
      * @throws IllegalArgumentException 当时间为空、或结束时间早于开始时间时抛出
      */
     public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
                                    BigDecimal monthSpent, CardCoverage cardCoverage) {
+        return calculate(startTime, endTime, monthSpent, cardCoverage, null);
+    }
+
+    /**
+     * 计算一次消费的费用，含月度累计优惠、月卡免费与免费活动。
+     *
+     * <p><b>三种优惠并行存在、互不重叠，各自管各自的范围</b>：
+     * <ul>
+     *   <li><b>月度优惠</b>整单粒度 —— 门槛达到了，未免费的段整段走优惠价</li>
+     *   <li><b>月卡</b>段粒度 —— 被覆盖的段免费；夜间卡用户的日场段仍照常计费</li>
+     *   <li><b>免费活动</b>也是段粒度，与月卡走同一条路（段保留、金额置 0）——
+     *       账单因此说得清「这段为什么免费、这场活动省了多少」。
+     *       ⚠️ 与包场不同：包场是把区间整段剪掉、根本不产生分段</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>三者都必须在「按原价重算」时一起传下去</b>（见方法体里的警告）——
+     * 漏传任何一个，那份差额都会落进 {@code discountAmount}，
+     * 被记成「月度优惠的效果」。
+     *
+     * @param startTime    开始使用时间（用户点击「开门」的时刻）
+     * @param endTime      结束使用时间（用户离场或订单结算时刻）
+     * @param monthSpent   该用户本月已支付订单的实付额之和（元），null 视同 0
+     * @param cardCoverage 月卡的覆盖范围（时段 + 有效日期区间）；无卡传 null
+     * @param freeRanges   免费活动的区间（任意起止时刻，可跨日夜场与零点）；
+     *                     没有活动传 null 或空列表
+     * @return 含分段明细、总金额与三种优惠金额的计费结果
+     * @throws IllegalArgumentException 当时间为空、或结束时间早于开始时间时抛出
+     */
+    public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
+                                   BigDecimal monthSpent, CardCoverage cardCoverage,
+                                   List<FreeRange> freeRanges) {
         if (startTime == null || endTime == null) {
             throw new IllegalArgumentException("计费的开始时间与结束时间不能为空");
         }
@@ -163,28 +194,34 @@ public class BillingService {
         // 优惠在订单粒度判定：整单走优惠价，或整单走原价，不存在一单内两套单价
         boolean discounted = isDiscounted(monthSpent);
 
+        // 无活动时归一成空列表：下面的判定与切段因此不必到处判 null
+        List<FreeRange> frees = freeRanges == null ? List.of() : freeRanges;
+
         List<SegmentBill> segments = new ArrayList<>();
         BigDecimal totalAmount = BigDecimal.ZERO;
         BigDecimal originalTotal = BigDecimal.ZERO;
         BigDecimal cardFreeAmount = BigDecimal.ZERO;
+        BigDecimal activityFreeAmount = BigDecimal.ZERO;
 
-        for (TimeSegment segment : splitByPeriod(startTime, endTime, cardCoverage)) {
-            SegmentBill bill = billSegment(segment, discounted, cardCoverage);
+        for (TimeSegment segment : splitByPeriod(startTime, endTime, cardCoverage, frees)) {
+            SegmentBill bill = billSegment(segment, discounted, cardCoverage, frees);
             segments.add(bill);
             totalAmount = totalAmount.add(bill.getAmount());
             cardFreeAmount = cardFreeAmount.add(bill.getCardFreeAmount());
+            activityFreeAmount = activityFreeAmount.add(bill.getActivityFreeAmount());
 
             if (discounted) {
                 // 优惠单额外按原价再算一遍，用于得出「本单省了多少」。
                 // 相比在 billSegment 里同时维护两套金额，重算一遍的路径更短、
                 // 更不容易算错；计费是纯计算，多跑一遍的代价可以忽略。
                 //
-                // ⚠️ cardCoverage 必须一起传下去。漏传的话，被月卡覆盖的段
-                // 在重算里会算出一份并不存在的原价，差额全部落进 discountAmount ——
-                // 一笔「月卡免了 40 元」的单会被记成「月度优惠省了 40 元」，
-                // 不报任何错，统计报表还会把它当成优惠活动的效果。
+                // ⚠️ cardCoverage 与 frees 必须一起传下去。漏传任何一个，
+                // 被它覆盖的段在重算里都会算出一份并不存在的原价，
+                // 差额全部落进 discountAmount —— 一笔「月卡免了 40 元」的单
+                // 会被记成「月度优惠省了 40 元」，不报任何错，
+                // 统计报表还会把它当成优惠活动的效果。
                 originalTotal = originalTotal.add(
-                        billSegment(segment, false, cardCoverage).getAmount());
+                        billSegment(segment, false, cardCoverage, frees).getAmount());
             }
         }
 
@@ -200,13 +237,16 @@ public class BillingService {
                 ? originalTotal.subtract(totalAmount)
                 : BigDecimal.ZERO);
         result.setCardFreeAmount(cardFreeAmount);
+        result.setActivityFreeAmount(activityFreeAmount);
 
-        log.info("[计费] {} ~ {}，共 {} 分钟，合计 {} 元，分 {} 段{}{}",
+        log.info("[计费] {} ~ {}，共 {} 分钟，合计 {} 元，分 {} 段{}{}{}",
                 startTime, endTime, result.getTotalMinutes(), totalAmount, segments.size(),
                 discounted ? "，已享月度优惠（结算前当月累计 " + result.getMonthSpentBefore()
                         + " 元，本单省 " + result.getDiscountAmount() + " 元）" : "",
                 cardCoverage == null ? ""
-                        : "，月卡覆盖 " + cardCoverage.describe() + "（免 " + cardFreeAmount + " 元）");
+                        : "，月卡覆盖 " + cardCoverage.describe() + "（免 " + cardFreeAmount + " 元）",
+                activityFreeAmount.signum() == 0 ? ""
+                        : "，免费活动（免 " + activityFreeAmount + " 元）");
         return result;
     }
 
@@ -275,7 +315,10 @@ public class BillingService {
      *       文本「月卡即将到期，之后按时长计费」。<b>与上一条同理不能省</b>：
      *       只报「月卡免费」的话，23:50 的用户会看到一句静态的「免费」，
      *       然后在零点金额毫无预兆地开始涨</li>
-     *   <li><b>段内不再变化</b> —— 已达封顶、或当前段整段都被月卡覆盖，
+     *   <li><b>免费活动到期（FREE）</b> —— 当前段在活动区间内，但活动在本段结束前结束。
+     *       与上一条完全对称：不给这一支的话，活动最后一小时的用户
+     *       同样会看着一句静态的「免费」</li>
+     *   <li><b>段内不再变化</b> —— 已达封顶、或当前段整段都被月卡 / 活动覆盖，
      *       返回说明文字、不给秒数</li>
      * </ol>
      *
@@ -287,10 +330,12 @@ public class BillingService {
      * @param now          计算截止时刻
      * @param monthSpent   当月累计实付额，用于取正确的单价（优惠价还是原价）
      * @param cardCoverage 月卡的时段覆盖范围，无卡传 null
+     * @param freeRanges   免费活动的区间，无活动传 null
      * @return 预告；参数缺失或 {@code now} 早于 {@code startTime} 时返回 null
      */
     public NextChange nextChange(LocalDateTime startTime, LocalDateTime now,
-                                 BigDecimal monthSpent, CardCoverage cardCoverage) {
+                                 BigDecimal monthSpent, CardCoverage cardCoverage,
+                                 List<FreeRange> freeRanges) {
         if (startTime == null || now == null) {
             throw new IllegalArgumentException("跳档预告的计费起点与当前时刻不能为空");
         }
@@ -300,7 +345,8 @@ public class BillingService {
             return null;
         }
 
-        TimeSegment current = currentSegment(startTime, now, cardCoverage);
+        List<FreeRange> frees = freeRanges == null ? List.of() : freeRanges;
+        TimeSegment current = currentSegment(startTime, now, cardCoverage, frees);
         boolean discounted = isDiscounted(monthSpent);
         BillingPeriod period = current.period();
         // 下一个时段边界。提前算出来 —— 月卡那一支也要靠它判断卡是不是在本段内到期
@@ -317,6 +363,22 @@ public class BillingService {
                 return NextChange.at(secondsBetween(now, cardEnd), "月卡即将到期，之后按时长计费");
             }
             return NextChange.none("当前时段月卡免费");
+        }
+
+        // ② 当前段在免费活动区间内：实收恒为 0，段内不会再有金额变化。
+        //    ⚠️ 放在月卡那一支【之后】：与 billSegment 的互斥口径一致
+        //   （被卡覆盖的段不记活动）。两处若反了，账单说「月卡免费」、
+        //    预告说「活动免费」，同一件事两个说法。
+        FreeRange covering = coveringFreeRange(current.start(), frees);
+        if (covering != null) {
+            // 活动在本段结束前结束的话，那一刻起要开始计费 ——
+            // 与月卡到期同一条理由：否则用户看着一句静态的「免费」，
+            // 然后金额毫无预兆地开始涨
+            if (covering.to().isBefore(periodEnd)) {
+                return NextChange.at(secondsBetween(now, covering.to()),
+                        "免费活动即将结束，之后按时长计费");
+            }
+            return NextChange.none("当前时段免费活动");
         }
 
         int units = unitsOf(Duration.between(current.start(), now).toMinutes());
@@ -361,14 +423,15 @@ public class BillingService {
      * 漏传的话，卡失效之后的那一段会被当成「从订单起点一路算到现在」，
      * 于是预告说「已到 ¥17.50」而账单只收 ¥3.50 —— 两边各自看都合理，却对不上。
      *
-     * @param startTime 计费起点
-     * @param now       当前时刻
-     * @param coverage  月卡的覆盖范围，无卡传 null
+     * @param startTime  计费起点
+     * @param now        当前时刻
+     * @param coverage   月卡的覆盖范围，无卡传 null
+     * @param freeRanges 免费活动的区间，无活动传空列表
      * @return 当前所处的段（end 即 {@code now}）
      */
     private TimeSegment currentSegment(LocalDateTime startTime, LocalDateTime now,
-                                       CardCoverage coverage) {
-        List<TimeSegment> done = splitByPeriod(startTime, now, coverage);
+                                       CardCoverage coverage, List<FreeRange> freeRanges) {
+        List<TimeSegment> done = splitByPeriod(startTime, now, coverage, freeRanges);
         BillingPeriod period = periodOf(now);
 
         if (done.isEmpty()) {
@@ -470,13 +533,15 @@ public class BillingService {
     /**
      * 把一次消费切成若干段。
      *
-     * <p><b>切分线有两条</b>：
+     * <p><b>切分线有三条</b>：
      * <ol>
      *   <li>{@link #nextBoundary 时段边界} —— 配置的日场起止时刻。
      *       例如 21:30 – 23:30 会被切成日场 21:30–22:00 与夜场 22:00–23:30 两段</li>
      *   <li><b>月卡的有效期边界</b>（仅当有卡）—— 卡的生效时刻与失效时刻。
      *       段不能被它劈成两半：「整段免费」的判定要求段完整落在卡的区间内，
      *       所以跨过零点的订单必须在这里切开，卡内那段免、卡外那段照常计价</li>
+     *   <li><b>免费活动的区间边界</b>（仅当有活动）—— 与月卡同理：
+     *       活动区间内那段免、区间外那段照常计价</li>
      * </ol>
      *
      * <p><b>多切一段就多享一次宽限</b>，这是分段计算的固有代价（与跨时段切段
@@ -486,13 +551,14 @@ public class BillingService {
      *
      * <p>时长为 0 的段不会产生（恰好从边界开始时不会多出一个空段）。
      *
-     * @param startTime 起始时间
-     * @param endTime   结束时间
-     * @param coverage  月卡的覆盖范围，无卡传 null
+     * @param startTime  起始时间
+     * @param endTime    结束时间
+     * @param coverage   月卡的覆盖范围，无卡传 null
+     * @param freeRanges 免费活动的区间，无活动传空列表
      * @return 按时间先后排列的时段片段
      */
     private List<TimeSegment> splitByPeriod(LocalDateTime startTime, LocalDateTime endTime,
-                                            CardCoverage coverage) {
+                                            CardCoverage coverage, List<FreeRange> freeRanges) {
         List<TimeSegment> segments = new ArrayList<>();
         LocalDateTime cursor = startTime;
 
@@ -506,6 +572,13 @@ public class BillingService {
             LocalDateTime cardBoundary = nextCardBoundary(cursor, endTime, coverage);
             if (cardBoundary != null && cardBoundary.isBefore(segmentEnd)) {
                 segmentEnd = cardBoundary;
+            }
+
+            // 免费活动的边界同理：段必须完整落在区间内或区间外，
+            // 否则「整段免费」的判定无从下手（片段跨界时按起点判会整段免、按终点判会整段收）
+            LocalDateTime freeBoundary = nextFreeBoundary(cursor, endTime, freeRanges);
+            if (freeBoundary != null && freeBoundary.isBefore(segmentEnd)) {
+                segmentEnd = freeBoundary;
             }
 
             segments.add(new TimeSegment(period, cursor, segmentEnd));
@@ -543,6 +616,51 @@ public class BillingService {
             return until;
         }
         return null;
+    }
+
+    /**
+     * 求从某个时刻起的下一个「免费活动边界」。
+     *
+     * <p>与月卡那条线同理，<b>每段活动的两头都要看</b>：活动开始时（之前那段要收费）
+     * 与活动结束时（之后那段要收费）。只做一个方向的话规则就不闭合 ——
+     * 只砍「结束」那一头的话，活动开始前那段会被误判成免费。
+     *
+     * <p>返回的时刻<b>严格晚于</b> {@code cursor}：相等时说明游标已经站在这条边界上
+     * （这一段早切开了），再返回它就会切出一个时长为 0 的段、游标原地不动 ——
+     * 那是个死循环，而不是一次算错。
+     *
+     * <p>多场活动时取<b>最近</b>的那条边界。
+     *
+     * @param cursor     当前游标
+     * @param endTime    订单结束时刻
+     * @param freeRanges 免费活动的区间，可为空列表
+     * @return 最近的边界时刻；所有活动都不沾订单区间时返回 null
+     */
+    private static LocalDateTime nextFreeBoundary(LocalDateTime cursor, LocalDateTime endTime,
+                                                  List<FreeRange> freeRanges) {
+        LocalDateTime nearest = null;
+        for (FreeRange range : freeRanges) {
+            nearest = earlier(nearest, inWindow(range.from(), cursor, endTime));
+            nearest = earlier(nearest, inWindow(range.to(), cursor, endTime));
+        }
+        return nearest;
+    }
+
+    /** 边界落在「严格晚于 cursor 且严格早于 endTime」的窗口内就返回它，否则返回 null。 */
+    private static LocalDateTime inWindow(LocalDateTime edge, LocalDateTime cursor,
+                                          LocalDateTime endTime) {
+        return edge.isAfter(cursor) && edge.isBefore(endTime) ? edge : null;
+    }
+
+    /** 取两个候选里较早的那个（null 表示这一侧没有候选）。 */
+    private static LocalDateTime earlier(LocalDateTime a, LocalDateTime b) {
+        if (a == null) {
+            return b;
+        }
+        if (b == null) {
+            return a;
+        }
+        return a.isBefore(b) ? a : b;
     }
 
     /**
@@ -588,18 +706,19 @@ public class BillingService {
      * 可计费分钟为「段时长 − 宽限」，非正数时档数为 0 ——
      * 「首 N 分钟内免费出场」正是由此自然得出，无需单独判断。
      *
-     * <p><b>月卡覆盖的段照常算档数、单价、封顶与封顶前金额，只把实收置 0。</b>
-     * 这几个中间结果正是账单页解释「这段为什么免费」的依据 ——
+     * <p><b>被月卡或免费活动覆盖的段照常算档数、单价、封顶与封顶前金额，
+     * 只把实收置 0。</b>这几个中间结果正是账单页解释「这段为什么免费」的依据 ——
      * 用户看到的是「夜场 1.5 小时 · 原价 10.5 元 · 月卡免费」，
      * 而不是一个没有来由的 0 元。
      *
      * @param segment      时段片段
      * @param discounted   本单是否按月度优惠价计费（影响单价与封顶）
      * @param cardCoverage 月卡的覆盖范围（时段 + 有效日期），null 表示无卡
+     * @param freeRanges   免费活动的区间，无活动传空列表
      * @return 该段的计费明细
      */
     private SegmentBill billSegment(TimeSegment segment, boolean discounted,
-                                    CardCoverage cardCoverage) {
+                                    CardCoverage cardCoverage, List<FreeRange> freeRanges) {
         long minutes = Duration.between(segment.start(), segment.end()).toMinutes();
         // 档数与跳档预告共用 unitsOf —— 两处各写一份的话，「还有多久到下一档」
         // 会与账单上的档数对不上，而两边看起来都合理
@@ -617,6 +736,11 @@ public class BillingService {
         // 某个卡种上会给出相反的答案
         boolean freeByCard = isFreeByCard(segment.period(), segment.start(), cardCoverage);
 
+        // ⚠️ 两者【互斥】：被月卡覆盖的段只记月卡。月卡用户本来就免费，
+        // 活动并没有为他省下什么 —— 两个都记会把同一笔钱算两遍，
+        // 复盘一场活动时「送出去多少」虚高，且不报任何错。
+        boolean freeByActivity = !freeByCard && isInFreeRange(segment.start(), freeRanges);
+
         SegmentBill bill = new SegmentBill();
         bill.setPeriod(segment.period());
         bill.setStartTime(segment.start());
@@ -626,11 +750,53 @@ public class BillingService {
         bill.setUnitPrice(unitPrice);
         bill.setCapAmount(cap);
         bill.setRawAmount(rawAmount);
-        bill.setAmount(freeByCard ? BigDecimal.ZERO : amount);
+        bill.setAmount(freeByCard || freeByActivity ? BigDecimal.ZERO : amount);
         bill.setCapped(rawAmount.compareTo(cap) > 0);
         bill.setFreeByCard(freeByCard);
         bill.setCardFreeAmount(freeByCard ? amount : BigDecimal.ZERO);
+        bill.setFreeByActivity(freeByActivity);
+        bill.setActivityFreeAmount(freeByActivity ? amount : BigDecimal.ZERO);
         return bill;
+    }
+
+    /**
+     * 某个时刻是否落在任意一段免费活动区间内。
+     *
+     * <p>传的是<b>段的起点</b>：段已按活动的边界切过（见 {@link #splitByPeriod}），
+     * 不会跨越它，所以起点在内即整段都在 —— 与 {@link #isFreeByCard} 同一个道理。
+     *
+     * @param at         段的起点时刻
+     * @param freeRanges 免费活动的区间
+     * @return 落在某段区间内返回 true
+     */
+    private static boolean isInFreeRange(LocalDateTime at, List<FreeRange> freeRanges) {
+        for (FreeRange range : freeRanges) {
+            if (range.covers(at)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 取覆盖某个时刻的那段免费活动区间（都不命中返回 null）。
+     *
+     * <p>与 {@link #isInFreeRange} 的区别只在返回值：那个回答「免不免」，
+     * 这个要拿到区间<b>本身</b> —— 跳档预告得知道活动什么时候结束，
+     * 才能说「之后按时长计费」。两处若各写一份遍历，
+     * 「此刻免费」与「什么时候不免费」会各自漂移。
+     *
+     * @param at         待判断的时刻
+     * @param freeRanges 免费活动的区间
+     * @return 命中的区间；都不命中返回 null
+     */
+    private static FreeRange coveringFreeRange(LocalDateTime at, List<FreeRange> freeRanges) {
+        for (FreeRange range : freeRanges) {
+            if (range.covers(at)) {
+                return range;
+            }
+        }
+        return null;
     }
 
     /**

@@ -9,23 +9,31 @@
  * <ul>
  *   <li><b>逐段显示单价与封顶</b> —— 日夜场不同价、优惠与否又不同价。
  *       只给总价的话，用户拿总时长去乘单价会对不上</li>
- *   <li><b>说明性金额（优惠 / 月卡抵扣）单独列</b> —— 它们解释「为什么便宜了」，
- *       <b>不是「还要再减多少」</b>。实付一律以 {@code payableAmount} 为准</li>
+ *   <li><b>说明性金额（月度优惠 / 月卡抵扣 / 活动减免）单独列</b> —— 它们解释
+ *       「为什么便宜了」，<b>不是「还要再减多少」</b>。
+ *       有三项是因为三种优惠并行存在且互不重叠（见 BillingService 的类注释），
+ *       合成一行的话，账单上就说不清那笔钱是谁免的</li>
  *   <li><b>包场减免要说一句</b> —— 否则包场用户看到「在店 3 小时、计费 1 小时」会问为什么</li>
  * </ul>
+ *
+ * <p><b>段的免费标记也是这一层的</b>：被月卡或活动覆盖的段实收是 0，
+ * 而它的档数、单价、封顶值都还在（后端刻意保留）—— 不标一句「为什么 0 元」的话，
+ * 那行看起来就像算错了。
  */
 import { computed } from 'vue'
 import { formatMoney, formatDuration } from '@/utils/format'
 
 const props = defineProps({
-  /** 账单对象：{ segments, totalMinutes, totalAmount } */
+  /** 账单对象：{ segments, totalMinutes, totalAmount, discountAmount, cardFreeAmount, activityFreeAmount } */
   bill: { type: Object, default: null },
-  /** 实际应付金额（含优惠与月卡抵扣）。不传则显示账单合计 */
+  /** 实际应付金额（含各项优惠）。不传则显示账单合计 */
   payableAmount: { type: [Number, String], default: null },
-  /** 本单优惠金额（说明性） */
+  /** 本单优惠金额（说明性）。不传则取 {@code bill.discountAmount} */
   discountAmount: { type: [Number, String], default: null },
-  /** 月卡为本单免掉的金额（说明性） */
+  /** 月卡为本单免掉的金额（说明性）。不传则取 {@code bill.cardFreeAmount} */
   cardFreeAmount: { type: [Number, String], default: null },
+  /** 免费活动为本单免掉的金额（说明性）。不传则取 {@code bill.activityFreeAmount} */
+  activityFreeAmount: { type: [Number, String], default: null },
   /** 是否因包场而减免了时长 */
   freeByBooking: { type: Boolean, default: false },
   /** 结算前的当月累计实付额 —— 用来解释「为什么走了/没走优惠价」 */
@@ -52,8 +60,22 @@ function periodLabel(period) {
   return period === 'NIGHT' ? '夜场' : '日场'
 }
 
-const hasDiscount = computed(() => Number(props.discountAmount) > 0)
-const hasCardFree = computed(() => Number(props.cardFreeAmount) > 0)
+/*
+ * 三处说明性金额：优先用调用方显式传的 prop，没传就从 bill 上取 ——
+ * BillingResult 本来就带这三个字段（后端算好的）。
+ *
+ * 回落是刻意的：调用方没传时，账单上少的那几行是【解释】而不是【金额】，
+ * 少了它用户会以为「为什么便宜了」没有交代，而页面上不会有任何报错。
+ * computed 的名字前缀 shown 是为了避开与 props 同名 —— 同名会让模板里
+ * 那个标识符指向的东西变得说不清。
+ */
+const shownDiscount = computed(() => props.discountAmount ?? props.bill?.discountAmount)
+const shownCardFree = computed(() => props.cardFreeAmount ?? props.bill?.cardFreeAmount)
+const shownActivityFree = computed(() => props.activityFreeAmount ?? props.bill?.activityFreeAmount)
+
+const hasDiscount = computed(() => Number(shownDiscount.value) > 0)
+const hasCardFree = computed(() => Number(shownCardFree.value) > 0)
+const hasActivityFree = computed(() => Number(shownActivityFree.value) > 0)
 /** 实付与合计不同才需要单独列「应付」那一行。 */
 const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmount.value))
 </script>
@@ -63,7 +85,15 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
     <!-- 逐段 -->
     <div v-for="(seg, i) in segments" :key="i" class="bill__seg">
       <div class="bill__seg-head">
-        <span class="bill__period">{{ periodLabel(seg.period) }}</span>
+        <span class="bill__period-head">
+          <span class="bill__period">{{ periodLabel(seg.period) }}</span>
+          <!--
+            这一段的实收为什么是 0。两者互斥（见 BillingService）：被月卡覆盖的段
+            只记月卡 —— 月卡用户本来就免费，活动并没有为他省下什么
+          -->
+          <span v-if="seg.freeByActivity" class="bill__free bill__free--activity">活动免费</span>
+          <span v-else-if="seg.freeByCard" class="bill__free">月卡免费</span>
+        </span>
         <span class="bill__duration">{{ formatDuration(seg.minutes) }}</span>
       </div>
       <div class="bill__seg-body">
@@ -96,12 +126,16 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
 
     <!-- 说明性金额：解释「为什么便宜了」，不是「再减多少」 -->
     <div v-if="hasDiscount" class="bill__row bill__row--note">
-      <span>月度优惠{{ discounted ? '' : '' }}</span>
-      <span>-¥{{ formatMoney(discountAmount) }}</span>
+      <span>月度优惠</span>
+      <span>-¥{{ formatMoney(shownDiscount) }}</span>
     </div>
     <div v-if="hasCardFree" class="bill__row bill__row--note">
       <span>月卡抵扣</span>
-      <span>-¥{{ formatMoney(cardFreeAmount) }}</span>
+      <span>-¥{{ formatMoney(shownCardFree) }}</span>
+    </div>
+    <div v-if="hasActivityFree" class="bill__row bill__row--note">
+      <span>活动减免</span>
+      <span>-¥{{ formatMoney(shownActivityFree) }}</span>
     </div>
 
     <div v-if="showFinalPay" class="bill__row bill__row--total">
@@ -133,10 +167,35 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
   margin-bottom: var(--sp-1);
 }
 
+/* 时段名与它的免费标记并排 —— 两者在视觉上是一件事（这一段属于哪儿、为什么免费） */
+.bill__period-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .bill__period {
   font-size: 13px;
   font-weight: 600;
   color: var(--c-text);
+}
+
+/*
+ * 免费标记。活动用主色、月卡用中性灰 ——
+ * 活动是「此刻正在发生的优惠」，比一张长期持有的卡更值得被看见。
+ */
+.bill__free {
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--c-card);
+  color: var(--c-text-sub);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.bill__free--activity {
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
 }
 
 .bill__duration {

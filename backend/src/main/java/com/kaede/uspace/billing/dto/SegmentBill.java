@@ -82,4 +82,19 @@ public class SegmentBill {
      * 反推会把包场免掉的钱一并算进月卡的口径里。
      */
     private BigDecimal cardFreeAmount;
+
+    /** 本段是否落在某个免费活动区间内（活动免费）。为 true 时 {@link #amount} 为 0 */
+    private boolean freeByActivity;
+
+    /**
+     * 本段因活动免掉的金额（元）。不在活动区间内时为 0。
+     *
+     * <p>口径与 {@link #cardFreeAmount} 完全一致：「不免费时本段应付的金额」
+     *（已含月度优惠价）。
+     *
+     * <p>⚠️ <b>两者【互斥】</b>：被月卡覆盖的段只记月卡、不再记活动 ——
+     * 月卡用户本来就免费，活动并没有为他省下什么。两个都记会把同一笔钱
+     * 算两遍，活动复盘时「送出去多少」会虚高，而那种错不会有任何报错。
+     */
+    private BigDecimal activityFreeAmount;
 }

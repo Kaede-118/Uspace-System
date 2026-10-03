@@ -68,6 +68,24 @@ public class StoreService {
     }
 
     /**
+     * 取当前门店 ID。
+     *
+     * <p><b>为什么要单独暴露一个「取 ID」的方法</b>：计费包（模块 7）的
+     * {@code FreePeriodService} 刻意不认识门店 —— 它若注入 {@code StoreMapper}，
+     * 就建立了 {@code billing → space} 这条边，而本包的门店页又要反过来调它，
+     * 两边一成环就再也拆不开了。所以免费时段的接口由本包提供，
+     * 把 ID 递过去（见 {@code AdminStoreController} 的免费时段一组）。
+     *
+     * <p>与 {@link ClosureService} 内部取门店用的是同一个查询
+     * （{@code selectCurrentId}），只是暴露给本包之外调用。
+     *
+     * @return 门店 ID；门店尚未初始化时返回 null
+     */
+    public Long getCurrentStoreId() {
+        return storeMapper.selectCurrentId();
+    }
+
+    /**
      * 取当前营业状态，供用户端首页展示。
      *
      * <p>返回体里同时带上门店信息 —— 用户端首页两样都要，

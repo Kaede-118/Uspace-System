@@ -153,7 +153,7 @@ onMounted(load)
             kind="banner"
             shape="rect"
             :url="form.banner"
-            hint="建议用 6:1 的横长图，它会作为个人卡片的背景"
+            hint="会自动裁成 3:1 的长条作为卡片背景，比 3:1 更宽的素材（如舞萌姓名框）保留右半"
             @uploaded="onUploaded"
           />
         </div>
@@ -181,17 +181,27 @@ onMounted(load)
 
       <div class="field">
         <label class="field-label" for="qq">QQ 号</label>
+        <!--
+          ⚠️ 只读。QQ 号是机器人在群里认人的唯一依据，而注册时它经过一次群内验证
+          （取码 → 发到群里 → 机器人回执）；允许本人改，那次验证就等于白做 ——
+          先随便填一个号注册，再改成群里某个人的号。后端也会拒（40937），
+          这里禁用是为了让用户一眼看出「这栏不是我能动的」，而不是填完才被拒。
+        -->
         <input
           id="qq"
           v-model="form.qq"
           class="field-input"
           type="text"
-          placeholder="绑定后可在群里被 @ 到"
+          disabled
+          placeholder="未绑定"
         />
+        <p class="field-hint">
+          绑定后不能自己改 —— 需要换号请联系管理员
+        </p>
       </div>
 
       <p class="profile__note">
-        清空某一项并保存即可解除绑定
+        清空昵称、手机号、游玩偏好并保存即可解除绑定；<b>QQ 号除外</b>，它只能由管理员改
       </p>
 
       <button class="btn btn-primary" :disabled="saving" @click="onSave">
@@ -242,6 +252,24 @@ onMounted(load)
 .profile__banner {
   flex: 1;
   min-width: 0;
+}
+
+/*
+ * 只读输入框的视觉：要让「这栏不是我能动的」一眼看得出来。
+ * 继承 .field-input 的 disabled 默认样式在各浏览器里差别很大（有的几乎看不出区别），
+ * 所以显式给它一个浅底 + 次要文字色 + 禁用光标。
+ */
+.field-input:disabled {
+  background: #f5f4f8;
+  color: var(--c-text-sub);
+  cursor: not-allowed;
+}
+
+.field-hint {
+  margin-top: var(--sp-2);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--c-text-muted);
 }
 
 .profile__note {

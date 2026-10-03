@@ -437,6 +437,27 @@ class ProductServiceTests {
     }
 
     @Test
+    @DisplayName("后台改商品：封面传空串也按清空处理（「移除封面」按钮走的就是这条）")
+    void update_withEmptyCover_clearsIt() {
+        Product product = seedProduct("在售", "2.00", 10);
+        product.setCover("/uploads/product/a.jpg");
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("在售");
+        request.setPrice(new BigDecimal("2.00"));
+        request.setStock(10);
+        // 后台的「移除封面」就是把这个字段置空，提交上来正是这个形态
+        request.setCover("");
+
+        service.update(product.getId(), request);
+
+        // 空串必须被归一成 null：留一个空字符串在库里的话，它既不是「有封面」
+        // 也不是「没封面」，展示与查询两边都得为它写特例
+        assertNull(productMapper.get(product.getId()).getCover(),
+                "空串应当被归一为 null，而不是原样存进去");
+    }
+
+    @Test
     @DisplayName("后台新增：不传 enabled 时默认上架，不传 sortNo 按 0")
     void create_defaultsEnabledAndSortNo() {
         ProductSaveRequest request = new ProductSaveRequest();

@@ -1,6 +1,7 @@
 package com.kaede.uspace.user;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kaede.uspace.user.dto.QqVerifyIssueVo;
 import com.kaede.uspace.user.entity.SysUser;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import org.junit.jupiter.api.DisplayName;
@@ -18,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,6 +100,18 @@ class ImageUploadIntegrationTests {
 
     @Autowired
     private SysUserMapper userMapper;
+
+    /** 注册流程要消费一次群内验证，见 {@link #register} */
+    @Autowired
+    private QqVerifyService qqVerifyService;
+
+    /**
+     * 自动生成的 QQ 号序号。
+     *
+     * <p>同一个用例里可能注册多个用户，而 {@code uk_qq} 是唯一键 —— 每次都要一个新的。
+     * 用递增而不是随机：随机数偶尔会撞，而那种失败是「跑十次错一次」的，最难查。
+     */
+    private final AtomicInteger qqSequence = new AtomicInteger(77000000);
 
     // ==================================================================
     // 主链路
@@ -284,15 +298,27 @@ class ImageUploadIntegrationTests {
     /**
      * 走真实接口注册用户。
      *
+     * <p>⚠️ <b>QQ 号自 2026-10-01 起是注册必填项，且必须走完群内验证</b> ——
+     * 所以这里先借 {@code QqVerifyService} 走一遍「签发 → 群内确认」，
+     * 再带上 challengeId 提交。真机上中间那一步由群消息触发
+     * （见 {@code qqbot} 包的 {@code QqCommandService}）。
+     *
+     * <p>少了它，注册会返回 400，而用例看到的是一个莫名其妙的
+     * 「expected 200 but was 400」—— 与 QQ 这件事毫无关联的样子。
+     *
      * @param username 用户名
      * @throws Exception 请求失败时抛出
      */
     private void register(String username) throws Exception {
+        String qq = String.valueOf(qqSequence.incrementAndGet());
+        QqVerifyIssueVo issued = qqVerifyService.issue(qq).getData();
+        qqVerifyService.confirm(qq, issued.getCode());
+
         mockMvc.perform(post("/api/user/register")
                         .contentType("application/json")
                         .content("""
-                                {"username":"%s","password":"%s"}
-                                """.formatted(username, PASSWORD)))
+                                {"username":"%s","password":"%s","qq":"%s","challengeId":"%s"}
+                                """.formatted(username, PASSWORD, qq, issued.getChallengeId())))
                 .andExpect(status().isOk());
     }
 

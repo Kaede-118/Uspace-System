@@ -32,22 +32,44 @@ import java.util.List;
 public interface BookingMapper extends BaseMapper<Booking> {
 
     /**
-     * 分页查询某门店的包场记录。
+     * 分页查询某门店的包场记录（可按视图筛选）。
      *
-     * <p>按开始时间倒序，与停业列表一致。
+     * <p><b>排序：待付款的排最前，其余按开始时间倒序。</b>
+     * 前半段是给运营看的 —— 排了期却还没收到钱的场次占着时段，是需要他盯的一类；
+     * 后半段用<b>倒序</b>（晚的在前），因为正序会把最晚的场次沉到列表底部、
+     * 等于看不见，而运营要盯的恰恰是「最近要发生的那几场」。
+     * 想看从早到晚的完整安排，用户端的「包场时间表」（{@code GET /api/store/bookings}）
+     * 就是那个视角，两边各司其职。
+     *
+     * <p>⚠️ {@code (status = 'PENDING_PAYMENT') DESC} 是 MySQL 的布尔排序：
+     * 命中的求值为 1、不命中为 0，DESC 让 1 排在前面。写成 {@code status ASC}
+     * 是另一回事（那是按字母序排 'CANCELLED' &lt; 'PAID'），效果完全不同。
      *
      * @param page    分页参数，由 MyBatis-Plus 的分页插件处理
      * @param storeId 门店 ID
+     * @param scope   视图筛选：{@code active}（已生效 + 待付款）、
+     *                {@code void}（已取消 + 已退款）、<b>null 表示不筛</b>。
+     *                非法取值在 Controller 层就被挡下（400），不会静默退化成「查全部」
      * @return 分页结果
      */
     @Select("""
+            <script>
             SELECT *
               FROM biz_booking
              WHERE deleted = 0
                AND store_id = #{storeId}
-             ORDER BY start_at DESC
+             <if test="scope == 'active'">
+               AND status IN ('PAID', 'PENDING_PAYMENT')
+             </if>
+             <if test="scope == 'void'">
+               AND status IN ('CANCELLED', 'REFUNDED')
+             </if>
+             ORDER BY (status = 'PENDING_PAYMENT') DESC, start_at DESC
+            </script>
             """)
-    IPage<Booking> selectPageByStore(IPage<Booking> page, @Param("storeId") Long storeId);
+    IPage<Booking> selectPageByStore(IPage<Booking> page,
+                                     @Param("storeId") Long storeId,
+                                     @Param("scope") String scope);
 
     /**
      * 统计与给定时段重叠、且仍在占用时段的包场数。

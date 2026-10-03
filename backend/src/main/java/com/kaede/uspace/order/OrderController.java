@@ -10,7 +10,6 @@ import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
 import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
-import com.kaede.uspace.order.dto.PaymentProofRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -177,24 +176,6 @@ public class OrderController {
     public ResponseEntity<ApiResult<OrderSettleVo>> settle(@PathVariable Long id,
                                                            @AuthenticationPrincipal UserPrincipal me) {
         return ApiResult.of(orderService.settleOrder(me.id(), id));
-    }
-
-    /**
-     * 提交支付凭证（人工核销的降级路径）。
-     *
-     * <p>本系统不处理文件上传本身 —— 这里只收一个已存好的截图路径。
-     * 提交后订单仍是待支付，等管理员核对到账才转已支付。
-     *
-     * @param id      订单 ID
-     * @param request 凭证路径
-     * @param me      当前登录用户
-     * @return 成功返回空数据
-     */
-    @PostMapping("/{id}/payment-proof")
-    public ResponseEntity<ApiResult<Void>> submitPaymentProof(@PathVariable Long id,
-                                                              @Valid @RequestBody PaymentProofRequest request,
-                                                              @AuthenticationPrincipal UserPrincipal me) {
-        return ApiResult.of(orderService.submitPaymentProof(me.id(), id, request));
     }
 
     /**

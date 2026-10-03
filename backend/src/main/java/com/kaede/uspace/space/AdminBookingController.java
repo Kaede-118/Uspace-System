@@ -9,6 +9,7 @@ import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -50,10 +51,20 @@ public class AdminBookingController {
     }
 
     /**
-     * 分页查询包场记录。
+     * 分页查询包场记录（按视图分页）。
      *
-     * @param page 页码，从 1 开始
-     * @param size 每页条数，上限 100（超出由分页插件截断）
+     * <p><b>{@code scope} 把列表切成后台的两个 Tab</b>：「已生效 / 待付款」与
+     * 「已取消 / 已退款」。<b>筛选放在后端而不是前端</b>，理由与商品列表那条一样 ——
+     * 这个列表是分页的，前端只能筛当前这一页，第二页里有没有「待付款」它根本不知道。
+     *
+     * <p>取值在方法参数上就用 {@code @Pattern} 卡死：非法值若放过去，
+     * 底层的两个 {@code <if>} 都不命中，会<b>静默退化成「查全部」</b> ——
+     * 前端传错一个字母，看到的是「筛选没生效」，而没有任何报错。
+     *
+     * @param page  页码，从 1 开始
+     * @param size  每页条数，上限 100（超出由分页插件截断）
+     * @param scope 视图：{@code active}（已生效 + 待付款）、{@code void}（已取消 + 已退款）；
+     *              不传则不筛，返回全部
      * @return 分页的包场记录
      */
     @GetMapping
@@ -61,8 +72,10 @@ public class AdminBookingController {
             @RequestParam(defaultValue = "1") @Min(value = 1, message = "页码从 1 开始") long page,
             @RequestParam(defaultValue = "10")
             @Min(value = 1, message = "每页至少 1 条")
-            @Max(value = 100, message = "每页最多 100 条") long size) {
-        return ApiResult.of(bookingService.listBookings(page, size));
+            @Max(value = 100, message = "每页最多 100 条") long size,
+            @RequestParam(required = false)
+            @Pattern(regexp = "active|void", message = "scope 只能是 active 或 void") String scope) {
+        return ApiResult.of(bookingService.listBookings(page, size, scope));
     }
 
     /**

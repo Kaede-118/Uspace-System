@@ -3,7 +3,10 @@ package com.kaede.uspace.auth;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.user.FakeSysUserMapper;
+import com.kaede.uspace.user.QqVerifyProperties;
+import com.kaede.uspace.user.QqVerifyService;
 import com.kaede.uspace.user.UserService;
+import com.kaede.uspace.user.dto.QqVerifyIssueVo;
 import com.kaede.uspace.user.dto.RegisterRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -15,6 +18,8 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+import java.time.Clock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -50,6 +55,9 @@ class JwtAuthenticationFilterTests {
 
     private final UserService userService;
 
+    /** QQ 验证服务，供 registerUser 走完注册必需的群内验证 */
+    private final QqVerifyService qqVerifyService;
+
     private final JwtAuthenticationFilter filter;
 
     /**
@@ -59,7 +67,11 @@ class JwtAuthenticationFilterTests {
         JwtProperties properties = new JwtProperties();
         properties.setSecret(SECRET);
         this.jwtService = new JwtService(properties);
-        this.userService = new UserService(fakeMapper.asMapper(), new BCryptPasswordEncoder(4));
+        // QQ 验证服务只服务于注册路径，过滤器用例走不到它的业务逻辑，
+        // 但 UserService 的构造器要它、下面的 registerUser 也要用它走完注册
+        this.qqVerifyService = new QqVerifyService(new QqVerifyProperties(), Clock.systemDefaultZone());
+        this.userService = new UserService(fakeMapper.asMapper(), new BCryptPasswordEncoder(4),
+                qqVerifyService);
         this.filter = new JwtAuthenticationFilter(jwtService, userService);
     }
 
@@ -230,7 +242,25 @@ class JwtAuthenticationFilterTests {
         RegisterRequest request = new RegisterRequest();
         request.setUsername(username);
         request.setPassword(RAW_PASSWORD);
+        // ⚠️ QQ 自 2026-10-01 起是注册必填项，且必须走完群内验证 —— 见 RegisterRequest#qq
+        String qq = "88000002";
+        request.setQq(qq);
+        request.setChallengeId(verifyQq(qq));
         return userService.register(request).getData().getId();
+    }
+
+    /**
+     * 走完一次完整的 QQ 验证，返回可用的验证凭证。
+     *
+     * <p>扮演群里的那一半：拿到码直接调 {@code confirm}。
+     *
+     * @param qq 要验证的 QQ 号
+     * @return 填进 {@link RegisterRequest#getChallengeId()} 的凭证
+     */
+    private String verifyQq(String qq) {
+        QqVerifyIssueVo issued = qqVerifyService.issue(qq).getData();
+        qqVerifyService.confirm(qq, issued.getCode());
+        return issued.getChallengeId();
     }
 
     /**

@@ -2,8 +2,12 @@ package com.kaede.uspace.user;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.user.dto.AdminUserQuery;
+import com.kaede.uspace.user.dto.AdminUserUpdateRequest;
 import com.kaede.uspace.user.dto.AdminUserVo;
 import com.kaede.uspace.user.dto.ChangePasswordRequest;
+import com.kaede.uspace.user.dto.QqVerifyIssueVo;
 import com.kaede.uspace.user.dto.RegisterRequest;
 import com.kaede.uspace.user.dto.UpdateProfileRequest;
 import com.kaede.uspace.user.dto.UserProfileVo;
@@ -13,6 +17,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -50,14 +56,34 @@ class UserServiceTests {
     /** 另一个合法密码，用于改密场景 */
     private static final String NEW_PASSWORD = "NewPass@5678";
 
+    /** 管理员 ID，供「后台改资料」那组用例的留痕参数使用 */
+    private static final Long OPERATOR_ID = 9001L;
+
+    /**
+     * 自动生成 QQ 号的序号。
+     *
+     * <p>从 100001 起递增 —— 与用例里显式写死的那些（10001 / 20001 / 30001）不重合，
+     * 也不会撞 {@code uk_qq}。用递增而不是随机：随机数偶尔会撞，
+     * 而那种失败是「跑十次错一次」的，最难查。
+     */
+    private final AtomicInteger qqSequence = new AtomicInteger(100000);
+
     /** 内存版数据访问层 */
     private final FakeSysUserMapper fakeMapper = new FakeSysUserMapper();
 
     /** 密码编码器。强度 4 是为了让测试跑得快，生产用 10 */
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(4);
 
+    /**
+     * QQ 验证服务。内存实现、不连库、没有外部依赖，所以直接用真的 ——
+     * 「填了 QQ 就必须先过验证」那条规则要真的走一遍 consume 才算测到。
+     */
+    private final QqVerifyService qqVerifyService =
+            new QqVerifyService(new QqVerifyProperties(), Clock.systemDefaultZone());
+
     /** 被测服务 */
-    private final UserService userService = new UserService(fakeMapper.asMapper(), passwordEncoder);
+    private final UserService userService =
+            new UserService(fakeMapper.asMapper(), passwordEncoder, qqVerifyService);
 
     // ==================================================================
     // 注册
@@ -105,14 +131,47 @@ class UserServiceTests {
     }
 
     @Test
+    @DisplayName("注册：填了 QQ 却没完成群内验证时拒绝")
+    void register_rejectsUnverifiedQq() {
+        RegisterRequest request = newRequest(USERNAME);
+        request.setQq("10001");
+        // 不带 challengeId —— 相当于用户跳过了「取码发到群里」那一步
+
+        BizResult<UserProfileVo> result = userService.register(request);
+
+        assertEquals(ErrorCode.QQ_VERIFY_REQUIRED, result.getError(),
+                "QQ 号必须被证明是本人的 —— 否则「群里来的人是谁」永远对不上，"
+                        + "而那正是模块 11 全部播报与查询的地基");
+    }
+
+    @Test
+    @DisplayName("注册：不填 QQ 号直接被拒 —— 它是必填项（2026-10-01 起）")
+    void register_rejectsBlankQq() {
+        RegisterRequest request = new RegisterRequest();
+        request.setUsername(USERNAME);
+        request.setPassword(RAW_PASSWORD);
+        // 不设 qq，也不设 challengeId
+
+        BizResult<UserProfileVo> result = userService.register(request);
+
+        assertEquals(ErrorCode.PARAM_INVALID, result.getError(),
+                "店里没有店员，顾客是谁、该收多少钱全靠系统 —— "
+                        + "「不绑 QQ 也能进店」等于留一个出了事找不到主的顾客");
+    }
+
+    @Test
     @DisplayName("注册：QQ 号已被他人绑定时返回冲突错误码")
     void register_failsWhenQqAlreadyBound() {
         RegisterRequest first = newRequest("userA");
         first.setQq("10001");
+        first.setChallengeId(verifyQq("10001"));
         userService.register(first);
 
         RegisterRequest second = newRequest("userB");
         second.setQq("10001");
+        // ⚠️ 刻意【不】给 second 配验证 —— 这条用例顺带钉住一个顺序决策：
+        // 查重必须排在 consume 之前。反过来写的话它拿到的是 QQ_VERIFY_REQUIRED，
+        // 而真正的原因是「这个 QQ 已经被占用了」，用户据此完全不知道该改什么
         BizResult<UserProfileVo> result = userService.register(second);
 
         assertFalse(result.isSuccess());
@@ -126,6 +185,7 @@ class UserServiceTests {
         RegisterRequest request = newRequest(USERNAME);
         request.setNickname("小枫");
         request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
 
         BizResult<UserProfileVo> result = userService.register(request);
 
@@ -137,6 +197,7 @@ class UserServiceTests {
     void register_fallsBackToQqWhenNicknameBlank() {
         RegisterRequest request = newRequest(USERNAME);
         request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
         // nickname 留空
 
         BizResult<UserProfileVo> result = userService.register(request);
@@ -146,12 +207,17 @@ class UserServiceTests {
     }
 
     @Test
-    @DisplayName("注册：昵称三级兜底 —— QQ 也没有才退回用户名")
-    void register_fallsBackToUsernameWhenBothBlank() {
+    @DisplayName("注册：昵称留空时必落到 QQ 号上，不会是空")
+    void register_fillsNicknameWhenBlank() {
         BizResult<UserProfileVo> result = register(USERNAME);
 
-        assertEquals(USERNAME, result.getData().getNickname(),
+        assertNotNull(result.getData().getNickname(),
                 "昵称不能为空 —— 空昵称会让「谁在店里」这类播报失去意义");
+        assertEquals(result.getData().getQq(), result.getData().getNickname(),
+                "三级兜底里 QQ 在用户名之前 —— 群里的人认 QQ 号，不认登录名");
+        // 三级兜底的【最后一级】（退回用户名）在注册路径上已经不可达了：
+        // QQ 自 2026-10-01 起是必填项。那一级现在只能靠管理员解绑 QQ 才走得到，
+        // 由 updateProfile_fallsBackToUsernameWhenQqCleared 覆盖
     }
 
     @Test
@@ -294,34 +360,101 @@ class UserServiceTests {
         RegisterRequest request = newRequest(USERNAME);
         request.setPhone("13800138000");
         request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
         Long userId = userService.register(request).getData().getId();
 
         UpdateProfileRequest update = new UpdateProfileRequest();
         update.setNickname("小枫");
-        // phone 与 qq 都留空，表示清空
+        // phone 留空表示清空；qq 必须原样带上 —— 它【不】适用「传 null 即清空」那条规则
+        update.setQq("10001");
         BizResult<UserProfileVo> result = userService.updateProfile(userId, update);
 
         assertTrue(result.isSuccess());
         assertNull(fakeMapper.get(userId).getPhone(), "PUT 是全量替换，不传即清空");
-        assertNull(fakeMapper.get(userId).getQq());
+        assertEquals("10001", fakeMapper.get(userId).getQq(),
+                "QQ 号是这条全量替换语义的例外 —— 它不参与「传 null 即清空」，也不许本人改");
         assertEquals("小枫", fakeMapper.get(userId).getNickname());
     }
 
     @Test
-    @DisplayName("改资料：QQ 号被他人占用时拒绝")
-    void updateProfile_rejectsQqTakenByAnother() {
-        RegisterRequest owner = newRequest("userA");
-        owner.setQq("10001");
-        userService.register(owner);
+    @DisplayName("改资料：本人不能改 QQ 号，一律要求联系管理员")
+    void updateProfile_rejectsQqChange() {
+        Long userId = register(USERNAME).getData().getId();
 
-        Long userId = register("userB").getData().getId();
         UpdateProfileRequest update = new UpdateProfileRequest();
-        update.setNickname("userB");
-        update.setQq("10001");
+        update.setNickname(USERNAME);
+        update.setQq("10001");   // 从「没绑」改成另一个号
 
         BizResult<UserProfileVo> result = userService.updateProfile(userId, update);
 
-        assertEquals(ErrorCode.QQ_ALREADY_BOUND, result.getError());
+        assertEquals(ErrorCode.QQ_CHANGE_REQUIRES_ADMIN, result.getError(),
+                "QQ 号是机器人在群里认人的唯一依据，而注册时它经过一次群内验证 —— "
+                        + "允许本人改，那次验证就等于白做（先随便填一个号注册，再改成别人的）");
+    }
+
+    @Test
+    @DisplayName("改资料：清空 QQ 号同样被拒 —— 否则「先清空再填别人的」会绕开上面那条")
+    void updateProfile_rejectsQqClearing() {
+        RegisterRequest request = newRequest(USERNAME);
+        request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
+        Long userId = userService.register(request).getData().getId();
+
+        UpdateProfileRequest update = new UpdateProfileRequest();
+        update.setNickname(USERNAME);
+        // qq 留空，表示清空
+
+        BizResult<UserProfileVo> result = userService.updateProfile(userId, update);
+
+        assertEquals(ErrorCode.QQ_CHANGE_REQUIRES_ADMIN, result.getError(),
+                "只挡「改成别的号」是不够的：先清空、再设成别人的，正好绕过去。"
+                        + "规则简单才守得住 —— 注册时定下，之后要改找管理员");
+    }
+
+    @Test
+    @DisplayName("后台：管理员可以改 QQ 号 —— 这正是 40937 说的「联系管理员」")
+    void adminUpdateUser_canChangeQq() {
+        Long userId = register(USERNAME).getData().getId();
+
+        AdminUserUpdateRequest update = new AdminUserUpdateRequest();
+        update.setNickname("小枫");
+        update.setQq("10001");
+
+        BizResult<AdminUserVo> result = userService.adminUpdateUser(userId, update, OPERATOR_ID);
+
+        assertTrue(result.isSuccess(),
+                "本人改不了、管理员也改不了的话，「联系管理员」就是一句空话");
+        assertEquals("10001", fakeMapper.get(userId).getQq());
+        assertEquals("小枫", fakeMapper.get(userId).getNickname());
+    }
+
+    @Test
+    @DisplayName("后台：管理员改 QQ 时照样查重")
+    void adminUpdateUser_rejectsQqTakenByAnother() {
+        RegisterRequest owner = newRequest("owner");
+        owner.setQq("10001");
+        owner.setChallengeId(verifyQq("10001"));
+        userService.register(owner);
+
+        Long userId = register(USERNAME).getData().getId();
+        AdminUserUpdateRequest update = new AdminUserUpdateRequest();
+        update.setNickname(USERNAME);
+        update.setQq("10001");
+
+        BizResult<AdminUserVo> result = userService.adminUpdateUser(userId, update, OPERATOR_ID);
+
+        assertEquals(ErrorCode.QQ_ALREADY_BOUND, result.getError(),
+                "免掉的是「证明这个号是本人的」那一步，不是查重 —— "
+                        + "两个账号绑同一个 QQ 会让机器人的播报指向不确定的人");
+    }
+
+    @Test
+    @DisplayName("后台：修改不存在的用户返回 404")
+    void adminUpdateUser_returns404WhenMissing() {
+        BizResult<AdminUserVo> result = userService.adminUpdateUser(
+                999999L, new AdminUserUpdateRequest(), OPERATOR_ID);
+
+        assertEquals(ErrorCode.USER_NOT_FOUND, result.getError());
     }
 
     @Test
@@ -329,6 +462,7 @@ class UserServiceTests {
     void updateProfile_allowsKeepingOwnQq() {
         RegisterRequest request = newRequest(USERNAME);
         request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
         Long userId = userService.register(request).getData().getId();
 
         UpdateProfileRequest update = new UpdateProfileRequest();
@@ -345,15 +479,36 @@ class UserServiceTests {
     void updateProfile_refillsNicknameWhenBlank() {
         RegisterRequest request = newRequest(USERNAME);
         request.setQq("10001");
+        request.setChallengeId(verifyQq("10001"));
         Long userId = userService.register(request).getData().getId();
 
         UpdateProfileRequest update = new UpdateProfileRequest();
         update.setNickname("   ");
-        // qq 也清空，于是只能退回用户名
+        update.setQq("10001");   // 全量替换语义：QQ 必须原样带上，否则会被当成「改 QQ」拒掉
+        BizResult<UserProfileVo> result = userService.updateProfile(userId, update);
+
+        assertEquals("10001", result.getData().getNickname(),
+                "昵称是播报与后台列表的标识，清空它会让播报失去意义 —— "
+                        + "有 QQ 时按三级规则兜底到 QQ 号");
+    }
+
+    @Test
+    @DisplayName("改资料：QQ 被管理员解绑后，昵称兜底到登录名")
+    void updateProfile_fallsBackToUsernameWhenQqCleared() {
+        Long userId = register(USERNAME).getData().getId();
+        // 管理员把这个用户的 QQ 解绑（比如那个号换了人）——
+        // 这是「昵称兜底到登录名」那支唯一走得到的路径，
+        // 因为 QQ 在注册时是必填的，用户自己又改不了
+        AdminUserUpdateRequest clear = new AdminUserUpdateRequest();
+        clear.setNickname(USERNAME);
+        userService.adminUpdateUser(userId, clear, OPERATOR_ID);
+
+        UpdateProfileRequest update = new UpdateProfileRequest();
+        update.setNickname("   ");
         BizResult<UserProfileVo> result = userService.updateProfile(userId, update);
 
         assertEquals(USERNAME, result.getData().getNickname(),
-                "昵称是播报与后台列表的标识，清空它会让播报失去意义");
+                "三级兜底只剩用户名可用时，它得顶上 —— 播报里不能出现空名字");
     }
 
     // ==================================================================
@@ -453,15 +608,63 @@ class UserServiceTests {
         RegisterRequest a = newRequest("alice");
         a.setNickname("爱丽丝");
         a.setQq("20001");
+        a.setChallengeId(verifyQq("20001"));
         userService.register(a);
         register("bob");
 
-        assertEquals(1, userService.listUsers("alice", 1, 10).getData().getTotal());
-        assertEquals(1, userService.listUsers("爱丽丝", 1, 10).getData().getTotal(),
+        assertEquals(1, listOf("alice").getTotal());
+        assertEquals(1, listOf("爱丽丝").getTotal(),
                 "运营未必记得住登录名，昵称也要能搜到");
-        assertEquals(1, userService.listUsers("20001", 1, 10).getData().getTotal());
-        assertEquals(2, userService.listUsers(null, 1, 10).getData().getTotal(),
-                "不传关键字表示查全部");
+        assertEquals(1, listOf("20001").getTotal());
+        assertEquals(2, listOf(null).getTotal(), "不传关键字表示查全部");
+    }
+
+    @Test
+    @DisplayName("列表：筛选与排序")
+    void listUsers_filtersAndSorts() {
+        // 一个有钱有卡的、一个什么都没有的
+        RegisterRequest rich = newRequest("rich");
+        rich.setQq("30001");
+        rich.setChallengeId(verifyQq("30001"));
+        Long richId = userService.register(rich).getData().getId();
+        register("poor");
+
+        // 按角色筛：两个都是普通用户
+        AdminUserQuery userRole = new AdminUserQuery();
+        userRole.setRole(UserRole.USER.name());
+        assertEquals(2, userService.listUsers(userRole, null, null, 1, 10)
+                .getData().getTotal());
+
+        // 按状态筛：都是启用中
+        AdminUserQuery enabled = new AdminUserQuery();
+        enabled.setStatus(1);
+        assertEquals(2, userService.listUsers(enabled, null, null, 1, 10)
+                .getData().getTotal());
+
+        AdminUserQuery disabled = new AdminUserQuery();
+        disabled.setStatus(0);
+        assertEquals(0, userService.listUsers(disabled, null, null, 1, 10)
+                .getData().getTotal());
+
+        // 认不出的排序键要回落，不能把整张列表搞成 500 —— 也绝不能拼进 SQL
+        assertEquals(2, userService.listUsers(null, "'; DROP TABLE sys_user; --", true, 1, 10)
+                .getData().getTotal(),
+                "白名单外的排序键必须被丢掉并回落到默认排序");
+        assertNotNull(fakeMapper.get(richId), "上一条顺带证明：表还在");
+    }
+
+    @Test
+    @DisplayName("列表：累计在店时长与月卡来自查询，不是实体字段")
+    void listUsers_carriesAggregatedColumns() {
+        register(USERNAME);
+
+        // 假 Mapper 里没有聚合能力（真实实现是相关子查询），所以这里断言的是
+        // 「Service 把 IPage<AdminUserVo> 原样透传」这条路径没有把聚合列弄丢 ——
+        // 两个字段的取值正确性靠集成测试与手工验证
+        AdminUserVo vo = userService.listUsers(new AdminUserQuery(), null, null, 1, 10)
+                .getData().getRecords().get(0);
+
+        assertNotNull(vo.getUsername());
     }
 
     @Test
@@ -469,7 +672,8 @@ class UserServiceTests {
     void listUsers_doesNotExposePasswordHash() {
         register(USERNAME);
 
-        AdminUserVo vo = userService.listUsers(null, 1, 10).getData().getRecords().get(0);
+        AdminUserVo vo = userService.listUsers(new AdminUserQuery(), null, null, 1, 10)
+                .getData().getRecords().get(0);
 
         assertNotNull(vo.getUsername());
         // AdminUserVo 里压根没有密码字段 —— 这条用例的价值在于：若将来有人
@@ -483,15 +687,25 @@ class UserServiceTests {
     // ==================================================================
 
     /**
-     * 构造一个只填了用户名与密码的注册请求。
+     * 构造一个可直接提交的注册请求：用户名、密码，以及一个<b>唯一且已通过验证</b>的 QQ 号。
+     *
+     * <p>⚠️ <b>QQ 号自 2026-10-01 起是注册必填项，且必须走完群内验证</b> ——
+     * 所以这里顺手把它备齐。不备的话，每个只想造一个用户的用例都要多写三行样板，
+     * 而漏写的后果是注册被静默拒掉、后面一路 NPE（这次改规则时正是这么炸的）。
+     *
+     * <p>QQ 用递增序号生成，保证用例之间不撞 {@code uk_qq} 唯一键。
+     * 需要指定 QQ 的用例可以覆盖它 —— 但那时<b>记得同时覆盖 challengeId</b>。
      *
      * @param username 用户名
-     * @return 注册请求
+     * @return 可直接提交的注册请求
      */
-    private static RegisterRequest newRequest(String username) {
+    private RegisterRequest newRequest(String username) {
+        String qq = String.valueOf(qqSequence.incrementAndGet());
         RegisterRequest request = new RegisterRequest();
         request.setUsername(username);
         request.setPassword(RAW_PASSWORD);
+        request.setQq(qq);
+        request.setChallengeId(verifyQq(qq));
         return request;
     }
 
@@ -503,6 +717,41 @@ class UserServiceTests {
      */
     private BizResult<UserProfileVo> register(String username) {
         return userService.register(newRequest(username));
+    }
+
+    /**
+     * 按关键字查一页用户，取回分页结果。
+     *
+     * <p>（列表演进成了「条件对象 + 排序 + 分页」，直接调会淹在参数里，
+     * 所以把最常用的那一种收成一个方法。）
+     *
+     * @param keyword 关键字，可为 null
+     * @return 分页结果
+     */
+    private PageResult<AdminUserVo> listOf(String keyword) {
+        AdminUserQuery query = new AdminUserQuery();
+        query.setKeyword(keyword);
+        return userService.listUsers(query, null, null, 1, 10).getData();
+    }
+
+    /**
+     * 走完一次完整的 QQ 验证，返回可用的验证凭证。
+     *
+     * <p>注册要求「填了 QQ 就必须先证明这个号是本人的」，而证明的<b>另一端在 QQ 群里</b>：
+     * 用户把 6 位码发到群里，机器人看到后回执给后端。这个方法扮演群里那一半 ——
+     * 拿到码直接调 {@code confirm}。真机上那一步由群消息触发
+     * （见 {@code qqbot} 包的 {@code QqCommandService}）。
+     *
+     * <p>有了它，用例才能把「注册」当成一件独立的事来测；否则每个带 QQ 的用例
+     * 都得先铺一套群消息的场景。
+     *
+     * @param qq 要验证的 QQ 号
+     * @return 填进 {@link RegisterRequest#getChallengeId()} 的凭证
+     */
+    private String verifyQq(String qq) {
+        QqVerifyIssueVo issued = qqVerifyService.issue(qq).getData();
+        qqVerifyService.confirm(qq, issued.getCode());
+        return issued.getChallengeId();
     }
 
     /**

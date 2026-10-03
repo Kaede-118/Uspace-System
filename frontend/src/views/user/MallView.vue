@@ -272,9 +272,15 @@ onMounted(async () => {
 
 /* ---- 商品网格 ---- */
 
+/*
+ * ⚠️ 写死两列（2026-10-03）：页面宽度已锚定手机竖屏（见 base.css 的 --page-max，
+ * 内容 328px），每格因此是 (328 − 12) ÷ 2 = 158px —— 与手机上一致。
+ * 用 auto-fill 的话，宽度一变它会漂成三列，商品图跟着变小，
+ * 而卡片里的字号并不会跟着调。
+ */
 .goods {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: var(--sp-3);
 }
 

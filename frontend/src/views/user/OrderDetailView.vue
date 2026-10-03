@@ -2,11 +2,15 @@
 /**
  * 订单详情。
  *
- * <p>⚠️ <b>这里没有「分段账单」</b>，因为 {@code OrderVo} 不含 {@code segments} ——
- * 分段只出现在结账预览与结算的返回里（那两处是「算给你看」，
- * 而详情是「记录已成事实」，日夜场的时长与金额已经是汇总过的列）。
- * 所以这一页按 {@code dayMinutes / dayAmount} 这些汇总字段展示，
- * 而不是复用 {@code BillSegmentList}。**这不是遗漏，是数据源本就不同。**
+ * <p>费用明细分两种形态：<b>有分段账单（{@code order.bill}）时按段展示
+ * 「X 档 × 单价」</b> —— 与结账页共用 {@code BillSegmentList}；没有时回落到
+ * 日场/夜场汇总行。
+ *
+ * <p>账单从哪来（那是后端的事，这一页只消费）：结算时算出的那一份会序列化成
+ * 快照存进订单，详情直接读；快照机制（2026-10-03）之前结算的老订单由后端按
+ * 当前规则重算，且只有金额与落库<b>完全一致</b>才会给到这里。
+ * 所以「没有 bill」不是缺陷，多半是后端刻意保守的结果 ——
+ * 使用中的订单也没有账单，那时的费用去结账页看。
  *
  * <p>金额一律以 {@code payableAmount} 为准 —— 它是唯一权威的「要付多少」，
  * 优惠与月卡抵扣都已含在其中，不要再减第二次。
@@ -18,6 +22,7 @@ import { toastError, toastSuccess } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatMoney, formatDuration, formatDateTime } from '@/utils/format'
 import NavBar from '@/components/NavBar.vue'
+import BillSegmentList from '@/components/BillSegmentList.vue'
 import PaymentPanel from '@/components/PaymentPanel.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -42,17 +47,6 @@ const statusClass = computed(() => {
   if (isUnpaid.value) return 'tag tag-warning'
   return 'tag tag-success'
 })
-
-/** 支付通道的中文名。 */
-function channelLabel(method) {
-  const map = {
-    WXPAY_JSAPI: '微信支付',
-    WXPAY_H5: '微信支付',
-    ALIPAY_WAP: '支付宝',
-    QR_UPLOAD: '转账核销'
-  }
-  return map[method] || method || '—'
-}
 
 async function load() {
   loading.value = true
@@ -114,44 +108,61 @@ onMounted(load)
         </div>
       </div>
 
-      <!-- 费用明细（汇总口径，不是分段账单） -->
+      <!--
+        费用明细。
+        有分段账单时与结账页共用 BillSegmentList（「X 档 × ¥单价」、封顶标记、
+        各种减免的说明都在里面）；没有时回落到日场/夜场汇总行。
+        ⚠️ 两者的金额字段是同一批（都来自订单上的落库列），只是展示粒度不同。
+      -->
       <div class="card">
         <div class="card-title">费用明细</div>
 
-        <div v-if="order.dayMinutes" class="detail__row">
-          <span>日场 {{ formatDuration(order.dayMinutes) }}</span>
-          <span>¥{{ formatMoney(order.dayAmount) }}</span>
-        </div>
-        <div v-if="order.nightMinutes" class="detail__row">
-          <span>夜场 {{ formatDuration(order.nightMinutes) }}</span>
-          <span>¥{{ formatMoney(order.nightAmount) }}</span>
-        </div>
-        <div v-if="!order.dayMinutes && !order.nightMinutes" class="detail__row">
-          <span class="text-muted">没有产生计费时长</span>
-        </div>
+        <BillSegmentList
+          v-if="order.bill"
+          :bill="order.bill"
+          :stay-minutes="order.stayMinutes ?? null"
+          :free-by-booking="order.freeByBooking"
+        />
 
-        <div class="divider" />
+        <template v-else>
+          <div v-if="order.dayMinutes" class="detail__row">
+            <span>日场 {{ formatDuration(order.dayMinutes) }}</span>
+            <span>¥{{ formatMoney(order.dayAmount) }}</span>
+          </div>
+          <div v-if="order.nightMinutes" class="detail__row">
+            <span>夜场 {{ formatDuration(order.nightMinutes) }}</span>
+            <span>¥{{ formatMoney(order.nightAmount) }}</span>
+          </div>
+          <div v-if="!order.dayMinutes && !order.nightMinutes" class="detail__row">
+            <span class="text-muted">没有产生计费时长</span>
+          </div>
 
-        <div class="detail__row detail__row--total">
-          <span>订单金额</span><span>¥{{ formatMoney(order.totalAmount) }}</span>
-        </div>
-        <div v-if="Number(order.discountAmount) > 0" class="detail__row detail__row--note">
-          <span>月度优惠</span><span>-¥{{ formatMoney(order.discountAmount) }}</span>
-        </div>
-        <div v-if="Number(order.cardFreeAmount) > 0" class="detail__row detail__row--note">
-          <span>月卡抵扣</span><span>-¥{{ formatMoney(order.cardFreeAmount) }}</span>
-        </div>
-        <div class="detail__row detail__row--total">
-          <span>实付</span>
-          <span class="text-primary">¥{{ payableText }}</span>
-        </div>
+          <div class="divider" />
+
+          <div class="detail__row detail__row--total">
+            <span>订单金额</span><span>¥{{ formatMoney(order.totalAmount) }}</span>
+          </div>
+          <div v-if="Number(order.discountAmount) > 0" class="detail__row detail__row--note">
+            <span>月度优惠</span><span>-¥{{ formatMoney(order.discountAmount) }}</span>
+          </div>
+          <div v-if="Number(order.cardFreeAmount) > 0" class="detail__row detail__row--note">
+            <span>月卡抵扣</span><span>-¥{{ formatMoney(order.cardFreeAmount) }}</span>
+          </div>
+          <div v-if="Number(order.activityFreeAmount) > 0" class="detail__row detail__row--note">
+            <span>活动减免</span><span>-¥{{ formatMoney(order.activityFreeAmount) }}</span>
+          </div>
+          <div class="detail__row detail__row--total">
+            <span>实付</span>
+            <span class="text-primary">¥{{ payableText }}</span>
+          </div>
+        </template>
       </div>
 
       <!-- 支付信息 -->
       <div v-if="isPaid" class="card">
         <div class="card-title">支付信息</div>
         <div class="detail__row">
-          <span>支付方式</span><span>{{ channelLabel(order.paymentMethod) }}</span>
+          <span>支付方式</span><span>{{ order.paymentMethodLabel || '—' }}</span>
         </div>
         <div class="detail__row">
           <span>支付时间</span><span>{{ formatDateTime(order.paidAt) }}</span>

@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.user.dto.AdminUserQuery;
+import com.kaede.uspace.user.dto.AdminUserUpdateRequest;
 import com.kaede.uspace.user.dto.AdminUserVo;
 import com.kaede.uspace.user.dto.ChangePasswordRequest;
 import com.kaede.uspace.user.dto.RegisterRequest;
@@ -19,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -55,6 +59,31 @@ public class UserService {
     /** 账号禁用状态 */
     private static final int STATUS_DISABLED = 0;
 
+    /**
+     * 后台用户列表的排序白名单：外部传的排序键 → 实际 SQL 列。
+     *
+     * <p>⚠️ <b>它是那道 SQL 注入防线本身，不是「顺手加的映射表」。</b>
+     * {@code ORDER BY} 后面只能用字符串替换（占位符在那里会被当成字面量），
+     * 所以外部传进来的排序键<b>绝对不能直接拼进 SQL</b> —— 拼了就等于把
+     * 一张存着密码哈希的表交给调用方去排序任意列。
+     * 加新的排序维度只能往这张表里加，不许绕过它。
+     *
+     * <p>三个键对应运营最常问的三件事：谁刚注册的（{@code createdAt}）、
+     * 谁花钱最多（{@code totalPaid}）、谁待得最久（{@code stayMinutes}）。
+     */
+    private static final Map<String, String> SORT_COLUMNS = Map.of(
+            "createdAt", "u.created_at",
+            "totalPaid", "u.total_paid",
+            "stayMinutes", "total_stay_minutes");
+
+    /**
+     * 默认排序：新注册的在前。
+     *
+     * <p>运营打开用户列表多半是为了处理刚发生的事（新用户、刚被投诉的人），
+     * 按 ID 倒序正好把这些人排在最上面。
+     */
+    private static final String DEFAULT_USER_ORDER_BY = "u.id DESC";
+
     private final SysUserMapper userMapper;
 
     /**
@@ -67,9 +96,21 @@ public class UserService {
      */
     private final PasswordEncoder passwordEncoder;
 
-    public UserService(SysUserMapper userMapper, PasswordEncoder passwordEncoder) {
+    /**
+     * QQ 号验证（同包，不引入新的包依赖）。
+     *
+     * <p>注册时「填了 QQ 就必须先证明这个号是本人的」。验证的<b>另一端在 QQ 群里</b>：
+     * 用户把验证码发到群里，机器人看到后回执给后端 —— 那一半住在模块 11 的
+     * {@code qqbot} 包。两头合起来才是一次完整的往返，缺一头这条链路就是死的
+     * （比如「注册要求先过群验证、而群里没人应答」）。
+     */
+    private final QqVerifyService qqVerifyService;
+
+    public UserService(SysUserMapper userMapper, PasswordEncoder passwordEncoder,
+                       QqVerifyService qqVerifyService) {
         this.userMapper = userMapper;
         this.passwordEncoder = passwordEncoder;
+        this.qqVerifyService = qqVerifyService;
         log.info("[用户] 用户服务已就绪");
     }
 
@@ -102,10 +143,34 @@ public class UserService {
             return BizResult.fail(ErrorCode.USERNAME_EXISTS);
         }
 
+        // QQ 号是必填的（2026-10-01 起）—— 见 RegisterRequest#qq 的注释：
+        // 店里没有店员，「不绑 QQ 也能进店」等于留一个找不到主的顾客。
+        // Controller 上已有 @NotBlank，这里再判一次是给「直接调 Service」的路径兜底
+        // （QQ bot 那条链路就是直接调 Service 的）。
         String qq = trimToNull(request.getQq());
-        if (qq != null && userMapper.selectByQq(qq) != null) {
+        if (qq == null) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "请填写 QQ 号并完成群内验证");
+        }
+        if (userMapper.selectByQq(qq) != null) {
             return BizResult.fail(ErrorCode.QQ_ALREADY_BOUND);
         }
+        // 接着消费掉那次群内验证 —— 见 QqVerifyService 的类注释。
+        //
+        // ⚠️ 顺序是【先查重、再 consume】，不能反过来：consume 用完即焚，
+        // 反过来会让「QQ 已被占用」这种完全可预期的失败白白烧掉一次验证，
+        // 用户得重新取码、重新发到群里，而他明明什么都没做错。
+        //
+        // 这不构成「拿注册接口当 QQ 枚举器」（QqVerifyService#issue 的注释专门
+        // 防了这一手）：能走到这一行的请求必须先完成群内验证，
+        // 而验证要求「持有那个 QQ 的人把码发到群里」——
+        // 攻击者拿不到别人 QQ 的验证状态。
+        BizResult<String> consumed = qqVerifyService.consume(qq, request.getChallengeId());
+        if (!consumed.isSuccess()) {
+            return BizResult.fail(consumed.getError(), consumed.getMessage());
+        }
+        // 以记录里的 QQ 为准。两者理论上一致（consume 就是按请求里这个值定位的），
+        // 但「以记录为准」写出来更安全 —— 将来 issue 若允许改写 QQ，这里不必跟着改
+        qq = consumed.getData();
 
         String preference = trimToNull(request.getPreference());
         validatePreference(preference);
@@ -231,11 +296,18 @@ public class UserService {
         }
 
         String qq = trimToNull(request.getQq());
-        if (qq != null && !qq.equals(user.getQq())) {
-            SysUser occupied = userMapper.selectByQq(qq);
-            if (occupied != null && !occupied.getId().equals(userId)) {
-                return BizResult.fail(ErrorCode.QQ_ALREADY_BOUND);
-            }
+        // ⚠️ QQ 号【只能由管理员改】，本人改资料时不许动它 —— 见 ErrorCode#QQ_CHANGE_REQUIRES_ADMIN。
+        //
+        // 为什么这条不能松：QQ 号是机器人在群里认人的唯一依据，而注册时它经过
+        // 一次群内验证（取码 → 发群 → 回执）。若改资料时能直接改，那次验证就等于白做 ——
+        // 先随便填一个号注册，再改成群里某个人的号（只要对方没绑过），
+        // 此后那个人的群消息就会被当成他的。
+        //
+        // ⚠️ 【清空也算变更，一并拒绝】。别想着「放开清空方便用户解绑」：
+        // 那会留出一条绕过的路 —— 先清空、再设成别人的号，正好绕开这条规则。
+        // 规则简单才守得住：注册时定下，之后要改找管理员。
+        if (!Objects.equals(qq, user.getQq())) {
+            return BizResult.fail(ErrorCode.QQ_CHANGE_REQUIRES_ADMIN);
         }
 
         String preference = trimToNull(request.getPreference());
@@ -297,10 +369,42 @@ public class UserService {
      * @param pageSize 每页条数，由分页插件的上限截断至 100
      * @return 分页结果
      */
-    public BizResult<PageResult<AdminUserVo>> listUsers(String keyword, long pageNo, long pageSize) {
-        IPage<SysUser> page = userMapper.selectPageByKeyword(
-                new Page<>(pageNo, pageSize), trimToNull(keyword));
-        return BizResult.ok(PageResult.of(page, AdminUserVo::from));
+    public BizResult<PageResult<AdminUserVo>> listUsers(AdminUserQuery query, String sortBy,
+                                                        Boolean desc, long pageNo, long pageSize) {
+        AdminUserQuery effective = query == null ? new AdminUserQuery() : query;
+
+        // 卡种只在「只看有月卡」时有意义。前端可能只传了卡种没传 hasCard，
+        // 照直拼进 SQL 的话它会去筛「有该卡种的人」，而调用方以为自己只是筛了卡种 ——
+        // 直接丢掉，让行为回到「不筛」
+        if (!Boolean.TRUE.equals(effective.getHasCard())) {
+            effective.setCardType(null);
+        }
+
+        IPage<AdminUserVo> page = userMapper.selectAdminUserPage(
+                new Page<>(pageNo, pageSize), effective, resolveOrderBy(sortBy, desc));
+        return BizResult.ok(PageResult.of(page, vo -> vo));
+    }
+
+    /**
+     * 把外部传来的排序键翻成 SQL 片段。
+     *
+     * <p>⚠️ <b>这是本模块唯一一处把外部输入拼进 SQL 的地方，必须在白名单里兜住。</b>
+     * {@code ORDER BY} 后面接不了占位符（{@code #{}} 会被当成字面量），只能字符串替换；
+     * 而直接把参数拼进去就是 SQL 注入 —— 这张表里还存着密码哈希。
+     *
+     * <p><b>认不出的键一律回落到默认排序，不报错</b>：排序是个纯展示偏好，
+     * 前端传了个已经下线的字段却让整个列表 500，代价远大于「排序没生效」。
+     *
+     * @param sortBy 排序键，形如 {@code createdAt} / {@code totalPaid} / {@code stayMinutes}
+     * @param desc   是否降序；为 null 按升序
+     * @return 可直接拼进 {@code ORDER BY} 的片段
+     */
+    private static String resolveOrderBy(String sortBy, Boolean desc) {
+        String column = sortBy == null ? null : SORT_COLUMNS.get(sortBy);
+        if (column == null) {
+            return DEFAULT_USER_ORDER_BY;
+        }
+        return column + (Boolean.TRUE.equals(desc) ? " DESC" : " ASC");
     }
 
     /**
@@ -310,11 +414,58 @@ public class UserService {
      * @return 成功时返回用户详情；不存在时返回 {@code USER_NOT_FOUND}
      */
     public BizResult<AdminUserVo> getUserDetail(Long targetId) {
+        // 走带聚合的那条查询（而不是 selectById + 手工 from）：详情的月卡状态与
+        // 累计在店时长要与列表完全一致，两处各算一次迟早会分叉
+        AdminUserVo vo = userMapper.selectAdminUserById(targetId);
+        if (vo == null) {
+            return BizResult.fail(ErrorCode.USER_NOT_FOUND);
+        }
+        return BizResult.ok(vo);
+    }
+
+    /**
+     * 管理员修改用户资料（模块 1 的管理员侧）。
+     *
+     * <p><b>它与用户自助的 {@link #updateProfile} 最关键的差别是「能改 QQ」</b> ——
+     * 自助那条一律拒绝（见 {@code QQ_CHANGE_REQUIRES_ADMIN}），
+     * 而这里是那个错误码说的「联系管理员」的落点。
+     * 管理员改 QQ <b>不走群内验证</b>：他知道谁是谁，验证是为了证明「这个号是本人的」，
+     * 而这个前提在人工场景下由其他方式保证。但<b>查重照做</b> ——
+     * 两个账号绑同一个 QQ 会让机器人的播报指向不确定的人。
+     *
+     * <p><b>主键与登录名不可改</b>：ID 是其他所有表的外键指向（改了整个系统的引用就断了）；
+     * 登录名是登录凭据的一半，改了用户会在完全不知情的情况下登不进去。
+     *
+     * @param targetId   目标用户 ID
+     * @param request    新资料。四个字段都是「传 null 即清空」的全量替换语义
+     * @param operatorId 操作的管理员 ID，仅用于日志留痕
+     * @return 成功时返回更新后的详情；QQ 被他人占用时返回 {@code QQ_ALREADY_BOUND}
+     */
+    @Transactional
+    public BizResult<AdminUserVo> adminUpdateUser(Long targetId,
+                                                  AdminUserUpdateRequest request,
+                                                  Long operatorId) {
         SysUser user = userMapper.selectById(targetId);
         if (user == null) {
             return BizResult.fail(ErrorCode.USER_NOT_FOUND);
         }
-        return BizResult.ok(AdminUserVo.from(user));
+
+        String qq = trimToNull(request.getQq());
+        if (qq != null && !qq.equals(user.getQq())) {
+            SysUser occupied = userMapper.selectByQq(qq);
+            if (occupied != null && !occupied.getId().equals(targetId)) {
+                return BizResult.fail(ErrorCode.QQ_ALREADY_BOUND);
+            }
+        }
+
+        String preference = trimToNull(request.getPreference());
+        validatePreference(preference);
+
+        String nickname = resolveNickname(request.getNickname(), qq, user.getUsername());
+        userMapper.updateProfile(targetId, nickname, trimToNull(request.getPhone()), qq, preference);
+        log.info("[用户] 管理员修改了资料 targetId={} operatorId={} qq={}", targetId, operatorId, qq);
+
+        return getUserDetail(targetId);
     }
 
     /**

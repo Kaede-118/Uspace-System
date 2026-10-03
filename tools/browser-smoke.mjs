@@ -40,12 +40,19 @@ const run = async () => {
     await loginInto(page, { api, app })
     console.log(`[准备] 已登录，后端 ${api} / 前端 ${app}\n`)
 
-    /* ---------- 后台四个页面 ---------- */
+    /* ---------- 后台六个页面 ---------- */
     const adminPages = [
       { name: '公告管理', hash: '#/admin/notices', expect: ['公告', '发公告'] },
       { name: '机台管理', hash: '#/admin/devices', expect: ['机台', '新增机台', '拍拍机'] },
       { name: '包场排期', hash: '#/admin/bookings', expect: ['包场', '排一场'] },
-      { name: '商品管理', hash: '#/admin/products', expect: ['商品', '新增商品', '商品订单'] }
+      // 门店：两个 tab（停业 / 免费时段）。导航改成两行（一行四个）之后，
+      // 它是第二行的第一个 —— 页面本身出不来通常是路由或组件引入出的问题
+      { name: '门店管理', hash: '#/admin/store', expect: ['门店', '停业时段', '免费时段', '新增停业'] },
+      { name: '商品管理', hash: '#/admin/products', expect: ['商品', '新增商品', '商品订单'] },
+      // 收款管理默认落在「待复核」tab —— 那才是管理员每次进来要处理的事。
+      // 三个 tab 都要在文字里出现：加了对账 tab 之后，这一页承担的是
+      // 「单笔复核 + 一整天的对账」两件事
+      { name: '收款管理', hash: '#/admin/payments', expect: ['收款', '待复核', '收款码', '对账'] }
     ]
 
     let round = 0
@@ -66,6 +73,25 @@ const run = async () => {
       check('无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
       console.log(`    预览：${text.replace(/\s+/g, ' ').slice(0, 120)}`)
     }
+
+    /* ---------- 门店页：两个 tab ---------- */
+    // ⚠️ 只验「切得动、文案跟着换」，不验列表里有没有某条活动 ——
+    // 活动是开发库的数据，清掉之后这条检查不该跟着红
+    console.log('\n[交互] 门店页 · 免费时段 tab')
+    page.errors.length = 0
+    await page.goto(`${app}/#/admin/store`, 95)
+    await page.waitForContent()
+    await page.clickText('免费时段')
+    await sleep(400)
+    const storeText = String((await page.eval('document.body.innerText')) || '')
+    check('切到「免费时段」tab，新增按钮的文案跟着换', storeText.includes('新增活动'))
+    check('   → 该 tab 的说明讲的是计费（照常营业）而不是准入', storeText.includes('照常营业'))
+    check('免费时段 tab 无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
+
+    await page.clickText('停业时段')
+    await sleep(400)
+    const closureText = String((await page.eval('document.body.innerText')) || '')
+    check('切回「停业时段」，按钮文案也切回来', closureText.includes('新增停业'))
 
     /* ---------- 弹层与滚动锁 ---------- */
     console.log('\n[交互] 公告页弹层')
@@ -135,6 +161,39 @@ const run = async () => {
     await page.clickText('取消')
 
     check('商品页无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
+
+    /* ---------- 收款页：对账 tab ---------- */
+    console.log('\n[交互] 收款页 · 对账 tab')
+    page.errors.length = 0
+    await page.goto(`${app}/#/admin/payments`, 94)
+    await page.waitForContent()
+    await page.clickText('对账')
+    await sleep(800)
+
+    const recText = String((await page.eval('document.body.innerText')) || '')
+    check('切到「对账」tab，出现上传入口', recText.includes('上传账单'))
+    check('  → 说明了三种账单来源与「重复上传不会产生重复差异」',
+      recText.includes('微信') && recText.includes('支付宝')
+        && recText.includes('重复上传同一份不会产生重复差异'))
+
+    const batchCount = await page.eval("document.querySelectorAll('.rec__batch').length")
+    check('  → 批次行渲染出来了，或显示空状态',
+      typeof batchCount === 'number'
+        && (batchCount > 0 || recText.includes('还没有对账记录')),
+      `实际 ${batchCount} 行`)
+
+    // 批次行是按钮，整行可点 —— 有批次时点进详情，验一下那个视图也能渲染
+    if (typeof batchCount === 'number' && batchCount > 0) {
+      await page.eval("document.querySelector('.rec__batch').click()")
+      await sleep(900)
+      const detailText = String((await page.eval('document.body.innerText')) || '')
+      check('  → 点进批次详情，出现返回入口与差异区',
+        detailText.includes('返回列表') && (detailText.includes('账单侧') || detailText.includes('没有差异')
+          || detailText.includes('待处理')))
+      await page.clickText('返回列表')
+      await sleep(600)
+    }
+    check('对账 tab 无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
 
     /* ---------- 用户端：首页公告栏与「全部公告」页 ---------- */
     console.log('\n[用户端] 公告栏')

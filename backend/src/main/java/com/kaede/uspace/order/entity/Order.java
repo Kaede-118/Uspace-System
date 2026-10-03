@@ -127,8 +127,36 @@ public class Order extends BaseEntity {
      */
     private BigDecimal cardFreeAmount;
 
+    /**
+     * 免费活动为本单免掉的金额（元）。不在活动区间内时为 0。
+     *
+     * <p>与 {@link #cardFreeAmount} 同为说明性字段、已从 {@link #totalAmount} 扣除。
+     *
+     * <p>⚠️ <b>不含被月卡覆盖的段</b>：月卡用户本来就免费，活动并没有为他省下什么。
+     * 两个口径混在一起的话，复盘一场活动「送出去多少钱」会虚高 ——
+     * 而那种错不会有任何报错，只会让运营以为活动比实际更划算。
+     */
+    private BigDecimal activityFreeAmount;
+
     /** 应付金额。当前等于 {@link #totalAmount}，预留独立列供将来的优惠券、押金等 */
     private BigDecimal payableAmount;
+
+    /**
+     * 结算那一刻的分段账单快照（JSON），内容为 {@code BillingResult} + freeByBooking 的序列化结果。
+     *
+     * <p><b>为什么要有快照</b>：上面那两对日场/夜场列只是汇总投影 —— 段的边界、档数、
+     * 单价、封顶与免单标记都不是「合计」能还原出来的，而订单详情页要把它们逐段展示出来。
+     * 存快照而不是详情时现算，是因为计费规则与价格会调整：已结算的订单必须永远按
+     * 当时那份账单显示（现算只能用来给快照之前的老订单兜底）。
+     *
+     * <p>NULL = 尚未结算，或快照机制（2026-10-03）上线前结算的老订单。
+     * 读取侧不必区分这两种情形：解析失败与为空走的是同一条回落路径。
+     *
+     * <p>本字段以 JSON 字符串形态读写（列类型 JSON），序列化与解析都在
+     * {@code OrderService} 里，且一律 fail-soft —— 快照是【展示用的副本】，
+     * 任何一环坏掉都不该让订单本身读不出来。
+     */
+    private String billSnapshot;
 
     /** 状态名，取值见 {@link com.kaede.uspace.order.OrderStatus} */
     private String status;
@@ -136,10 +164,17 @@ public class Order extends BaseEntity {
     /** 支付通道名，取值见 {@link com.kaede.uspace.order.PaymentChannel}。0 元自动结清时为空 */
     private String paymentMethod;
 
-    /** 支付截图存储路径。仅人工核销降级路径会写 */
-    private String paymentProof;
+    /*
+     * 支付截图（payment_proof）没有对应的字段，这不是遗漏。
+     *
+     * 2026-09-30 起付款凭证改由 biz_payment_proof 表承载（见 PaymentProof）——
+     * 四类收款共用一个入口，而且「复核状态」「交易流水号索引」都不是一列装得下的。
+     * 库里 biz_order.payment_proof 那一列还留着（DROP 不可逆，历史数据不该丢），
+     * 但【刻意不给它映射字段】：映射了就会有人写它，而 updateById 跳过 null
+     * 的语义会让一次普通的订单更新把凭证静默清空。
+     */
 
-    /** 支付平台交易号：微信 transaction_id / 支付宝 trade_no。人工核销时由管理员填写 */
+    /** 支付平台交易号：微信 transaction_id / 支付宝 trade_no。凭证路径下为用户填写的流水号 */
     private String paymentNo;
 
     /** 支付完成时刻。0 元自动结清时也写，便于对账时区分「不用付」与「没记录」 */

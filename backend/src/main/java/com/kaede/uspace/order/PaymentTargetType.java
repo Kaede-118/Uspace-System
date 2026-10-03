@@ -26,10 +26,10 @@ import java.util.Arrays;
 public enum PaymentTargetType {
 
     /** 普通订单（{@code biz_order}）。商户订单号 = {@code order_no}，前缀 {@code OD} */
-    ORDER("OD"),
+    ORDER("OD", "订单"),
 
     /** 包场（{@code biz_booking}）。商户订单号 = {@code booking_no}，前缀 {@code BK} */
-    BOOKING("BK"),
+    BOOKING("BK", "包场"),
 
     /**
      * 月卡购买单（{@code biz_monthly_card_order}）。商户订单号 = {@code order_no}，
@@ -43,7 +43,7 @@ public enum PaymentTargetType {
      * 就成了 {@code promotion → order} 与 {@code order → promotion} 同时成立的
      * 包级循环。字面量仍然只有一处，只是放在被引用方 —— 别把它挪回来。
      */
-    MONTHLY_CARD(MonthlyCardNo.PREFIX),
+    MONTHLY_CARD(MonthlyCardNo.PREFIX, "月卡"),
 
     /**
      * 商品购买单（{@code biz_product_order}）。商户订单号 = {@code order_no}，
@@ -55,7 +55,7 @@ public enum PaymentTargetType {
      * 单向的 {@code order → product}。前缀反过来定义在这里，
      * 就成了两个方向同时成立的包级循环。
      */
-    PRODUCT(ProductNo.PREFIX);
+    PRODUCT(ProductNo.PREFIX, "商品");
 
     /**
      * 单号前缀。
@@ -67,8 +67,18 @@ public enum PaymentTargetType {
      */
     private final String orderNoPrefix;
 
-    PaymentTargetType(String orderNoPrefix) {
+    /**
+     * 面向运营的中文名（订单 / 包场 / 月卡 / 商品）。
+     *
+     * <p>后台的待复核列表要显示「这条凭证是哪类收款的」，用户在
+     * 「我提交过的凭证」里也要看到同一个说法。由枚举给出，两处共用一份 ——
+     * 前端各写一张映射表的话，加一类收款时必然漏改一处。
+     */
+    private final String label;
+
+    PaymentTargetType(String orderNoPrefix, String label) {
         this.orderNoPrefix = orderNoPrefix;
+        this.label = label;
     }
 
     /**
@@ -78,6 +88,37 @@ public enum PaymentTargetType {
      */
     public String getOrderNoPrefix() {
         return orderNoPrefix;
+    }
+
+    /**
+     * 取中文名。
+     *
+     * @return 收款类型的中文名称
+     */
+    public String getLabel() {
+        return label;
+    }
+
+    /**
+     * 把类型名转成中文名。
+     *
+     * <p><b>认不出的取值原样返回</b>，与 {@code PaymentChannel#userLabelOf}
+     * 同一条契约：{@code target_type} 是 {@code VARCHAR}，库里可能存着
+     * 枚举之外的字符串，让它一眼看得出来比伪装成一个正常的中文名要好。
+     *
+     * <p>常量在左（{@code t.name().equals(name)}）以保 null 安全 ——
+     * 与 {@code PaymentChannel#isOnline} 同一套写法，不要改成
+     * {@code Set.of(...).contains()}（它在 null 上抛 NPE）。
+     *
+     * @param name 类型名，可为 null
+     * @return 中文名；认不出的取值原样返回
+     */
+    public static String labelOf(String name) {
+        return Arrays.stream(values())
+                .filter(t -> t.name().equals(name))
+                .map(PaymentTargetType::getLabel)
+                .findFirst()
+                .orElse(name);
     }
 
     /**

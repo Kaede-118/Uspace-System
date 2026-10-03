@@ -11,7 +11,11 @@
  *       Service 层（{@code BizResult}）各一套，职责不同，勿混用</li>
  *   <li>{@code exception} —— 全局异常处理器，把异常翻译成统一返回体</li>
  *   <li>{@code entity} —— 实体基类，承载各业务表共有的审计与逻辑删除字段</li>
- *   <li>{@code config} —— 框架级配置（MyBatis-Plus、Jackson）</li>
+ *   <li>{@code config} —— 框架级配置（MyBatis-Plus、Jackson），
+ *       以及上传目录、站点地址这类基础设施的配置项</li>
+ *   <li>{@code upload} —— 图片落盘：校验、按文件头判类型、写进上传目录。
+ *       模块 1（头像 / 背景图）与商品包（商品封面）共用同一份，
+ *       其中含安全代码，<b>不要复制第二份</b></li>
  *   <li>{@code security} —— 当前登录用户的载体，供各模块 Controller 取用</li>
  * </ul>
  *

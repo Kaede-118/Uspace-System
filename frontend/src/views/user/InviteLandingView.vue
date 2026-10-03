@@ -10,13 +10,18 @@
  *
  * <p>重复加入不是错误 —— 刷新页面、从聊天记录里再点一次都会走到那条分支，
  * 后端返回的是「你已经进入过了」这个<b>答案</b>，而不是异常。
+ *
+ * <p>⚠️ <b>本页刻意不提供「开门」按钮</b>（曾经有过，2026-09-30 去掉）：
+ * 点开邀请链接的人多半<b>不在店里</b> —— 他可能是在群里翻到链接、随手点开看看。
+ * 而「开门」一旦点下去就是创建订单 + 下发密码 + <b>开始计费</b>，
+ * 包场又往往是几天之后的事，误触的代价是真金白银。
+ * 到店之后的入口只有一个：首页的「开门计时」（本页底部也这么写着）。
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getInviteInfo, joinByInvite } from '@/api/booking'
-import { createOrder } from '@/api/order'
-import { toastSuccess, toastError, toastInfo } from '@/composables/useToast'
-import { errorMessage, isCode, ErrorCode } from '@/utils/error'
+import { toastSuccess, toastError } from '@/composables/useToast'
+import { errorMessage } from '@/utils/error'
 import { formatDateTime, formatTime } from '@/utils/format'
 import { versionedUrl } from '@/utils/image'
 import NavBar from '@/components/NavBar.vue'
@@ -36,7 +41,8 @@ const notFound = ref(false)
 const joinResult = ref(null)
 const joinFailed = ref(false)
 
-const opening = ref(false)
+/** 是否正在重试。首次自动加入不走这里，只有用户点了按钮才置位。 */
+const retrying = ref(false)
 
 const timeRange = computed(() => {
   const i = invite.value
@@ -49,7 +55,7 @@ const timeRange = computed(() => {
 
 /** 加入结果的一句话说明。 */
 const joinText = computed(() => {
-  if (joinFailed.value) return '自动加入未成功，你仍可以正常下单进场'
+  if (joinFailed.value) return '自动加入未成功'
   if (!joinResult.value) return ''
   if (joinResult.value.alreadyJoined) return '你已经在名单里了'
   return '已加入，包场时段到店即可'
@@ -74,8 +80,8 @@ async function load() {
 /**
  * 自动加入。
  *
- * <p>失败不阻断页面 —— 加入是「兜底路径」之外的正常路径，但它失败时
- * 用户仍可以带令牌下单进场（见 {@link onOpenDoor}）。
+ * <p>失败不阻断页面（信息照常展示），但要提醒用户刷新重试：
+ * 包场时段里没进名单的人会被当成散客挡在门外，而那个时候他多半已经到店了。
  */
 async function doJoin() {
   try {
@@ -93,31 +99,32 @@ async function doJoin() {
 }
 
 /**
- * 现在就开门（带上邀请令牌）。
+ * 重试加入。
  *
- * <p>令牌在这里是<b>兜底路径</b>：正常流程下上面那次自动加入已经把他记进表里了，
- * 下单靠查表就能认出他。但万一那次加入失败了（网络抖动、或者用户没等页面加载完
- * 就点了按钮），带上令牌仍然进得去。
+ * <p>首次加入是页面加载时自动做的（用户无感），失败时只留一句话 ——
+ * 而加入失败的人到店后会被门槛挡在外面（包场时段只放参与者进来），
+ * 所以他需要一个显式的重试入口，不能只让他去刷新页面。
+ *
+ * <p>失败态先清掉：不清的话重试期间那句警告还挂着，看着像「又失败了一次」。
  */
-async function onOpenDoor() {
-  opening.value = true
+async function onRetry() {
+  retrying.value = true
+  joinFailed.value = false
   try {
-    const resp = await createOrder(token)
-    toastSuccess(resp.data?.message || '开门成功，请在门锁上输入密码')
-    router.replace('/home')
-  } catch (err) {
-    if (
-      isCode(err, ErrorCode.ORDER_ALREADY_ACTIVE) ||
-      isCode(err, ErrorCode.ORDER_UNPAID_EXISTS)
-    ) {
-      toastInfo(errorMessage(err))
-      router.replace('/home')
-    } else {
-      toastError(errorMessage(err, '开门失败，请稍后重试'))
-    }
+    await doJoin()
   } finally {
-    opening.value = false
+    retrying.value = false
   }
+}
+
+/**
+ * 回首页。
+ *
+ * <p>到店之后的入口在首页的「开门计时」，那里下单带的是账号身份 ——
+ * 而上面那次自动加入已经把他记进参与者表了，所以包场时段照样进得去。
+ */
+function goHome() {
+  router.replace('/home')
 }
 
 onMounted(load)
@@ -136,6 +143,18 @@ onMounted(load)
         <p v-if="joinText" class="invite__join" :class="{ 'invite__join--warn': joinFailed }">
           {{ joinText }}
         </p>
+        <!--
+          加入失败时的重试入口。少了它，那个人在包场时段会被门槛挡在外面，
+          而他自己没有任何补救手段（页面只会告诉他「刷新试试」）。
+        -->
+        <button
+          v-if="joinFailed"
+          class="btn btn-primary invite__retry"
+          :disabled="retrying"
+          @click="onRetry"
+        >
+          {{ retrying ? '重试中…' : '重试' }}
+        </button>
       </div>
 
       <div class="card">
@@ -152,9 +171,11 @@ onMounted(load)
         </div>
       </div>
 
-      <button class="btn btn-primary invite__action" :disabled="opening" @click="onOpenDoor">
-        {{ opening ? '处理中…' : '现在去开门' }}
-      </button>
+      <!--
+        ⚠️ 这里是「返回首页」而不是「去开门」—— 点开邀请链接的人未必在店里，
+        而开门会立刻开始计费。到店的入口在首页，见文件头那段说明。
+      -->
+      <button class="btn btn-primary invite__action" @click="goHome">返回首页</button>
       <p class="invite__hint">
         包场时段内到店，用首页的「开门计时」即可进入
       </p>
@@ -164,7 +185,7 @@ onMounted(load)
       v-else-if="!loading"
       icon="🔗"
       text="邀请链接无效或已失效"
-      hint="包场时段的排他性一过，链接也就没有意义了"
+      hint="包场时段一过、或包场被撤销，链接就失效了"
     />
   </div>
 </template>
@@ -198,6 +219,11 @@ onMounted(load)
 
 .invite__join--warn {
   color: var(--c-warning);
+}
+
+/* 重试按钮：只在加入失败时出现，所以给它一点上间距，别贴在提示语上 */
+.invite__retry {
+  margin-top: var(--sp-3);
 }
 
 .participants {

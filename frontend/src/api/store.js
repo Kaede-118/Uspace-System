@@ -4,9 +4,10 @@
  * <p>路径前缀 {@code /api/store}，但<b>权限并不一致</b>，用的时候要留意：
  *
  * <ul>
- *   <li>{@code /status}、{@code /notices}、{@code /bookings} —— <b>匿名可访问</b>。
- *       它们是「店门口挂的牌子」：门店名、此刻营不营业、有什么通知、接下来哪些
- *       时段进不去。要求先注册才能看，等于让第一次来的人白跑一趟</li>
+ *   <li>{@code /status}、{@code /notices}、{@code /bookings}、{@code /free-periods}
+ *       —— <b>匿名可访问</b>。它们是「店门口挂的牌子」：门店名、此刻营不营业、
+ *       有什么通知、接下来哪些时段进不去、哪些时段不收钱。要求先注册才能看，
+ *       等于让第一次来的人白跑一趟</li>
  *   <li>{@code /instore} —— <b>需要登录</b>。「此刻店里有谁」是顾客之间才看得见的
  *       名册，与店门口的牌子是两回事</li>
  * </ul>
@@ -67,6 +68,23 @@ export function getNotices(params = {}) {
  */
 export function getBookingSchedule(limit) {
   return http.get('/api/store/bookings', { params: { limit } })
+}
+
+/**
+ * 查近期免费活动（尚未结束的，含正在进行的那一场）。
+ *
+ * <p>与包场时间表是两张不同的卡片，<b>不要合并</b>：那个回答「接下来哪些时段
+ * <b>进不去</b>」，这个回答「接下来哪些时段<b>不收钱</b>」。
+ * 两者可以同时成立（活动期间恰好也是某场包场的时段），各显示各的。
+ *
+ * <p><b>正在进行的那一场也在列表里</b> —— 「今晚 20:00–次日 02:00 免费」这条
+ * 在 21:00 打开首页时正是最该看见的，前端据此把它标出来。
+ *
+ * @param {number} [limit] 取最近几场，默认 3、最多 20（后端钳位，越界不报错）
+ * @returns {Promise<{data:Array<{id, startAt, endAt, reason, createdAt}>}>}
+ */
+export function getFreePeriods(limit) {
+  return http.get('/api/store/free-periods', { params: { limit } })
 }
 
 /**

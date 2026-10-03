@@ -3,7 +3,11 @@
  * 「我的」页面。
  *
  * <p>上半部分是用户卡片（与「在店用户」列表共用 `UserCard` 组件，
- * 只是右侧信息不同：那边显示进店时间与时长，这边显示消费与时长统计）。
+ * 只是第三行信息不同：那边显示进店时间与时长，这边显示消费与时长统计）。
+ *
+ * <p>⚠️ 页面在电脑上也是一条窄列（内容 480px，见 base.css 的 --page-max）——
+ * 卡片、统计卡、菜单同宽。三种宽度混在一起时，卡片会像「缩在中间的一块」，
+ * 与下面两块的边缘对不齐（实机截图报过）。
  *
  * <p>⚠️ <b>三个「累计」是三个不同的口径，标签绝不能混用</b>：
  * <ul>
@@ -21,6 +25,8 @@ import { logout } from '@/api/auth'
 import { getMyStats, getMonthSpent } from '@/api/order'
 import { getMyCards } from '@/api/card'
 import { listEquipmentTypes } from '@/api/device'
+import { getBillingRules } from '@/api/billing'
+import { preferenceLabels } from '@/utils/labels'
 import { userState, setUser, clear, isAdmin } from '@/stores/user'
 import { toastError, toastInfo } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
@@ -32,6 +38,13 @@ const router = useRouter()
 const stats = ref(null)
 const monthSpent = ref(null)
 const activeCard = ref(null)
+/**
+ * 价目表（`GET /api/billing/rules`）。
+ *
+ * <p>只用来把达标文案里的「降到多少」写具体 —— 那两个数字是配置项，
+ * 前端写死的话，调价之后这里会一直挂着旧价格，<b>且不报任何错</b>。
+ */
+const rules = ref(null)
 const loading = ref(true)
 /** 设备类型字典，用来把偏好 code 翻成中文名。 */
 const typeMap = ref({})
@@ -40,21 +53,14 @@ const typeMap = ref({})
 const user = computed(() => userState.user || {})
 
 /**
- * 我的偏好标签（与月卡并排显示）。
+ * 我的偏好标签（卡片第四行的中文胶囊）。
  *
- * <p>偏好存的是逗号分隔的 code，中文名要用设备类型字典翻 ——
- * 后端给在店名册的响应里刻意不带中文名（那会新开一条 order → device 依赖边），
- * 所以两边都靠这张字典。
+ * <p>偏好存的是逗号分隔的 code，中文名与「认不出的 code 怎么兜底」都在
+ * {@code utils/labels.js} 的 {@code preferenceLabels} 里 ——
+ * 与「在店用户」名册共用同一份。两处各写一份的话，改了一处另一处不会跟着变，
+ * 而那种不一致不会有任何报错，只是同一个偏好在两个页面显示成两种样子。
  */
-const myTags = computed(() => {
-  const pref = user.value.preference
-  if (!pref) return []
-  return pref
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((code) => typeMap.value[code] || code)
-})
+const myTags = computed(() => preferenceLabels(user.value.preference, typeMap.value))
 
 const totalPaidText = computed(() => formatMoney(user.value.totalPaid ?? 0))
 const totalDurationText = computed(() =>
@@ -80,9 +86,23 @@ const monthSpentText = computed(() => formatMoney(monthSpent.value?.monthSpent ?
 const discountText = computed(() => {
   if (!monthSpent.value) return ''
   const { discounted, remaining, threshold } = monthSpent.value
-  return discounted
-    ? '本月已享有优惠价'
-    : `再消费 ¥${formatMoney(remaining)} 即可享优惠（门槛 ¥${formatMoney(threshold)}）`
+  if (!discounted) {
+    return `再消费 ¥${formatMoney(remaining)} 即可享优惠（门槛 ¥${formatMoney(threshold)}）`
+  }
+  /*
+   * 达标这一支要说清【降到多少】—— 原先只写「本月已享有优惠价」，
+   * 等于告诉顾客「你便宜了」却不说是多少钱。
+   *
+   * ⚠️ 价格一律取自接口：写死的话调价之后这里会一直挂着旧数字，
+   * 而那种不一致不会有任何报错。
+   * ⚠️ 价目表没拉到时退回原来那句 —— 宁可少说，也不能说错。
+   */
+  if (!rules.value) return '本月已享有优惠价'
+  const day = formatMoney(rules.value.discountDayPricePerHour)
+  const night = formatMoney(rules.value.discountNightPricePerHour)
+  // 分两行写：一行排下来在窄屏上会折在「元/小时」这种地方，很难读。
+  // ⚠️ 换行靠样式里的 white-space: pre-line，见 .mine__discount
+  return `本月消费已满 ¥${formatMoney(threshold)}\n价格下降至 日 ${day} 元/小时、夜 ${night} 元/小时`
 })
 
 /**
@@ -101,7 +121,8 @@ const menus = computed(() => {
     { key: 'bookings', icon: '📅', label: '我发起的包场' },
     { key: 'joined', icon: '👥', label: '我参与的包场' },
     { key: 'profile', icon: '✏️', label: '修改个人资料' },
-    { key: 'preference', icon: '🎯', label: '设置游玩偏好' }
+    { key: 'preference', icon: '🎯', label: '设置游玩偏好' },
+    { key: 'pricing', icon: '💰', label: '计费规则' }
   ]
   if (isAdmin.value) {
     list.push({ key: 'admin', icon: '⚙️', label: '运营后台' })
@@ -110,14 +131,15 @@ const menus = computed(() => {
 })
 
 async function loadAll() {
-  // 资料、统计、月累计、卡包四路并发。任一失败不影响其余 ——
-  // 「我的」页少显示一个数字，也比整页白屏强
-  const [profileRes, statsRes, spentRes, cardsRes, typesRes] = await Promise.allSettled([
+  // 六路并发：资料、统计、月累计、卡包、偏好字典、价目表。
+  // 任一失败不影响其余 ——「我的」页少显示一个数字，也比整页白屏强
+  const [profileRes, statsRes, spentRes, cardsRes, typesRes, rulesRes] = await Promise.allSettled([
     getProfile(),
     getMyStats(),
     getMonthSpent(),
     getMyCards(),
-    listEquipmentTypes()
+    listEquipmentTypes(),
+    getBillingRules()
   ])
 
   if (profileRes.status === 'fulfilled') {
@@ -134,6 +156,8 @@ async function loadAll() {
     }
     typeMap.value = map
   }
+  // 价目表拿不到只影响优惠文案的具体程度（退回「本月已享有优惠价」）
+  if (rulesRes.status === 'fulfilled') rules.value = rulesRes.value.data
 }
 
 /** 菜单 key → 路由。还没做的页面不在这张表里，点了给提示。 */
@@ -145,6 +169,7 @@ const MENU_ROUTES = {
   joined: '/bookings/joined',
   profile: '/profile',
   preference: '/preference',
+  pricing: '/pricing',
   admin: '/admin'
 }
 
@@ -193,26 +218,28 @@ onMounted(async () => {
       :card-type="activeCard?.cardType"
       :card-type-label="activeCard?.cardTypeLabel"
       :tags="myTags"
+      size="roomy"
     >
       <template #info>
-        <div>累计消费 ¥{{ totalPaidText }}</div>
-        <div>累计时长 {{ totalDurationText }}</div>
+        <span>累计消费 ¥{{ totalPaidText }}</span>
+        <span>累计时长 {{ totalDurationText }}</span>
       </template>
     </UserCard>
 
-    <!-- 统计 -->
+    <!--
+      统计。只有两项 ——「累计消费 / 累计时长」在上面那张用户卡片里已经有了，
+      统计栏再放一遍是重复。⚠️ 少一格还顺带解决了折行：三格平分 296px 时
+      每格只有约 99px，最长的「67 小时 56 分钟」放不下；两格每格约 148px。
+      ⚠️ 说明文字在数字【上方】（2026-10-03 调整）：先知道这是什么，再读数字。
+    -->
     <div class="card mine__stats">
       <div class="mine__stat">
-        <div class="mine__stat-value">{{ monthSpentText }}</div>
         <div class="mine__stat-label">本月消费</div>
+        <div class="mine__stat-value">{{ monthSpentText }}</div>
       </div>
       <div class="mine__stat">
-        <div class="mine__stat-value">{{ monthDurationText }}</div>
         <div class="mine__stat-label">本月时长</div>
-      </div>
-      <div class="mine__stat">
-        <div class="mine__stat-value">{{ totalDurationText }}</div>
-        <div class="mine__stat-label">累计时长</div>
+        <div class="mine__stat-value">{{ monthDurationText }}</div>
       </div>
     </div>
 
@@ -232,6 +259,16 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/*
+ * ⚠️ 这里原先有一条 .mine { max-width: 512px }（只把本页收窄到一列），
+ * 已随「用户端整体按手机宽度走」一并删除（2026-10-03）——
+ * 现在页面宽度由 base.css 的 --page-max 统一决定，本页不需要特殊处理。
+ *
+ * 当时那条规则要解决的问题仍然值得记住：本页有三种宽度的东西
+ *（用户卡片、统计卡、菜单），若只把卡片单独限窄，它会像「缩在中间的一块」，
+ * 与下面两块的边缘对不齐（实机截图报过）。**要么一起宽、要么一起窄。**
+ */
+
 .mine__stats {
   display: flex;
   margin-top: var(--sp-3);
@@ -243,13 +280,20 @@ onMounted(async () => {
 }
 
 .mine__stat-value {
+  /* 标签在上之后，间距加在这一侧（原来在 label 的 margin-top 上） */
+  margin-top: var(--sp-1);
+  /*
+   * 字号保持 17px：统计栏只剩两格，每格约 148px（296 ÷ 2）——
+   * 最长的那种值「67 小时 56 分钟」（挂了几天没结算的单）约 127px，放得下。
+   * （三格时每格只有 99px，那一版曾为此把字号缩到 14px 都不够；
+   * 删掉重复的那一格之后就不必缩了。）
+   */
   font-size: 17px;
   font-weight: 600;
   color: var(--c-primary);
 }
 
 .mine__stat-label {
-  margin-top: var(--sp-1);
   font-size: 12px;
   color: var(--c-text-muted);
 }
@@ -259,6 +303,12 @@ onMounted(async () => {
   padding: 0 var(--sp-1);
   font-size: 12px;
   color: var(--c-text-sub);
+  /*
+   * 保留文案里的换行（达标那支是两行：「本月消费已满 ¥200」/「价格下降至 …」）。
+   * ⚠️ 少了这一条，那个 \n 会被当成普通空白折叠掉，两行又挤回一行 ——
+   * 而挤成一行后在窄屏上会折在「元/小时」这种地方，很难读。
+   */
+  white-space: pre-line;
 }
 
 .mine__menu {

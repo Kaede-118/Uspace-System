@@ -2,6 +2,8 @@ package com.kaede.uspace.user;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.kaede.uspace.user.dto.AdminUserQuery;
+import com.kaede.uspace.user.dto.AdminUserVo;
 import com.kaede.uspace.user.entity.SysUser;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 
@@ -110,7 +112,8 @@ public class FakeSysUserMapper implements InvocationHandler {
             case "updatePasswordAndBumpVersion" -> updatePasswordAndBumpVersion(args);
             case "updateStatus" -> updateStatus(args);
             case "updateRole" -> updateRole(args);
-            case "selectPageByKeyword" -> selectPageByKeyword(args);
+            case "selectAdminUserPage" -> selectAdminUserPage(args);
+            case "selectAdminUserById" -> selectAdminUserById(args);
             case "addOrderPaidAmount" -> addOrderPaidAmount(args);
             case "addCardPaidAmount" -> addCardPaidAmount(args);
             default -> throw new UnsupportedOperationException(
@@ -358,26 +361,49 @@ public class FakeSysUserMapper implements InvocationHandler {
     }
 
     /**
-     * 按关键字分页查询。只做关键字过滤与倒序，不做真正的分页切片 ——
-     * 单测关心的是「筛选结果对不对」，分页切片由 MyBatis-Plus 的插件保证。
+     * 后台列表查询的内存版：做筛选，但不做分页切片、也不做排序 ——
+     * 单测关心的是「筛出来的是不是对的那几个」，切片与排序由 MyBatis-Plus
+     * 与那段 {@code ORDER BY} 负责（后者另有白名单测试守着）。
      *
-     * @param args [IPage, keyword]
+     * <p>⚠️ <b>两个聚合列（月卡状态、累计在店时长）这里【不填】</b>，恒为 null。
+     * 它们是相关子查询算出来的，而订单与月卡住在别的包的表里，假 Mapper 够不着 ——
+     * 硬造一份只会让假实现与真 SQL 越走越远。<b>这两列的正确性由
+     * {@code SysUserMapperIntegrationTests} 连真库验证。</b>
+     *
+     * <p>{@code hasCard} 筛选同理：这里忽略它（当作没传），
+     * 所以单测里别断言「按月卡筛」的结果。
+     *
+     * @param args [IPage, AdminUserQuery, orderBy]
      * @return 装好记录的分页对象
      */
     @SuppressWarnings("unchecked")
-    private IPage<SysUser> selectPageByKeyword(Object[] args) {
-        IPage<SysUser> page = (IPage<SysUser>) args[0];
-        String keyword = (String) args[1];
+    private IPage<AdminUserVo> selectAdminUserPage(Object[] args) {
+        IPage<AdminUserVo> page = (IPage<AdminUserVo>) args[0];
+        AdminUserQuery query = (AdminUserQuery) args[1];
 
-        List<SysUser> matched = rows.values().stream()
+        List<AdminUserVo> matched = rows.values().stream()
                 .filter(FakeSysUserMapper::isVisible)
-                .filter(u -> matchesKeyword(u, keyword))
+                .filter(u -> matchesKeyword(u, query.getKeyword()))
+                .filter(u -> query.getRole() == null || query.getRole().equals(u.getRole()))
+                .filter(u -> query.getStatus() == null || query.getStatus().equals(u.getStatus()))
                 .sorted(Comparator.comparing(SysUser::getId).reversed())
+                .map(AdminUserVo::from)
                 .toList();
 
         page.setRecords(matched);
         page.setTotal(matched.size());
         return page;
+    }
+
+    /**
+     * 按 ID 查详情（内存版）。两个聚合列同样不填，理由见 {@link #selectAdminUserPage}。
+     *
+     * @param args [id]
+     * @return 用户视图；不存在或已删除时返回 null
+     */
+    private AdminUserVo selectAdminUserById(Object[] args) {
+        SysUser user = selectById((Long) args[0]);
+        return user == null ? null : AdminUserVo.from(user);
     }
 
     /**

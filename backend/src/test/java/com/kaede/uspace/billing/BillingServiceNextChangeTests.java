@@ -105,7 +105,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("宽限期内：下一次变化是第 6 分钟，不是第 36 分钟")
     void withinGrace_pointsAtSixthMinute() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, null, null);
 
         assertAt(at(10, 6), at(10, 2), change);
         assertEquals("进入下一档 ¥4.00", change.getText());
@@ -116,7 +116,7 @@ class BillingServiceNextChangeTests {
     void exactlyAtBoundary_stillPointsAtNextTier() {
         // 35 分钟时「可计费分钟」恰为 30，仍收 4 元；跳到 8 元要到第 36 分钟。
         // 少写那个「+1」的话，这里会算出「已经跳档」或「还有 30 分钟」
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 35), null, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 35), null, null, null);
 
         assertAt(at(10, 36), at(10, 35), change);
         assertEquals("进入下一档 ¥8.00", change.getText());
@@ -125,7 +125,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("第 2 档中：下一次跳档在第 66 分钟")
     void inSecondUnit_pointsAtSixtySixthMinute() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 50), null, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 50), null, null, null);
 
         assertAt(at(11, 6), at(10, 50), change);
         assertEquals("进入下一档 ¥12.00", change.getText());
@@ -134,7 +134,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("已享月度优惠：下一档金额按优惠价算")
     void discounted_usesDiscountPrice() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), AT_THRESHOLD, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), AT_THRESHOLD, null, null);
 
         assertAt(at(10, 6), at(10, 2), change);
         assertEquals("进入下一档 ¥3.50", change.getText(),
@@ -144,7 +144,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("差 1 元未达标：仍按原价")
     void justBelowThreshold_usesOriginalPrice() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), BELOW_THRESHOLD, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), BELOW_THRESHOLD, null, null);
 
         assertEquals("进入下一档 ¥4.00", change.getText());
     }
@@ -153,7 +153,7 @@ class BillingServiceNextChangeTests {
     @DisplayName("跨时段后：当前段是夜场，按夜场价预告")
     void afterCrossing_usesNightPrices() {
         // 21:00 进场、现在 23:00 —— 当前段是 22:00 起的那一段，段内已 60 分钟
-        NextChange change = billingService.nextChange(at(21, 0), at(23, 0), null, null);
+        NextChange change = billingService.nextChange(at(21, 0), at(23, 0), null, null, null);
 
         assertAt(at(23, 6), at(23, 0), change);
         assertEquals("进入下一档 ¥10.50", change.getText(),
@@ -164,7 +164,7 @@ class BillingServiceNextChangeTests {
     @DisplayName("恰好落在时段边界上：按刚起头的新段预告")
     void exactlyAtPeriodBoundary_treatsAsFreshSegment() {
         // 22:00:00 整 —— 上一段在边界处结束，此刻属于夜场的第 0 分钟
-        NextChange change = billingService.nextChange(at(21, 0), at(22, 0), null, null);
+        NextChange change = billingService.nextChange(at(21, 0), at(22, 0), null, null, null);
 
         assertAt(at(22, 6), at(22, 0), change);
         assertEquals("进入下一档 ¥3.50", change.getText());
@@ -179,7 +179,7 @@ class BillingServiceNextChangeTests {
     void daySegmentWithTierBeyondBoundary_reportsPeriod() {
         // 21:40 进场、现在 21:50：段内 10 分钟已是第 1 档，下一个档位在 22:16 ——
         // 但 22:00 就跨进夜场了，那才是先发生的事
-        NextChange change = billingService.nextChange(at(21, 40), at(21, 50), null, null);
+        NextChange change = billingService.nextChange(at(21, 40), at(21, 50), null, null, null);
 
         assertAt(at(22, 0), at(21, 50), change);
         assertEquals("跨入夜场，按夜场重新计价", change.getText(),
@@ -192,7 +192,7 @@ class BillingServiceNextChangeTests {
     void nightSegmentWithTierBeyondBoundary_reportsPeriod() {
         // 08:00 进场（夜场）、现在 09:55：段内 115 分钟已是第 4 档，下一个档位在 10:06，
         // 而 10:00 就跨进日场了
-        NextChange change = billingService.nextChange(at(8, 0), at(9, 55), null, null);
+        NextChange change = billingService.nextChange(at(8, 0), at(9, 55), null, null, null);
 
         assertAt(at(10, 0), at(9, 55), change);
         assertEquals("跨入日场，按日场重新计价", change.getText());
@@ -206,7 +206,7 @@ class BillingServiceNextChangeTests {
         //
         // 档位刻意选在第 9 档而不是更高：第 10 档起金额已达封顶，
         // 那时连「下一档」都不存在了，走的是「当前已到封顶价」那条分支
-        NextChange change = billingService.nextChange(at(17, 24), at(21, 30), null, null);
+        NextChange change = billingService.nextChange(at(17, 24), at(21, 30), null, null, null);
 
         assertAt(at(22, 0), at(21, 30), change);
         assertEquals("跨入夜场，按夜场重新计价", change.getText());
@@ -222,7 +222,7 @@ class BillingServiceNextChangeTests {
         // 10:00 进场、现在 15:00 = 300 分钟，第 10 档，金额恰好等于日场封顶 40 元。
         // 注意此时段上的 capped 标志仍是 false（那要到第 11 档才为 true），
         // 靠它判断会漏报，必须用「原始金额 ≥ 封顶」
-        NextChange change = billingService.nextChange(at(10, 0), at(15, 0), null, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(15, 0), null, null, null);
 
         assertNotNull(change, "应当有一条说明");
         assertNull(change.getInSeconds(),
@@ -234,7 +234,7 @@ class BillingServiceNextChangeTests {
     @DisplayName("已达封顶：优惠价下同样识别得出")
     void capped_withDiscountPrice() {
         // 优惠价封顶 35 元 = 10 档 × 3.5 元，第 10 档同样在 4 小时 36 分起
-        NextChange change = billingService.nextChange(at(10, 0), at(15, 0), AT_THRESHOLD, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(15, 0), AT_THRESHOLD, null, null);
 
         assertNull(change.getInSeconds(), "优惠价下封顶值不同，判定也必须跟着走");
         assertEquals("当前已到封顶价", change.getText());
@@ -243,7 +243,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("全天卡覆盖的段：说明月卡免费，不给倒计时")
     void coveredByAllDayCard_reportsFree() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, ALL_DAY_CARD);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, ALL_DAY_CARD, null);
 
         assertNull(change.getInSeconds(), "被月卡覆盖的段实收恒为 0，段内不会有金额变化");
         assertEquals("当前时段月卡免费", change.getText());
@@ -252,10 +252,10 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("夜间卡在夜场段免费、在日场段照常预告")
     void nightCard_coversNightButNotDay() {
-        NextChange night = billingService.nextChange(at(21, 0), at(23, 0), null, NIGHT_CARD);
+        NextChange night = billingService.nextChange(at(21, 0), at(23, 0), null, NIGHT_CARD, null);
         assertNull(night.getInSeconds(), "夜场段被夜间卡覆盖");
 
-        NextChange day = billingService.nextChange(at(10, 0), at(10, 2), null, NIGHT_CARD);
+        NextChange day = billingService.nextChange(at(10, 0), at(10, 2), null, NIGHT_CARD, null);
         assertAt(at(10, 6), at(10, 2), day);
         assertEquals("进入下一档 ¥4.00", day.getText(),
                 "日场段不在夜间卡的覆盖范围里 —— 照抄「有卡就免费」会让账单少收钱");
@@ -267,7 +267,7 @@ class BillingServiceNextChangeTests {
         // 23:00 起步、卡在零点失效。这一段的时长为 2 小时（次日 01:00 才跨时段），
         // 所以先发生的不是时段边界、也不是档位边界，而是卡失效
         CardCoverage card = CardCoverage.of(CardScope.ALL, DATE.minusDays(29), DATE);
-        NextChange change = billingService.nextChange(at(23, 0), at(23, 50), null, card);
+        NextChange change = billingService.nextChange(at(23, 0), at(23, 50), null, card, null);
 
         assertEquals(Duration.between(at(23, 50), DATE.plusDays(1).atStartOfDay()).getSeconds(),
                 change.getInSeconds(), "倒计时的终点是卡失效的那一刻");
@@ -279,7 +279,7 @@ class BillingServiceNextChangeTests {
     void cardOutlivesSegment_reportsFree() {
         // 22:30 起步，段在次日 10:00 才结束，而卡还有两天 —— 本段内不会到期
         CardCoverage card = CardCoverage.of(CardScope.ALL, DATE.minusDays(5), DATE.plusDays(5));
-        NextChange change = billingService.nextChange(at(22, 30), at(23, 0), null, card);
+        NextChange change = billingService.nextChange(at(22, 30), at(23, 0), null, card, null);
 
         assertNull(change.getInSeconds(), "本段内卡不会失效，就没有可倒计时的东西");
         assertEquals("当前时段月卡免费", change.getText());
@@ -292,7 +292,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("起点与当前时刻相同：按刚起头的那一段预告")
     void sameStartAndNow_treatsAsFreshSegment() {
-        NextChange change = billingService.nextChange(at(10, 0), at(10, 0), null, null);
+        NextChange change = billingService.nextChange(at(10, 0), at(10, 0), null, null, null);
 
         assertAt(at(10, 6), at(10, 0), change);
     }
@@ -302,15 +302,15 @@ class BillingServiceNextChangeTests {
     void nowBeforeStart_returnsNull() {
         // 时钟回拨或调用方传错参数时会走到这里。预告是锦上添花的信息，
         // 为它抛异常会把整个结账预览拖下水
-        assertNull(billingService.nextChange(at(10, 0), at(9, 0), null, null));
+        assertNull(billingService.nextChange(at(10, 0), at(9, 0), null, null, null));
     }
 
     @Test
     @DisplayName("时间参数为空：抛异常，把编程错误挡在早期")
     void nullTime_throws() {
         assertThrows(IllegalArgumentException.class,
-                () -> billingService.nextChange(null, at(10, 0), null, null));
+                () -> billingService.nextChange(null, at(10, 0), null, null, null));
         assertThrows(IllegalArgumentException.class,
-                () -> billingService.nextChange(at(10, 0), null, null, null));
+                () -> billingService.nextChange(at(10, 0), null, null, null, null));
     }
 }

@@ -6,12 +6,17 @@ import com.kaede.uspace.auth.dto.LoginVo;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.user.FakeSysUserMapper;
+import com.kaede.uspace.user.QqVerifyProperties;
+import com.kaede.uspace.user.QqVerifyService;
 import com.kaede.uspace.user.UserService;
 import com.kaede.uspace.user.dto.ChangePasswordRequest;
+import com.kaede.uspace.user.dto.QqVerifyIssueVo;
 import com.kaede.uspace.user.dto.RegisterRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+import java.time.Clock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,6 +61,9 @@ class AuthServiceTests {
 
     private final UserService userService;
 
+    /** QQ 验证服务，供 registerUser 走完注册必需的群内验证 */
+    private final QqVerifyService qqVerifyService;
+
     private final AuthService authService;
 
     /**
@@ -65,7 +73,12 @@ class AuthServiceTests {
         JwtProperties properties = new JwtProperties();
         properties.setSecret(SECRET);
         this.jwtService = new JwtService(properties);
-        this.userService = new UserService(fakeMapper.asMapper(), passwordEncoder);
+        // QQ 验证服务只在注册那条路径上用得到（登录用例走不到它），
+        // 但 UserService 的构造器要它 —— 照实装配一个，内存实现、无副作用
+        // QQ 验证服务只在注册路径上用得到（登录用例走不到它），
+        // 但 UserService 的构造器要它 —— 照实装配一个，内存实现、无副作用
+        this.qqVerifyService = new QqVerifyService(new QqVerifyProperties(), Clock.systemDefaultZone());
+        this.userService = new UserService(fakeMapper.asMapper(), passwordEncoder, qqVerifyService);
         this.authService = new AuthService(userService, jwtService);
     }
 
@@ -194,13 +207,35 @@ class AuthServiceTests {
     /**
      * 注册一个测试用户并返回其 ID。
      *
+     * <p>⚠️ <b>QQ 号自 2026-10-01 起是注册必填项，且必须走完群内验证</b> ——
+     * 少了这一步注册会被直接拒掉，而调用方拿到的是一个 null，后面一路 NPE，
+     * 看不出真正的原因是「没填 QQ」。
+     *
      * @return 用户 ID
      */
     private Long registerUser() {
         RegisterRequest request = new RegisterRequest();
         request.setUsername(USERNAME);
         request.setPassword(RAW_PASSWORD);
+        String qq = "88000001";
+        request.setQq(qq);
+        request.setChallengeId(verifyQq(qq));
         return userService.register(request).getData().getId();
+    }
+
+    /**
+     * 走完一次完整的 QQ 验证，返回可用的验证凭证。
+     *
+     * <p>扮演群里的那一半：拿到码直接调 {@code confirm}。真机上那一步
+     * 由群消息触发（见 {@code qqbot} 包的 {@code QqCommandService}）。
+     *
+     * @param qq 要验证的 QQ 号
+     * @return 填进 {@link RegisterRequest#getChallengeId()} 的凭证
+     */
+    private String verifyQq(String qq) {
+        QqVerifyIssueVo issued = qqVerifyService.issue(qq).getData();
+        qqVerifyService.confirm(qq, issued.getCode());
+        return issued.getChallengeId();
     }
 
     /**

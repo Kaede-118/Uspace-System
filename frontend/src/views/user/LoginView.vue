@@ -52,12 +52,10 @@ async function onSubmit() {
     setAuth(token, user)
     toastSuccess('登录成功')
 
-    // 有 redirect 就回去，否则按角色分流：管理员进后台，普通用户进首页
-    if (redirect.value) {
-      router.replace(redirect.value)
-    } else {
-      router.replace(user?.role === 'ADMIN' ? '/admin' : '/home')
-    }
+    // 有 redirect 就回去（管理员从 /admin 进来时，守卫会带上它），
+    // 否则**一律进用户端首页** —— 管理员也是用户，登录后先看到的是店里的样子；
+    // 要进后台，从地址栏或「我的」页进即可（后台不设独立登录页）。
+    router.replace(redirect.value || '/home')
   } catch (err) {
     // 密码错误时后端返回 401，但 `http.js` 已把登录接口排除在
     // 「登录过期」处置之外，所以这里拿到的是「用户名或密码错误」这句原文

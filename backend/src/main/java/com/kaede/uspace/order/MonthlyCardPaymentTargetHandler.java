@@ -68,14 +68,19 @@ public class MonthlyCardPaymentTargetHandler implements PaymentTargetHandler {
     /**
      * {@inheritDoc}
      *
-     * <p>月卡只受理线上通道。它没有「上传凭证 + 管理员核销」这条降级路径
-     * （人工核销接口是订单专用的），放行 {@code QR_UPLOAD} 的话，
-     * 发起支付会返回一个没有任何支付参数的「成功」，卡则永远停在待支付 ——
-     * 表现为「买不了卡」，且线上没有任何报错。
+     * <p><b>月卡等复核，不即交付</b> —— 它交付的是一张 30 天的卡，而权益一旦
+     * 发出就收不回来（见 {@link #markPaid}：付款成功会在同一个事务里插入一张
+     * {@code ACTIVE} 的月卡）。一次误放行等于白送一个月的免费时长，
+     * 所以宁可让管理员扫一眼截图。
+     *
+     * <p>还要注意一点：月卡是「一人一卡」，未关闭的旧购买单会把这个用户自己
+     * 卡死（{@code CARD_PENDING_PAYMENT_EXISTS}）。所以这里的「等复核」
+     * 是有代价的 —— 用户提交凭证之后、管理员确认之前，他买不了第二张卡。
+     * 这是可接受的：同一个人本来也不该同时买两张。
      */
     @Override
-    public boolean supportsChannel(PaymentChannel channel) {
-        return channel != null && PaymentChannel.isOnline(channel.name());
+    public boolean deliverOnSubmit() {
+        return false;
     }
 
     /**
@@ -92,6 +97,21 @@ public class MonthlyCardPaymentTargetHandler implements PaymentTargetHandler {
         }
         if (!CardOrderStatus.PENDING_PAYMENT.name().equals(order.getStatus())) {
             return BizResult.fail(ErrorCode.BUSINESS_REJECTED, "该月卡购买单当前不需要支付");
+        }
+        return BizResult.ok(toTarget(order));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>归属校验仍认购买人 —— 月卡绑定本人使用，别人不能替他付款，
+     * 自然也不能替他提交凭证（那等于替他伪造了付款证明）。
+     */
+    @Override
+    public BizResult<PaymentTarget> loadForProof(Long id, Long userId) {
+        MonthlyCardOrder order = orderMapper.selectById(id);
+        if (order == null || !order.getUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.CARD_NOT_FOUND);
         }
         return BizResult.ok(toTarget(order));
     }

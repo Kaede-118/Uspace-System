@@ -36,9 +36,8 @@ import {
   formatDateTime,
   formatMoney,
   formatTime,
-  parseDateTime,
-  toInputDateTime,
-  fromInputDateTime
+  fromDateTimeHour,
+  parseDateTime
 } from '@/utils/format'
 import { bookingStatusOf } from '@/utils/labels'
 import AdminPager from '@/components/AdminPager.vue'
@@ -82,6 +81,27 @@ const DAY_MS = 24 * 3600 * 1000
 const page = ref(1)
 const total = ref(0)
 const records = ref([])
+
+/**
+ * 当前视图。两个 Tab 各自记自己的一页。
+ *
+ * <p><b>筛选走后端</b>（{@code scope} 参数）而不是前端过滤：这个列表是分页的，
+ * 前端只能过滤当前这一页 —— 第二页里有没有「待付款」它根本不知道。
+ */
+const scope = ref('active')
+
+/** 两个视图，顺序即 Tab 顺序。 */
+const SCOPES = [
+  { value: 'active', label: '已生效 / 待付款' },
+  { value: 'void', label: '已取消 / 已退款' }
+]
+
+/** 切视图：回到第一页再查 —— 换视图等于换了一个列表，停在原页码会看到空页。 */
+function onScopeChange(next) {
+  scope.value = next
+  page.value = 1
+  load()
+}
 const loading = ref(true)
 
 /**
@@ -112,13 +132,20 @@ const editing = ref(null)
  * {@code startAt} / {@code endAt} 是「自由时段」下的输入。两组字段都留着，
  * 切换挡位时不至于把已经填好的时刻丢掉。
  */
+/** 自由时段的默认起止（14:00 – 16:00，绝大多数包场都是这个长度） */
+const DEFAULT_START_HOUR = '14'
+const DEFAULT_END_HOUR = '16'
+
 const form = ref({
   hostUserId: null,
   hostName: '',
   preset: 'DAY_HALF',
   date: '',
-  startAt: '',
-  endAt: '',
+  /** 自由时段：开始日期（yyyy-MM-dd）与开始小时（'00' ~ '23'） */
+  startDate: '',
+  startHour: DEFAULT_START_HOUR,
+  endDate: '',
+  endHour: DEFAULT_END_HOUR,
   price: '',
   remark: ''
 })
@@ -147,24 +174,29 @@ const revoking = ref(null)
 const refundMode = ref('ONLINE')
 const revokeError = ref('')
 
-/** 新建时「开始时刻」不能早于现在。用本地时间拼，不做时区换算（前后端都在同一台机器上）。 */
-const nowInput = computed(() => toInputDateTime(formatDateTime(new Date())))
-
 /** 日期选择框的最早可选值：今天。同一天里过了钟点的情况交给后端判（40911），前端不重算一遍。 */
 const todayInput = computed(() => formatDate(formatDateTime(new Date())))
+
+/*
+ * 「日期 + 整点小时」拼成后端时刻串的 fromDateTimeHour 已提到 utils/format.js
+ * （2026-10-03）—— 门店页的停业与免费时段用的是同一种输入方式，
+ * 各写一份的话，「小时越界怎么算」这种判断迟早分岔，
+ * 而分岔的表现是某一张表单能提交、另一张死活提交不了。
+ * 界面上那句「时 00 分」是它的用户侧说明：分钟固定 00，用户不必猜。
+ */
 
 /**
  * 按当前表单算出实际的起止时刻。
  *
  * <p>两条路径：挡位模式由「开始日期 + 挡位」算出来（跨零点交给 {@code Date} 进位），
- * 自由时段模式直接用填的两个时刻。
+ * 自由时段模式由「日期 + 小时」拼出来。
  *
  * @returns {{startAt: string, endAt: string}|null} 后端格式的两个时刻；填不全时返回 null
  */
 function resolveRange() {
   if (form.value.preset === CUSTOM_PRESET) {
-    const startAt = fromInputDateTime(form.value.startAt)
-    const endAt = fromInputDateTime(form.value.endAt)
+    const startAt = fromDateTimeHour(form.value.startDate, form.value.startHour)
+    const endAt = fromDateTimeHour(form.value.endDate, form.value.endHour)
     return startAt && endAt ? { startAt, endAt } : null
   }
 
@@ -258,7 +290,7 @@ function paidOnline(row) {
 async function load() {
   loading.value = true
   try {
-    const resp = await listBookings({ page: page.value, size: PAGE_SIZE })
+    const resp = await listBookings({ page: page.value, size: PAGE_SIZE, scope: scope.value })
     const count = resp.data?.total || 0
     const maxPage = Math.max(1, Math.ceil(count / PAGE_SIZE))
 
@@ -327,14 +359,18 @@ function onPageChange(target) {
 /** 打开「新建」表单。 */
 function openCreate() {
   editing.value = null
+  // 日期预填明天：今天的那几档多半已经开始了，预填未来一天能少一次 40911
+  const tomorrow = formatDate(formatDateTime(new Date(Date.now() + DAY_MS)))
   form.value = {
     hostUserId: null,
     hostName: '',
     preset: 'DAY_HALF',
-    // 日期预填明天：今天的那几档多半已经开始了，预填未来一天能少一次 40911
-    date: formatDate(formatDateTime(new Date(Date.now() + DAY_MS))),
-    startAt: '',
-    endAt: '',
+    date: tomorrow,
+    // 自由时段同样预填明天：空着的话用户得自己点两次日期选择器
+    startDate: tomorrow,
+    startHour: DEFAULT_START_HOUR,
+    endDate: tomorrow,
+    endHour: DEFAULT_END_HOUR,
     price: '',
     remark: ''
   }
@@ -346,10 +382,11 @@ function openCreate() {
 /**
  * 打开「改期」表单。
  *
- * <p>⚠️ 逐字段取新对象，且时间要过一遍 {@link toInputDateTime} ——
- * 后端给的是 {@code 2026-09-30 14:00:00}，而 {@code datetime-local}
- * 只认带 {@code T} 的 {@code 2026-09-30T14:00}。格式不对时浏览器
- * <b>静默地把输入框置空</b>（不是报错），表现就是「打开表单，时间是空的」。
+ * <p>⚠️ 时间要按 {@code yyyy-MM-dd HH:mm:ss} 的<b>固定位置切开</b>
+ * （前 10 位是日期、第 11~13 位是小时），不能整串塞给输入框 ——
+ * {@code <input type="date">} 只认 {@code 2099-09-30} 这种形状，
+ * 格式不对时浏览器<b>静默地把输入框置空</b>（不是报错），
+ * 表现就是「打开表单，时间是空的」。原来用 {@code datetime-local} 时踩的是同一个坑。
  */
 function openEdit(row) {
   editing.value = row
@@ -359,8 +396,10 @@ function openEdit(row) {
     // 能对上挡位就回填挡位（只改日期即可），对不上退回自由时段
     preset: detectPreset(row.startAt, row.endAt),
     date: String(row.startAt || '').slice(0, 10),
-    startAt: toInputDateTime(row.startAt),
-    endAt: toInputDateTime(row.endAt),
+    startDate: String(row.startAt || '').slice(0, 10),
+    startHour: String(row.startAt || '').slice(11, 13),
+    endDate: String(row.endAt || '').slice(0, 10),
+    endHour: String(row.endAt || '').slice(11, 13),
     price: String(row.price ?? ''),
     remark: row.remark || ''
   }
@@ -506,6 +545,22 @@ onMounted(load)
         包场排期
         <span class="card-sub">{{ total }} 场</span>
         <button class="btn btn-primary booking__new" @click="openCreate">排一场</button>
+      </div>
+
+      <!--
+        两个视图。筛选走后端（scope 参数）—— 这个列表是分页的，
+        前端只能过滤当前页，第二页里有没有待付款的它不知道。
+      -->
+      <div class="booking__tabs">
+        <button
+          v-for="s in SCOPES"
+          :key="s.value"
+          class="booking__tab"
+          :class="{ 'booking__tab--on': scope === s.value }"
+          @click="onScopeChange(s.value)"
+        >
+          {{ s.label }}
+        </button>
       </div>
 
       <LoadingMask :loading="loading" />
@@ -656,20 +711,54 @@ onMounted(load)
         </div>
 
         <template v-else>
+          <!--
+            日期 + 整点两个框。原来是一个 datetime-local，手机上得滚到分钟那一列才选得准，
+            而包场本来只到小时一级 —— 拆开之后选完日期、敲两位数字就行。
+            小时那格用 input + datalist：既能从下拉里挑，也能直接敲（两个框共用一份候选）。
+          -->
           <div class="field">
-            <label class="field-label" for="b-start">开始时刻</label>
-            <input
-              id="b-start"
-              v-model="form.startAt"
-              class="field-input"
-              type="datetime-local"
-              :min="editing ? undefined : nowInput"
-            />
+            <label class="field-label" for="b-start-date">开始时刻</label>
+            <div class="booking__time">
+              <input
+                id="b-start-date"
+                v-model="form.startDate"
+                class="field-input booking__date"
+                type="date"
+                :min="editing ? undefined : todayInput"
+              />
+              <input
+                v-model="form.startHour"
+                class="field-input booking__hour"
+                type="text"
+                inputmode="numeric"
+                maxlength="2"
+                aria-label="开始小时"
+              />
+              <span class="booking__time-unit">时 00 分</span>
+              <span class="booking__time-mark">起</span>
+            </div>
           </div>
 
           <div class="field">
-            <label class="field-label" for="b-end">结束时刻</label>
-            <input id="b-end" v-model="form.endAt" class="field-input" type="datetime-local" />
+            <label class="field-label" for="b-end-date">结束时刻</label>
+            <div class="booking__time">
+              <input
+                id="b-end-date"
+                v-model="form.endDate"
+                class="field-input booking__date"
+                type="date"
+              />
+              <input
+                v-model="form.endHour"
+                class="field-input booking__hour"
+                type="text"
+                inputmode="numeric"
+                maxlength="2"
+                aria-label="结束小时"
+              />
+              <span class="booking__time-unit">时 00 分</span>
+              <span class="booking__time-mark">止</span>
+            </div>
           </div>
         </template>
 
@@ -1028,5 +1117,69 @@ onMounted(load)
   font-size: 11px;
   color: var(--c-text-muted);
   line-height: 1.6;
+}
+/*
+ * 日期 + 小时 + 单位，一行放完。
+ *
+ * ⚠️ 日期那格给的是**固定宽度**而不是 flex:1 —— 让它撑满剩余空间的话，
+ * 手机上日期框会宽得离谱，而旁边那格两位数字反而被挤扁。
+ */
+.booking__time {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.booking__date {
+  flex: 0 0 148px;
+  min-width: 0;
+}
+
+/*
+ * 小时那格只放两位数字。
+ * 给得比「刚好放得下」宽一截 —— 太窄的话点击区域很小，手机上不好点进去，
+ * 数字贴着边框看着也局促。
+ */
+.booking__hour {
+  flex: 0 0 78px;
+  text-align: center;
+}
+
+/*
+ * 「时 00 分」与「起 / 止」。
+ * 少了它们，一行里只看到一个 14 是看不出「这是几点」的 ——
+ * 而这两个框的语义（几分、是开始还是结束）全在那几个字上。
+ */
+.booking__time-unit,
+.booking__time-mark {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--c-text-sub);
+}
+
+/* 「起 / 止」用主色点一下，扫一眼就知道哪行是开头哪行是结尾 */
+.booking__time-mark {
+  color: var(--c-primary);
+}
+
+/* 两个视图的切换。外观与商品页那几个 Tab 保持一致 */
+.booking__tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.booking__tab {
+  height: 30px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-pill);
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
+  font-size: 13px;
+}
+
+.booking__tab--on {
+  background: var(--c-primary);
+  color: #fff;
 }
 </style>

@@ -2,6 +2,8 @@ package com.kaede.uspace.user.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.kaede.uspace.user.dto.AdminUserQuery;
+import com.kaede.uspace.user.dto.AdminUserVo;
 import com.kaede.uspace.user.entity.SysUser;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -253,29 +255,110 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
     int addCardPaidAmount(@Param("id") Long id, @Param("amount") BigDecimal amount);
 
     /**
-     * 按关键字分页查询用户，供运营后台的用户列表使用。
+     * 运营后台的用户列表：带两个聚合列，支持筛选与排序。
      *
-     * <p>关键字同时匹配登录名、昵称与 QQ 号 —— 运营通常记得住其中一个，
-     * 让他先选「按什么搜」是多余的一步。三个字段都没有索引，
-     * 但用户表规模在千级以内，全表扫描的开销可以接受。
+     * <h3>两个聚合列</h3>
      *
-     * <p>用 {@code ORDER BY id DESC} 让新注册的用户排在最前 ——
-     * 运营看用户列表多半是为了处理刚发生的事。
+     * <p>{@code total_stay_minutes} 与 {@code card_type} <b>都不是 {@code sys_user} 上的列</b>，
+     * 是查出来算的：前者对 {@code biz_order.stay_minutes} 求和，后者看有没有
+     * 「状态生效中、且今天落在起止日期之间」的月卡。
+     *
+     * <p>用相关子查询而不是 {@code LEFT JOIN + GROUP BY}：{@code sys_user} 列多，
+     * {@code GROUP BY} 在 MySQL 8 默认的 {@code ONLY_FULL_GROUP_BY} 下要么列出全部字段、
+     * 要么报错；而单用户的相关子查询在千级用户量下开销可以接受。
+     *
+     * <p>⚠️ <b>「生效中的月卡」这个判定在本方法里出现了三处</b>（SELECT 里一处、
+     * 两个 EXISTS 各一处），<b>三处必须逐字一致</b>。口径分叉的症状是
+     * 「列表显示他有卡，按『有月卡』一筛却查不到他」，而两边看起来都没毛病。
+     * 判定口径本身与结算免单、在店名册同源。
+     *
+     * <h3>关于 {@code ${orderBy}}</h3>
+     *
+     * <p>⚠️ 它是<b>字符串替换</b>而不是占位符 —— {@code ORDER BY} 后面接不了参数。
+     * 所以调用方（{@code UserService}）<b>必须用白名单把排序键映射成固定的 SQL 片段</b>，
+     * 绝不能把前端传来的字符串直接拼进来。<b>这里不做任何校验，也做不了</b> ——
+     * 防线在调用方那一侧。
      *
      * @param page    分页参数，由 MyBatis-Plus 的分页插件处理
-     * @param keyword 搜索关键字，为 null 或空串时返回全部用户
+     * @param query   筛选条件，各字段为 null 表示该维不筛
+     * @param orderBy 排序片段，<b>必须来自白名单</b>，形如 {@code u.created_at DESC}
      * @return 分页结果
      */
     @Select("""
-            SELECT *
-              FROM sys_user
-             WHERE deleted = 0
-               AND (#{keyword} IS NULL
-                    OR #{keyword} = ''
-                    OR username LIKE CONCAT('%', #{keyword}, '%')
-                    OR nickname LIKE CONCAT('%', #{keyword}, '%')
-                    OR qq       LIKE CONCAT('%', #{keyword}, '%'))
-             ORDER BY id DESC
+            <script>
+            SELECT u.id, u.username, u.nickname, u.phone, u.qq, u.preference,
+                   u.role, u.status, u.order_paid, u.card_paid, u.total_paid,
+                   u.created_at, u.updated_at,
+                   (SELECT COALESCE(SUM(o.stay_minutes), 0)
+                      FROM biz_order o
+                     WHERE o.user_id = u.id AND o.deleted = 0) AS total_stay_minutes,
+                   (SELECT c.card_type
+                      FROM biz_monthly_card c
+                     WHERE c.user_id = u.id AND c.deleted = 0
+                       AND c.status = 'ACTIVE'
+                       AND c.start_date &lt;= CURDATE() AND c.end_date &gt;= CURDATE()
+                     ORDER BY c.end_date DESC
+                     LIMIT 1) AS card_type
+              FROM sys_user u
+             WHERE u.deleted = 0
+             <if test="q.keyword != null and q.keyword != ''">
+               AND (u.username LIKE CONCAT('%', #{q.keyword}, '%')
+                    OR u.nickname LIKE CONCAT('%', #{q.keyword}, '%')
+                    OR u.qq       LIKE CONCAT('%', #{q.keyword}, '%'))
+             </if>
+             <if test="q.role != null">
+               AND u.role = #{q.role}
+             </if>
+             <if test="q.status != null">
+               AND u.status = #{q.status}
+             </if>
+             <if test="q.hasCard != null and q.hasCard == true">
+               AND EXISTS (SELECT 1 FROM biz_monthly_card c1
+                            WHERE c1.user_id = u.id AND c1.deleted = 0
+                              AND c1.status = 'ACTIVE'
+                              AND c1.start_date &lt;= CURDATE() AND c1.end_date &gt;= CURDATE()
+                              <if test="q.cardType != null"> AND c1.card_type = #{q.cardType} </if>)
+             </if>
+             <if test="q.hasCard != null and q.hasCard == false">
+               AND NOT EXISTS (SELECT 1 FROM biz_monthly_card c2
+                            WHERE c2.user_id = u.id AND c2.deleted = 0
+                              AND c2.status = 'ACTIVE'
+                              AND c2.start_date &lt;= CURDATE() AND c2.end_date &gt;= CURDATE())
+             </if>
+             ORDER BY ${orderBy}
+            </script>
             """)
-    IPage<SysUser> selectPageByKeyword(IPage<SysUser> page, @Param("keyword") String keyword);
+    IPage<AdminUserVo> selectAdminUserPage(IPage<AdminUserVo> page,
+                                           @Param("q") AdminUserQuery query,
+                                           @Param("orderBy") String orderBy);
+
+    /**
+     * 按 ID 查一个用户的详情，聚合列与列表口径相同。
+     *
+     * <p>⚠️ SELECT 的列与两个子查询是 {@link #selectAdminUserPage} 的<b>复制</b>。
+     * 复制而不是抽公共片段，是因为注解 SQL 要共用片段得另建一个只用来挂
+     * {@code <sql>} 的空方法，那种间接比复制更难读。代价是改口径要改两处 ——
+     * 所以两处都写了指向对方的注释。真要改的话，搜「生效中的月卡」能一次找全。
+     *
+     * @param id 用户 ID
+     * @return 用户详情；不存在或已删除时返回 null
+     */
+    @Select("""
+            SELECT u.id, u.username, u.nickname, u.phone, u.qq, u.preference,
+                   u.role, u.status, u.order_paid, u.card_paid, u.total_paid,
+                   u.created_at, u.updated_at,
+                   (SELECT COALESCE(SUM(o.stay_minutes), 0)
+                      FROM biz_order o
+                     WHERE o.user_id = u.id AND o.deleted = 0) AS total_stay_minutes,
+                   (SELECT c.card_type
+                      FROM biz_monthly_card c
+                     WHERE c.user_id = u.id AND c.deleted = 0
+                       AND c.status = 'ACTIVE'
+                       AND c.start_date <= CURDATE() AND c.end_date >= CURDATE()
+                     ORDER BY c.end_date DESC
+                     LIMIT 1) AS card_type
+              FROM sys_user u
+             WHERE u.deleted = 0 AND u.id = #{id}
+            """)
+    AdminUserVo selectAdminUserById(@Param("id") Long id);
 }

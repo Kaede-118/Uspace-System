@@ -58,13 +58,47 @@ public class RegisterRequest {
     private String phone;
 
     /**
-     * QQ 号。选填，但填写了就必须唯一。
+     * QQ 号。<b>必填，且必须通过群内验证</b>。
      *
-     * <p>模块 11 靠它把群消息的发送者对应到系统用户，重号会让播报与查询
-     * 指向不确定的人。库里有唯一索引 {@code uk_qq} 兜底。
+     * <p>⚠️ <b>它不是选填（2026-10-01 改）</b>。原先允许留空，理由是「注册环节每多一个
+     * 必填项就多一分流失」—— 那条对普通产品成立，对这个系统不成立：
+     *
+     * <ul>
+     *   <li><b>店里没有店员。</b>顾客是谁、什么时候来的、该收多少钱，全靠系统；
+     *       「不绑 QQ 也能进店」等于给自己留一个<b>找不到主的顾客</b> ——
+     *       东西坏了、欠费没付、出了纠纷，都没有任何途径找到人</li>
+     *   <li><b>群里找不到他。</b>模块 11 的播报与查询按 {@code sys_user.qq} 认人，
+     *       没绑的人在任何群消息里都匹配不到，等于在系统里不存在</li>
+     * </ul>
+     *
+     * <p>所以它是<b>硬门槛</b>：必填，而且必须走完群内验证
+     * （{@code UserService#register} 里消费 {@code challengeId}）。
+     * 库里的唯一索引 {@code uk_qq} 兜住并发重号。
+     *
+     * <p>正则不再允许空串 —— 空值由 {@code @NotBlank} 拦下，报错信息也更直白。
      */
-    @Pattern(regexp = "^$|^[1-9]\\d{4,11}$", message = "QQ 号格式不正确")
+    @NotBlank(message = "QQ 号不能为空")
+    @Pattern(regexp = "^[1-9]\\d{4,11}$", message = "QQ 号格式不正确")
     private String qq;
+
+    /**
+     * QQ 号验证凭证（由 {@code POST /api/user/qq-verify} 签发）。选填，
+     * 但<b>填了 {@link #qq} 就必须填它</b>。
+     *
+     * <p>⚠️ <b>刻意不做成 {@code @NotBlank}</b>：它是<b>条件必填</b>（有 QQ 才需要），
+     * 而 Bean Validation 的注解表达不了「与另一个字段联动」的约束 ——
+     * 强行标上去，不填 QQ 的用户也注册不了了。
+     *
+     * <p>真正的校验在 {@code UserService#register} 里：拿它去
+     * {@code QqVerifyService#consume}，换不回一个「已验证」的 QQ 就返回
+     * {@code QQ_VERIFY_REQUIRED}(40935)。
+     *
+     * <p><b>它不是密码，但同样是凭证</b>：谁拿到它，谁就能在验证有效期内
+     * 用那个 QQ 注册一个账号。所以签发接口与状态查询接口<b>都走 POST 请求体</b>，
+     * 不走 URL 查询参数 —— 后者会落进访问日志。
+     */
+    @Size(max = 64, message = "验证凭证长度不合法")
+    private String challengeId;
 
     /**
      * 游玩偏好，逗号分隔的设备类型 code（如 {@code PAIPAI,TAISHOU}）。选填。

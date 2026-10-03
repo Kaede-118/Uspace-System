@@ -3,6 +3,8 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.order.dto.CreatePaymentRequest;
+import com.kaede.uspace.order.dto.PayChannelVo;
+import com.kaede.uspace.order.dto.PayQrVo;
 import com.kaede.uspace.order.dto.PaymentCreateVo;
 import com.kaede.uspace.order.dto.PaymentStatusVo;
 import jakarta.servlet.http.HttpServletRequest;
@@ -17,6 +19,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 支付接口（模块 8）。
@@ -34,9 +38,57 @@ import org.springframework.web.bind.annotation.RestController;
 public class PaymentController {
 
     private final PaymentService paymentService;
+    private final PaymentChannelService paymentChannelService;
+    private final PayQrService payQrService;
 
-    public PaymentController(PaymentService paymentService) {
+    public PaymentController(PaymentService paymentService,
+                             PaymentChannelService paymentChannelService,
+                             PayQrService payQrService) {
         this.paymentService = paymentService;
+        this.paymentChannelService = paymentChannelService;
+        this.payQrService = payQrService;
+    }
+
+    /**
+     * 列出当前门店启用中的收款码，供扫码转账的收银台展示。
+     *
+     * <p><b>与 {@link #channels} 是两个接口而不是一个</b>：通道是「店收不收这种钱」，
+     * 收款码是「钱扫到哪张图上」，两者的更新时机完全不同 ——
+     * 通道由部署配置决定（改一次配置重启），收款码由运营在后台随时改。
+     * 合并成一个接口会让前者的缓存策略被后者拖累。
+     *
+     * <p><b>需登录</b>：收款码贴在店里谁都能看见，但没必要给爬虫抓 ——
+     * 而它出现的场景（结账页、订单详情页）本来就都在登录态之后。
+     *
+     * <p>门店一张码都没配时返回<b>空列表</b>：那是真实的运营状态
+     * （刚部署完还没配），前端要提示「请联系管理员配置收款方式」而不是白屏。
+     *
+     * @return 启用中的收款码，按 sort 升序
+     */
+    @GetMapping("/qr")
+    public ResponseEntity<ApiResult<List<PayQrVo>>> payQrs() {
+        return ResponseEntity.ok(ApiResult.ok(payQrService.listEnabled()));
+    }
+
+    /**
+     * 列出某类收款当前可用的支付通道。
+     *
+     * <p><b>收银台的选项由这里给，前端不要写死</b>：哪些通道开放是部署配置
+     * （{@code uspace.payment.enabled-channels}），哪类收款受理哪些通道是业务规则 ——
+     * 两者都只有服务端知道。前端自己维护一份清单，就会出现「配置改了页面没跟着变」
+     * 以及「选项在那里、点了却报错」。
+     *
+     * <p><b>路径与 {@link #query} 的 {@code /{outTradeNo}} 同前缀，这是安全的</b>：
+     * Spring 的路径匹配里字面量优先于模板变量，所以 {@code /channels} 不会
+     * 被当成一个叫「channels」的订单号。反过来说，若把本方法改到别的路径上，
+     * 就得同时确认没有别的东西依赖这个优先级 —— 保持现状最省事。
+     *
+     * @param targetType 收款类型（订单 / 包场 / 月卡 / 商品），决定过滤掉哪些不受理的通道
+     * @return 可用通道列表，可为空列表
+     */
+    @GetMapping("/channels")
+    public ResponseEntity<ApiResult<List<PayChannelVo>>> channels(@RequestParam PaymentTargetType targetType) {
+        return ResponseEntity.ok(ApiResult.ok(paymentChannelService.listFor(targetType)));
     }
 
     /**

@@ -12,6 +12,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -117,6 +118,28 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResult<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
         log.warn("[异常] 参数类型不匹配：{}", e.getMessage());
         return ApiResult.of(ErrorCode.PARAM_INVALID, "参数 " + e.getName() + " 取值不合法");
+    }
+
+    /**
+     * 处理缺少必需的查询参数，例如不给 {@code targetType} 就调
+     * {@code GET /api/payments/channels}。
+     *
+     * <p><b>为什么必须单独处理</b>：它与上面的类型转换失败是同一类问题 ——
+     * 明明说的是「你的请求少了个参数」，落到兜底分支却会返回
+     * 500「服务异常，请稍后重试」，把调用方的疏忽说成服务端的故障。
+     * 相邻那条类型转换分支当初也是这么补的：MockMvc 的用例总是把参数填齐，
+     * 走不到这条路上，只有起真实服务发一个残缺请求才看得见。
+     *
+     * <p>提示里带上参数名：调试接口的人一眼能看出漏了哪个，
+     * 不必回去翻接口文档。
+     *
+     * @param e 缺少参数异常
+     * @return 400 响应
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ApiResult<Void>> handleMissingParam(MissingServletRequestParameterException e) {
+        log.warn("[异常] 缺少必需的请求参数：{}", e.getMessage());
+        return ApiResult.of(ErrorCode.PARAM_INVALID, "缺少必需的参数 " + e.getParameterName());
     }
 
     /**

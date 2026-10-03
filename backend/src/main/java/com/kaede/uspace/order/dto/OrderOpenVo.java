@@ -83,14 +83,34 @@ public class OrderOpenVo {
     private String message;
 
     /**
+     * <b>此刻</b>是不是正处在某场包场时段内。
+     *
+     * <p>用来在密码弹窗上多显示一句「包场参与者全员都要开门计时，离开时各自离店结账」
+     * —— 那条规则只在包场时段内成立：散客不需要知道，包场前那段普通消费也不需要。
+     *
+     * <p>⚠️ <b>判据是「此刻落在包场时段内」，不是「订单挂没挂 bookingId」</b>：
+     * 参与者比包场早到很多时（比如提前一天来踩点），订单照样会挂上 bookingId
+     * （见 {@code BookingService#findUpcomingBookingForParticipant}），
+     * 但他此刻就是在普通消费 —— 弹窗上冒出一句包场的话，会让他以为自己在包场里，
+     * 进而以为现在不计费。<b>这个错误不报任何警，只是让他误会。</b>
+     *
+     * <p>⚠️ 这个定性必须由<b>后端</b>给：与 {@code BookingScheduleVo.ongoing} 同一条理由 ——
+     * 客户端时钟不可信，口径只能有一处定义。
+     */
+    private boolean inBooking;
+
+    /**
      * 由实体构造视图。
      *
      * @param order       订单实体
      * @param renewed     本次是否续期过
      * @param regenerated 续期是否换了新密码
+     * @param inBooking   <b>此刻</b>是否落在某场包场时段内 ——
+     *                    由调用方查库判定后传入，本类不查库也不认识「包场」这个业务名词
      * @return 开门结果视图
      */
-    public static OrderOpenVo of(Order order, boolean renewed, boolean regenerated) {
+    public static OrderOpenVo of(Order order, boolean renewed, boolean regenerated,
+                                 boolean inBooking) {
         OrderOpenVo vo = new OrderOpenVo();
         vo.setOrderId(order.getId());
         vo.setOrderNo(order.getOrderNo());
@@ -101,6 +121,7 @@ public class OrderOpenVo {
         vo.setRenewed(renewed);
         vo.setRegenerated(regenerated);
         vo.setMessage(messageOf(order, renewed, regenerated));
+        vo.setInBooking(inBooking);
         return vo;
     }
 

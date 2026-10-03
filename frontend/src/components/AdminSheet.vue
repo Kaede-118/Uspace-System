@@ -15,6 +15,10 @@
  * <p>⚠️ <b>错误必须走 {@code error} 属性，不要在弹层里 toast</b>：
  * {@code ToastHost} 的层级是 200，比本弹层的遮罩（450）低，提示会被压在下面 ——
  * 表现为「点了保存，什么都没发生」，而实际是保存失败了。
+ *
+ * <p><b>两种形态，按屏宽切换</b>（见样式里那条 768px 断点）：
+ * 手机上贴底（手指够得着按钮），宽屏上居中（后台的主战场是 PC 浏览器，
+ * 贴底的弹层会落在屏幕最下沿、离视线中心很远）。
  */
 import { watch, onUnmounted } from 'vue'
 
@@ -93,6 +97,7 @@ onUnmounted(() => {
   inset: 0;
   z-index: 450;
   display: flex;
+  /* 手机形态：贴底。宽屏上由下面那条断点改成居中 */
   align-items: flex-end;
   justify-content: center;
   background: rgba(43, 35, 64, 0.45);
@@ -114,6 +119,36 @@ onUnmounted(() => {
   padding: var(--sp-4) var(--sp-5) calc(var(--sp-4) + var(--safe-bottom));
   border-radius: var(--r-card) var(--r-card) 0 0;
   background: var(--c-bg);
+}
+
+/*
+ * 宽屏：改成居中对话框。
+ *
+ * 运营后台的主战场是 PC 浏览器（内容区 900px 居中），而贴底的弹层落在屏幕
+ * 最下沿、离视线中心很远 —— 看起来就是「没对齐」。手机上仍保持贴底：
+ * 那是手指够得着、且不会被手势条遮住按钮的位置。
+ *
+ * ⚠️ 居中不怕内容超高：{@code .admin-sheet} 的 max-height 是 80vh（小于视口），
+ * 永远不会顶出视口 —— 而遮罩上的 overflow-y: auto 遇上「居中 + 内容超高」时，
+ * 溢出的上半截是滚不到的。将来调大 max-height 时先想一下这件事。
+ *
+ * ⚠️ 断点 768px：**现在全项目只剩这一处**（2026-10-03）——
+ * 用户端已不再为宽屏另做一套尺寸（见 base.css 的 --page-max），
+ * 而「电脑上居中、手机上贴底」是操作习惯，与宽度体系无关，所以留着。
+ */
+@media (min-width: 768px) {
+  .admin-sheet__mask {
+    align-items: center;
+    /* 四周留出一点遮罩，免得弹层顶天立地 */
+    padding: var(--sp-6) var(--sp-4);
+  }
+
+  .admin-sheet {
+    /* 居中时四角都要圆，只圆上面两个会像个从底下抽出来的抽屉 */
+    border-radius: var(--r-card);
+    /* 比手机的 88vh 再收一点，把四周的边距让出来 */
+    max-height: 80vh;
+  }
 }
 
 .admin-sheet__head {

@@ -30,8 +30,9 @@ public class ProductSaveRequest {
     /**
      * 封面图地址（站内相对路径）。
      *
-     * <p>图片本身走模块 1 的上传接口拿到路径，这里只存那个路径 ——
-     * 与头像、banner 的做法一致。
+     * <p>图片由 {@code POST /api/admin/products/cover} 上传后拿到路径，
+     * 这里只存那个路径 —— 与头像、背景图的做法一致。
+     * <b>上传接口不写库</b>，所以「传了图又取消表单」不会改动这条记录。
      */
     @Size(max = 255, message = "封面图地址过长")
     private String cover;

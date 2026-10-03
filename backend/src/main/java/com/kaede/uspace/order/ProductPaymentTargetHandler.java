@@ -62,14 +62,20 @@ public class ProductPaymentTargetHandler implements PaymentTargetHandler {
     /**
      * {@inheritDoc}
      *
-     * <p>商品只受理线上通道。它没有「上传凭证 + 管理员核销」这条降级路径
-     * （人工核销接口是订单专用的），放行 {@code QR_UPLOAD} 的话，
-     * 发起支付会返回一个没有任何支付参数的「成功」，单子则永远停在待支付 ——
-     * 表现为「买了但付不了款」，且线上没有任何报错。
+     * <p><b>商品是「提交即交付」的</b>：用户传了付款截图就算钱收到了 ——
+     * 购买单当场转 {@code PAID}，库存当场扣减（都在 {@link #markPaid} 里）。
+     *
+     * <p>为什么商品可以这么激进：无人值守店里没有店员，<b>付了钱自己取</b>，
+     * 货从货架上被拿走的那一刻就已经交付完成了 —— 系统里再等管理员复核，
+     * 拦住的只是「用户已经拿到手的东西」的状态显示，拦不住任何实际损失。
+     * 这一点与包场、月卡正好相反（那两样发出去还能被人用掉）。
+     *
+     * <p>代价是复核不通过时<b>不能自动回退</b>（库存已扣、累计消费已加），
+     * 只能人工处置 —— 后台的 {@code AdminProofVo.delivered} 会把它标出来。
      */
     @Override
-    public boolean supportsChannel(PaymentChannel channel) {
-        return channel != null && PaymentChannel.isOnline(channel.name());
+    public boolean deliverOnSubmit() {
+        return true;
     }
 
     /**
@@ -85,6 +91,22 @@ public class ProductPaymentTargetHandler implements PaymentTargetHandler {
         }
         if (!ProductOrderStatus.PENDING_PAYMENT.name().equals(order.getStatus())) {
             return BizResult.fail(ErrorCode.PRODUCT_STATUS_INVALID, "该商品订单当前不需要支付");
+        }
+        return BizResult.ok(toTarget(order));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>归属校验仍认购买人。状态不校验 —— 走「提交即交付」的话，
+     * 用户提交完的那一刻购买单就已经是 {@code PAID} 了，他若想补个流水号，
+     * {@code loadForPay} 会直接拒掉，而那是正常操作。
+     */
+    @Override
+    public BizResult<PaymentTarget> loadForProof(Long id, Long userId) {
+        ProductOrder order = orderMapper.selectById(id);
+        if (order == null || !order.getUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.PRODUCT_ORDER_NOT_FOUND);
         }
         return BizResult.ok(toTarget(order));
     }

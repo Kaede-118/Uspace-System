@@ -2,7 +2,6 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
-import com.kaede.uspace.order.dto.ConfirmPaymentRequest;
 import com.kaede.uspace.order.dto.CreatePaymentRequest;
 import com.kaede.uspace.order.dto.PaymentCreateCommand;
 import com.kaede.uspace.order.dto.PaymentCreateResult;
@@ -12,11 +11,10 @@ import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
 import com.kaede.uspace.order.dto.PaymentStatusVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
-import com.kaede.uspace.order.entity.Order;
-import com.kaede.uspace.order.mapper.OrderMapper;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
@@ -26,7 +24,7 @@ import java.util.List;
 /**
  * 支付服务（模块 8）。
  *
- * <p>职责：统一发起支付、处理支付平台回调、主动查单补偿、管理员人工核销。
+ * <p>职责：统一发起支付、处理支付平台回调、主动查单补偿、付款凭证落账。
  *
  * <p><b>它不认识订单，也不认识包场</b> —— 所有与具体实体的打交道都通过
  * {@link PaymentTargetHandler} 完成。这样回调链路只写一遍，
@@ -49,17 +47,17 @@ import java.util.List;
 public class PaymentService {
 
     private final PaymentGateway paymentGateway;
+    private final PaymentProperties properties;
     private final List<PaymentTargetHandler> handlers;
-    private final OrderMapper orderMapper;
     private final SysUserMapper userMapper;
 
     public PaymentService(PaymentGateway paymentGateway,
+                          PaymentProperties properties,
                           List<PaymentTargetHandler> handlers,
-                          OrderMapper orderMapper,
                           SysUserMapper userMapper) {
         this.paymentGateway = paymentGateway;
+        this.properties = properties;
         this.handlers = handlers;
-        this.orderMapper = orderMapper;
         this.userMapper = userMapper;
     }
 
@@ -91,16 +89,27 @@ public class PaymentService {
             return BizResult.fail(ErrorCode.PARAM_INVALID, "不支持的支付目标类型");
         }
 
+        // 本店收不收这条通道。放在查目标之前 —— 通道没开放时不必去查库，
+        // 而且这个判断与结果无关，与给前端展示选项用的是同一个
+        // （PaymentChannelService#listFor 也调它），两处必须一致：
+        // 判得不一样就会出现「页面上选得到、点下去报错」
+        PaymentChannel channel = request.getChannel();
+        if (channel == null || !properties.isChannelEnabled(channel.name())) {
+            log.warn("[支付] 拒绝使用未开放的通道 targetType={} channel={}",
+                    request.getTargetType(), channel);
+            return BizResult.fail(ErrorCode.PAYMENT_CHANNEL_DISABLED);
+        }
+
         BizResult<PaymentTarget> loaded = handler.loadForPay(request.getTargetId(), userId);
         if (!loaded.isSuccess()) {
             return BizResult.fail(loaded.getError(), loaded.getMessage());
         }
         PaymentTarget target = loaded.getData();
-        PaymentChannel channel = request.getChannel();
 
-        // 有些收款方式没有人工核销的降级路径（月卡就是），而那条路径不调网关，
-        // 会返回一个「成功」却没有任何支付参数 —— 用户以为付得了款，
-        // 单据却永远停在待支付，且线上没有任何报错。宁可在这一步就拒掉
+        // 这类收款受不受理这条通道。有些收款方式没有人工核销的降级路径（月卡就是），
+        // 而那条路径不调网关，会返回一个「成功」却没有任何支付参数 ——
+        // 用户以为付得了款，单据却永远停在待支付，且线上没有任何报错。
+        // 宁可在这一步就拒掉
         if (!handler.supportsChannel(channel)) {
             return BizResult.fail(ErrorCode.PARAM_INVALID, "该支付方式暂不支持此类收款，请选择线上支付");
         }
@@ -358,56 +367,74 @@ public class PaymentService {
     }
 
     // ==================================================================
-    // 人工核销（降级路径）
+    // 凭证落账（扫码转账，2026-09-30 起投产的唯一收款方式）
     // ==================================================================
 
     /**
-     * 管理员人工核销订单。
+     * 用户提交付款凭证后的落账 —— 与线上回调写的是同一批字段、
+     * 走的是同一个处理器的 {@code markPaid}、同一套累计分派。
      *
-     * <p>用户上传付款截图、管理员核对到账后确认。与线上回调写的是同一批字段、
-     * 走的是同一个处理器的 {@code markPaid}，区别只在 {@code confirmedBy}
-     * 记下是哪位管理员确认的 —— 线上回调这里为空，表示系统自动确认。
+     * <p><b>两处调用它，时机不同</b>：
+     * <ul>
+     *   <li><b>订单与商品</b>在用户提交凭证那一刻调（「提交即交付」）——
+     *       订单当场转 {@code PAID}，欠费拦截随之解除</li>
+     *   <li><b>包场与月卡</b>在管理员复核通过时调 ——
+     *       邀请令牌与月卡都产生在这一步</li>
+     * </ul>
+     * 哪一类走哪条路由由 {@code PaymentTargetHandler#deliverOnSubmit} 说了算，
+     * 本方法不判断类型。
      *
-     * <p><b>没有凭证就不给核销</b>：核销是「看过了、确认收到钱」的动作，
-     * 没有截图就等于凭空把订单标成已支付。这条校验拦的是误操作。
+     * <p><b>传播行为取 MANDATORY</b>：它必须跑在调用方的事务里 ——
+     * 否则会出现「凭证落了库、钱没落账」或反过来的半成品状态，
+     * 而这两种状态都没人盯着（凭证的复核状态会显示成正常，钱却没进来）。
+     * 取 MANDATORY 而不是 REQUIRED：后者在没有事务时会自己开一个，
+     * 那正是要避免的情形；MANDATORY 在没有事务时直接抛异常，
+     * 把问题暴露在开发期而不是生产期。
      *
-     * @param orderId 订单 ID
-     * @param adminId 操作的管理员 ID
-     * @param request 核销请求
-     * @return 成功返回空数据
+     * <p>与 {@code applyNotify} 的关系：那是<b>回调</b>的入口（带验签、幂等、
+     * 金额核对），这是<b>凭证</b>的入口。两者最终都落到 {@code markPaid} +
+     * {@code accumulatePaid}，所以「钱到账」这件事只有一套写法。
+     *
+     * @param target      支付目标
+     * @param channel     实际收款通道，凭证路径恒为 {@link PaymentChannel#QR_UPLOAD}
+     * @param paymentNo   用户填写的交易流水号，可空
+     * @param confirmedBy 确认人：系统自动落账传 null，管理员复核传其 ID
      */
-    @Transactional
-    public BizResult<Void> confirmPayment(Long orderId, Long adminId, ConfirmPaymentRequest request) {
-        Order order = orderMapper.selectById(orderId);
-        if (order == null) {
-            return BizResult.fail(ErrorCode.ORDER_NOT_FOUND);
-        }
-        if (!OrderStatus.PENDING_PAYMENT.name().equals(order.getStatus())) {
-            return BizResult.fail(ErrorCode.ORDER_STATUS_INVALID, "只有待支付的订单才能核销");
-        }
-        if (order.getPaymentProof() == null || order.getPaymentProof().isBlank()) {
-            return BizResult.fail(ErrorCode.PAYMENT_PROOF_REQUIRED);
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void settleByProof(PaymentTarget target, PaymentChannel channel,
+                              String paymentNo, Long confirmedBy) {
+        // 已经落过账的直接返回。走到这里有两种情形，都是正常的：
+        // 并发双击的第二次；或者管理员复核一笔「提交即交付」的凭证 ——
+        // 那笔在用户提交那一刻就已经落过账了，复核只是登记
+        if (target.isPaid()) {
+            log.info("[支付] 该笔已支付，凭证落账跳过 outTradeNo={}", target.getOutTradeNo());
+            return;
         }
 
-        PaymentTargetHandler handler = handlerOf(PaymentTargetType.ORDER);
-        PaymentTarget target = handler.loadByOutTradeNo(order.getOrderNo());
-        if (target == null) {
-            return BizResult.fail(ErrorCode.ORDER_NOT_FOUND);
+        PaymentTargetHandler handler = handlerOf(target.getType());
+        if (handler == null) {
+            // 到不了这里：target 是由某个处理器造出来的。真出现说明有人改了
+            // 处理器的注册方式，必须让人看见而不是静默不落账
+            log.error("[支付] 凭证落账时收款类型认不出，未落账 target={} 单号={}",
+                    target.getType(), target.getOutTradeNo());
+            return;
         }
 
-        String paymentNo = request.getPaymentNo() == null || request.getPaymentNo().isBlank()
-                ? null : request.getPaymentNo().trim();
-        boolean changed = handler.markPaid(target, PaymentChannel.QR_UPLOAD, paymentNo,
-                LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS), adminId);
-        if (changed) {
-            // 走与线上回调同一套分派，而不是直接写死累加到订单列 ——
-            // 人工核销目前只支持订单，但把口径收在一处，
-            // 将来要支持别的收款时不必回头找这里
-            accumulatePaid(handler, target);
+        boolean changed = handler.markPaid(target, channel, paymentNo,
+                LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS), confirmedBy);
+        if (!changed) {
+            // markPaid 带状态守卫，返回 0 说明这一瞬间状态被改动了 ——
+            // 与回调那条路上的处理一致：视为已被并发处理，不再累加消费额
+            log.info("[支付] 凭证落账未改动任何记录，视为已被并发处理 outTradeNo={}",
+                    target.getOutTradeNo());
+            return;
         }
-        log.info("[支付] 管理员人工核销 orderNo={} 管理员={} 交易号={}",
-                order.getOrderNo(), adminId, paymentNo);
-        return BizResult.ok(null);
+
+        accumulatePaid(handler, target);
+        log.info("[支付] 凭证落账完成 outTradeNo={} 通道={} 类型={} 金额={} 累计={} 确认人={}",
+                target.getOutTradeNo(), channel, target.getType(), target.getAmount(),
+                handler.paidCategory().getLabel(),
+                confirmedBy == null ? "系统自动" : confirmedBy);
     }
 
     // ==================================================================

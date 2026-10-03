@@ -1,0 +1,194 @@
+package com.kaede.uspace.qqbot;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kaede.uspace.qqbot.protocol.OneBotAction;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * 出站客户端：往 QQ 群发消息（模块 11）。
+ *
+ * <p>它同时是<b>连接状态的持有者</b> —— 反向 WebSocket 只有一条连接，
+ * 谁连着、还开没开，本类是唯一知道的地方。NapCat 连上来时
+ * {@link #attach}，断开时 {@link #detach}，发消息时从这里取。
+ *
+ * <h3>为什么持有一条而不是多条</h3>
+ *
+ * <p>一个后端通常只接一个 NapCat（一个 QQ 号 = 一个协议端）。用列表支持多条，
+ * 就得回答「发消息时发给哪一条」「两条都发会不会重复」这两个问题，
+ * 而当前场景下答案都是「不需要」。{@link AtomicReference} 把「只有一条」
+ * 这个假设写进了类型里，将来真要接多个机器人时改起来也一目了然。
+ *
+ * <h3>绝不抛异常</h3>
+ *
+ * <p>本类的调用方包括订单的 {@code @TransactionalEventListener} 回调。
+ * 让一个「群消息没发出去」把用户的操作搅黄，是荒唐的 ——
+ * 所以所有失败路径都是记日志 + 返回 false，把处置权留给调用方（而调用方一般也 ignore）。
+ */
+@Slf4j
+@Component
+@ConditionalOnProperty(name = "uspace.qqbot.enabled", havingValue = "true")
+public class OneBotClient {
+
+    /**
+     * 单条消息的发送时限（毫秒）。超过就关闭该会话。
+     *
+     * <p>⚠️ <b>这条时限是「NapCat 卡住不读」的唯一防线</b>。播报的触发点
+     * （{@code @TransactionalEventListener(AFTER_COMMIT)}）跑在<b>用户的请求线程</b>上 ——
+     * 发送一直阻塞的话，用户点「结束使用」的请求就跟着一直不返回，
+     * 而且此时数据库连接也还没归还（AFTER_COMMIT 监听器跑在连接归还之前）。
+     *
+     * <p>拿线程池兜是兜不住的：队列满了照样阻塞调用方，无界队列则会 OOM。
+     * 超时关连接才是对的处置 —— 会话一关，NapCat 便按它自己配的
+     * {@code reconnect_interval} 重连，而反向连接的重连本来就是协议端的责任。
+     *
+     * <p>2 秒是宽松的：本机或局域网写一条几百字节的消息是微秒级的，
+     * 真卡到 2 秒说明这条连接已经没救了。
+     */
+    private static final int SEND_TIME_LIMIT_MILLIS = 2_000;
+
+    /**
+     * 单次会话的发送缓冲上限（字节）。
+     *
+     * <p>512KB 对群消息来说远超实际需要（一条播报也就一两百字节）。
+     * 设这个值是为了给「对端只连不发」这种情况一个上限 ——
+     * 没有上限的话，一个僵死的连接会让待发消息在内存里无限堆积。
+     */
+    private static final int BUFFER_SIZE_LIMIT_BYTES = 512 * 1024;
+
+    /** 当前连接。null 表示 NapCat 没连上 */
+    private final AtomicReference<WebSocketSession> session = new AtomicReference<>();
+
+    /** 出站消息的序号，拼进 {@code echo} 供日志追踪 */
+    private final AtomicLong echoSequence = new AtomicLong();
+
+    private final ObjectMapper objectMapper;
+
+    /**
+     * 构造器注入。
+     *
+     * @param objectMapper Jackson 序列化器，用容器里那个（与 Web 层同一份配置）
+     */
+    public OneBotClient(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 登记一条新连接。
+     *
+     * <p>⚠️ <b>存进去的是包装过的会话，不是原始会话</b>：
+     * {@code WebSocketSession} 的 {@code sendMessage} <b>不是线程安全的</b>，
+     * 而播报来自线程池、指令回复来自 WebSocket 的处理线程 —— 两者可能同时发送。
+     * 并发写同一个会话会抛 {@code IllegalStateException}（有时是消息交错），
+     * 这类故障在测试里几乎撞不到，只在真实并发下偶发。
+     * {@link ConcurrentWebSocketSessionDecorator} 用一把锁把它们串起来，
+     * 这正是它存在的意义。
+     *
+     * <p><b>新连接顶掉旧连接</b>：NapCat 重连时，旧连接的 {@code afterConnectionClosed}
+     * 可能还没触发，此时有两份引用。留下旧的那份会让消息发进一个已经没人读的会话里 ——
+     * 于是「机器人明明连着却不说话」。所以直接顶替，并把旧的关掉。
+     *
+     * @param rawSession 刚建立的原始会话
+     */
+    public void attach(WebSocketSession rawSession) {
+        WebSocketSession wrapped = new ConcurrentWebSocketSessionDecorator(
+                rawSession, SEND_TIME_LIMIT_MILLIS, BUFFER_SIZE_LIMIT_BYTES);
+        WebSocketSession previous = session.getAndSet(wrapped);
+        if (previous != null && previous.isOpen()) {
+            log.info("[QQ机器人] 新连接顶替了尚未关闭的旧连接 oldSessionId={}", previous.getId());
+            closeQuietly(previous);
+        }
+        log.info("[QQ机器人] OneBot 连接已建立 sessionId={}", rawSession.getId());
+    }
+
+    /**
+     * 注销一条连接。
+     *
+     * <p>⚠️ <b>要比对一下再清空</b>：连接断开是异步的，可能出现
+     * 「旧连接断开的事件在新连接建立之后才到」。不比对的话，那个迟到的
+     * {@code detach} 会把刚建立的新连接清掉，之后所有消息都发不出去，
+     * 而日志里只有一句正常的「连接已断开」。
+     *
+     * <p>比对用 {@code sessionId} 而不是对象引用 —— {@link #attach} 存进去的是装饰器，
+     * 与这里收到的原始会话不是同一个对象，用 {@code ==} 永远不相等。
+     *
+     * @param rawSession 刚断开的原始会话
+     */
+    public void detach(WebSocketSession rawSession) {
+        WebSocketSession current = session.get();
+        if (current != null && current.getId().equals(rawSession.getId())) {
+            session.compareAndSet(current, null);
+            log.info("[QQ机器人] OneBot 连接已断开 sessionId={}", rawSession.getId());
+        }
+    }
+
+    /**
+     * 往群里发一条纯文本消息。
+     *
+     * <p>没有连接、连接已关闭、序列化失败、发送抛异常 —— 四种情况一律
+     * 记日志 + 返回 false，<b>绝不往外抛</b>（理由见类注释）。
+     *
+     * @param groupId 群号
+     * @param text    消息文本，按纯文本发送（CQ 码会被转义，见 {@link OneBotAction}）
+     * @return 确实发出去了返回 true
+     */
+    public boolean sendGroupMessage(Long groupId, String text) {
+        if (groupId == null || text == null || text.isEmpty()) {
+            return false;
+        }
+        WebSocketSession current = session.get();
+        if (current == null || !current.isOpen()) {
+            // 这是「正常但值得知道」的状态：NapCat 没跑、或刚断线正在重连。
+            // 用 WARN 而不是 ERROR —— 错误日志应当留给真正需要人介入的事
+            log.warn("[QQ机器人] 当前没有可用的 OneBot 连接，消息未发出 groupId={}", groupId);
+            return false;
+        }
+
+        String echo = "uspace-" + echoSequence.incrementAndGet();
+        try {
+            OneBotAction action = OneBotAction.sendGroupMessage(groupId, text, echo);
+            current.sendMessage(new TextMessage(objectMapper.writeValueAsString(action)));
+            log.info("[QQ机器人] 已发送 groupId={} echo={} 内容={}", groupId, echo, text);
+            return true;
+        } catch (Exception e) {
+            log.error("[QQ机器人] 发送群消息失败 groupId={} echo={}", groupId, echo, e);
+            return false;
+        }
+    }
+
+    /**
+     * 当前是否连着。
+     *
+     * <p>供排查与测试用。业务代码不该拿它做判断 —— 判断完到发送之间连接可能就断了，
+     * 直接调 {@link #sendGroupMessage} 并看返回值才是准的。
+     *
+     * @return 有连接且连接处于打开状态时返回 true
+     */
+    public boolean isConnected() {
+        WebSocketSession current = session.get();
+        return current != null && current.isOpen();
+    }
+
+    /**
+     * 关掉一个会话并吞掉异常。
+     *
+     * <p>关闭失败没什么可做的（连接已经没用了），但异常不能冒到调用方 ——
+     * 那会把「顶替旧连接」这个正常动作变成一个错误。
+     *
+     * @param session 要关闭的会话
+     */
+    private void closeQuietly(WebSocketSession session) {
+        try {
+            session.close();
+        } catch (Exception e) {
+            log.debug("[QQ机器人] 关闭旧连接时出错（可忽略）sessionId={}", session.getId(), e);
+        }
+    }
+}

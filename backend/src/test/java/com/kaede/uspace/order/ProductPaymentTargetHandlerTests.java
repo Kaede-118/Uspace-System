@@ -155,14 +155,17 @@ class ProductPaymentTargetHandlerTests {
     }
 
     @Test
-    @DisplayName("通道：商品只受理线上支付")
-    void supportsChannel_onlyOnline() {
-        assertTrue(handler.supportsChannel(PaymentChannel.WXPAY_JSAPI));
-        assertTrue(handler.supportsChannel(PaymentChannel.ALIPAY_WAP));
-        assertFalse(handler.supportsChannel(PaymentChannel.QR_UPLOAD),
-                "商品没有人工核销这条降级路径 —— 放行的话用户会拿到一个"
-                        + "没有任何支付参数的「成功」，而单子永远停在待支付");
-        assertFalse(handler.supportsChannel(null), "传 null 时不能抛异常");
+    @DisplayName("通道：商品受理全部通道，包括扫码转账")
+    void supportsChannel_acceptsAll() {
+        for (PaymentChannel channel : PaymentChannel.values()) {
+            assertTrue(handler.supportsChannel(channel),
+                    "2026-09-30 起四类收款都受理扫码转账 —— 付款凭证统一成 "
+                            + "biz_payment_proof 之后，不再有「人工核销接口是订单专用的」"
+                            + "那条限制，本处理器也就不需要覆写 supportsChannel 了");
+        }
+        assertTrue(handler.supportsChannel(null),
+                "传 null 不抛异常即可（默认实现与通道无关，直接放行；"
+                        + "真实调用路径上 null 在更早一步就被挡掉了）");
     }
 
     // ==================================================================

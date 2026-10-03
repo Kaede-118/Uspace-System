@@ -83,6 +83,14 @@ export default [
     meta: { title: '游玩偏好' }
   },
   {
+    // 计费规则（价目表）。内容与 docs/用户版计费与优惠说明.md 一一对应，
+    // 数字全部来自 GET /api/billing/rules（月卡那节来自 /api/cards/types）
+    path: '/pricing',
+    name: 'pricing',
+    component: () => import('@/views/user/PricingView.vue'),
+    meta: { title: '计费规则' }
+  },
+  {
     path: '/cards',
     name: 'cards',
     component: () => import('@/views/user/CardWalletView.vue'),

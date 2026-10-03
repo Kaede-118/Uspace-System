@@ -63,7 +63,7 @@ CREATE TABLE `sys_user` (
   --    混进去会让「只改昵称」的表单顺手把头像清掉，而且不报任何错。
   --    改它们走独立的上传接口 POST /api/user/me/avatar 与 /me/banner
   `avatar`        VARCHAR(255)  DEFAULT NULL            COMMENT '头像地址（站内相对路径），如 /uploads/avatar/xiaofeng_12.png。NULL 表示用默认头像',
-  `banner`        VARCHAR(255)  DEFAULT NULL            COMMENT '自定义背景图地址（站内相对路径），约 6:1 横长图，用作个人卡片背景。NULL 表示用纯色兜底',
+  `banner`        VARCHAR(255)  DEFAULT NULL            COMMENT '自定义背景图地址（站内相对路径），约 3:1 横长图，用作个人卡片背景。NULL 表示用纯色兜底',
 
   `role`          VARCHAR(20)   NOT NULL DEFAULT 'USER' COMMENT '角色：USER 普通用户 / ADMIN 管理员',
   `status`        TINYINT       NOT NULL DEFAULT 1      COMMENT '状态：1=正常 0=禁用',
@@ -186,6 +186,41 @@ CREATE TABLE `biz_closure` (
   PRIMARY KEY (`id`),
   KEY `idx_store_range` (`store_id`, `start_at`, `end_at`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '停业记录';
+
+
+-- ============================================================================
+-- 模块 7：免费时段（活动免费）
+--
+-- 运营者排一段「不计费」的时间（如跨年 20:00 – 次日 02:00 全场免费），
+-- 区间内所有订单的实收为 0。
+--
+-- ⚠️ 它与上面那张停业表【性质不同】，别混：
+--   停业管【准入】（能不能进），免费时段管【计费】（要不要钱）——
+--   店里照常营业、人照进、门照开，只是账单算 0。
+--   形态相同（都是时间区间 + 后台增删改查），所以放在一起便于对照。
+--
+-- ⚠️ 时段同样是【半开区间】[start_at, end_at)：20:00 起免费、02:00 起恢复收费。
+--   两场活动首尾相接（18:00–20:00 与 20:00–22:00）因此不算重叠。
+--
+-- ⚠️ 计费侧是【段级置零】而不是【把区间剪掉】—— 这一点与包场【刻意不同】：
+--   段照常算档数、单价、封顶，只把实收置 0，账单因此说得清「这场活动省了多少」。
+--   若像包场那样把区间剪掉，顾客只会看到一个没有来由的 0 元，
+--   办活动的意义（让人看见便宜）也就丢了一半。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_free_period`;
+CREATE TABLE `biz_free_period` (
+  `id`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `store_id`   BIGINT       NOT NULL                COMMENT '门店 ID',
+  `start_at`   DATETIME     NOT NULL                COMMENT '免费开始时刻（含），此刻起不计费',
+  `end_at`     DATETIME     NOT NULL                COMMENT '免费结束时刻（不含），此刻起恢复计费',
+  `reason`     VARCHAR(255) DEFAULT NULL            COMMENT '活动名称，如「跨年活动」',
+  `created_by` BIGINT       DEFAULT NULL            COMMENT '登记人（管理员 ID）',
+  `created_at` DATETIME     NOT NULL                COMMENT '创建时间',
+  `updated_at` DATETIME     NOT NULL                COMMENT '更新时间',
+  `deleted`    TINYINT      NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  KEY `idx_store_range` (`store_id`, `start_at`, `end_at`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '免费时段（活动）';
 
 
 -- ============================================================================
@@ -478,8 +513,9 @@ CREATE TABLE `biz_order` (
 
   -- 计费结果（分段存储，供账单分类展示与事后追溯）
   -- ⚠️ 金额列的口径：段金额与合计都是【实收】（已封顶、已含优惠），
-  --    discount_amount（月度累计优惠）与 card_free_amount（月卡免除）都只是说明性字段、
-  --    互不重叠，也都不可再用「合计 − 优惠」减第二次
+  --    discount_amount（月度累计优惠）、card_free_amount（月卡免除）与
+  --    activity_free_amount（活动免费）都只是说明性字段、互不重叠，
+  --    也都不可再用「合计 − 优惠」减第二次
   `day_minutes`      INT           DEFAULT NULL            COMMENT '日场时长（分钟）',
   `day_amount`       DECIMAL(10,2) DEFAULT NULL            COMMENT '日场费用（实收，已封顶、已含优惠）',
   `night_minutes`    INT           DEFAULT NULL            COMMENT '夜场时长（分钟）',
@@ -487,7 +523,16 @@ CREATE TABLE `biz_order` (
   `total_amount`     DECIMAL(10,2) DEFAULT NULL            COMMENT '实收合计 = 日场 + 夜场',
   `discount_amount`  DECIMAL(10,2) NOT NULL DEFAULT 0.00   COMMENT '月度累计优惠为本单省下的金额，说明性字段，已包含在 total_amount 中',
   `card_free_amount` DECIMAL(10,2) NOT NULL DEFAULT 0.00   COMMENT '月卡为本单免掉的金额（不持卡时本单应付的金额，已含月度优惠价），说明性字段，已从 total_amount 中扣除',
+  `activity_free_amount` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT '免费活动为本单免掉的金额，说明性字段，已从 total_amount 中扣除。⚠️ 不含被月卡覆盖的段（那部分记在 card_free_amount）—— 月卡用户本来就免费，活动没为他省下什么',
   `payable_amount`   DECIMAL(10,2) DEFAULT NULL            COMMENT '应付 = total_amount（预留独立列，供将来优惠券、押金等非计费项）',
+  -- 分段账单快照（2026-10-03 加）：结算那一刻 BillingResult + freeByBooking 的 JSON 序列化。
+  --   day/night 两列只是它的【汇总投影】—— 段的边界、档数、单价、封顶与免单标记
+  --   都装不进「合计」里，而订单详情页要按段展示「X 档 × ¥Y」。
+  --   NULL = 尚未结算，或快照机制上线前结算的老订单（详情接口会按当前规则重算，
+  --   金额与上面几列完全一致才展示）。
+  --   ⚠️ 这里用 JSON 而不是拆列，与「退款分四列」的取舍不同：段是【变长列表】
+  --   （跨几天的订单能切出十几段、每段十余个字段），拆列拆不出来。
+  `bill_snapshot`    JSON          DEFAULT NULL            COMMENT '结算时的分段账单快照（BillingResult + freeByBooking 的 JSON），供订单详情展示分段明细与事后追溯。NULL=未结算或快照机制上线前的老订单',
 
   -- 状态
   -- 默认值刻意保留 'CREATED' 而不是改成 'IN_USE'：正常业务里这一列总是被显式赋值，
@@ -499,7 +544,10 @@ CREATE TABLE `biz_order` (
   -- 支付（信任制：离场后才付款）
   --   通道按用户浏览器环境自动分流，商户订单号 out_trade_no 由本表 order_no 充当
   `payment_method`  VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道：WXPAY_JSAPI 微信内浏览器 / WXPAY_H5 微信外手机浏览器 / ALIPAY_WAP 支付宝手机网站支付 / QR_UPLOAD 传截图人工核销（降级）',
-  `payment_proof`   VARCHAR(255)  DEFAULT NULL            COMMENT '支付截图存储路径，仅 QR_UPLOAD（人工核销降级路径）时必填',
+  -- ⚠️ 本列 2026-09-30 起【已废弃】：付款凭证改由 biz_payment_proof 表承载
+  --   （四类收款共用一个入口，且复核状态、流水号索引都不是一列能装下的）。
+  --   列本身保留 —— DROP 不可逆，历史数据不该丢。新代码不再读写它。
+  `payment_proof`   VARCHAR(255)  DEFAULT NULL            COMMENT '【已废弃 2026-09-30】支付截图存储路径，改用 biz_payment_proof 表',
   `payment_no`      VARCHAR(64)   DEFAULT NULL            COMMENT '支付平台交易号：微信 transaction_id / 支付宝 trade_no，三条线上通道均必填',
   `paid_at`         DATETIME      DEFAULT NULL            COMMENT '支付完成时刻',
   `confirmed_by`    BIGINT        DEFAULT NULL            COMMENT '支付核销管理员 ID，为空表示系统自动确认',
@@ -779,6 +827,103 @@ CREATE TABLE `biz_product_order` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '实体商品购买单';
 
 
+-- ============================================================================
+-- 收款码（不对应论文某一章，与商品、公告同性质）
+--
+-- 2026-09-30 起，它是 12 月投产时唯一的收款方式。三条线上支付通道
+--（微信 JSAPI / 微信 H5 / 支付宝 WAP）都因资质门槛走不通，改为
+--「店内收款码 + 用户上传付款截图 + OCR 识别流水号 + 管理员复核 + 每日导出账单对账」，
+-- 以信任制为主。截图与对账落在 biz_payment_proof 与另外两张对账表上。
+--
+-- 【为什么单独一张表，而不是 biz_store 上挂两列】
+--   ① 收款码可能不止一张（微信、支付宝各一，将来还可能有别的）
+--   ② 「这张码能不能用」是运营随时要开关的，做成行比做成列好改
+--   ③ 将来开分店时每店各挂各的码，靠 store_id 区分即可，不必改结构
+--
+-- 【为什么不复用 PaymentChannel 的取值】
+--   PaymentChannel 描述的是「支付路由」（微信内 JSAPI / 微信外 H5 /
+--   支付宝 WAP / 传截图），本表的 channel 描述的是「这笔钱进了哪个收款账号」——
+--   是两件事。共用一个枚举会让「支付宝的收款码」与「支付宝手机网站支付」
+--   混为一谈，而对账时前者根本没有平台流水可查。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_pay_qr`;
+CREATE TABLE `biz_pay_qr` (
+  `id`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `store_id`   BIGINT       NOT NULL                COMMENT '所属门店 ID',
+  `channel`    VARCHAR(20)  NOT NULL                COMMENT '收款账号渠道：WXPAY 微信 / ALIPAY 支付宝。见 PayQrChannel',
+  `name`       VARCHAR(50)  NOT NULL                COMMENT '显示名，如「微信收款码」。收银台并排展示多张时靠它区分',
+  `image_url`  VARCHAR(255) NOT NULL                COMMENT '收款码图片的站内路径',
+  -- 停用而不是删除：一张码常常只是暂时不用（换了收款账号、被限额了），
+  -- 删掉的话再启用要重新上传，而历史凭证上还留着它当初的 pay_qr_id
+  `enabled`    TINYINT      NOT NULL DEFAULT 1      COMMENT '是否启用：0=停用。停用的不出现在收银台上',
+  `sort`       INT          NOT NULL DEFAULT 0      COMMENT '排序，升序。同一门店多张码的展示顺序',
+  `created_at` DATETIME     NOT NULL                COMMENT '创建时间',
+  `updated_at` DATETIME     NOT NULL                COMMENT '更新时间',
+  `deleted`    TINYINT      NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
+  PRIMARY KEY (`id`),
+  -- 收银台取码是「某店 + 启用中 + 按 sort 排」，这条索引一条就够。
+  -- 后台列表按 store_id 全取（含停用），用得上它的最左前缀
+  KEY `idx_store_enabled_sort` (`store_id`, `enabled`, `sort`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '收款码（店内张贴的二维码，顾客扫码转账用）';
+
+
+-- ============================================================================
+-- 付款凭证（不对应论文某一章，属于模块 8 的支付能力）
+--
+-- 2026-09-30 起扫码转账是 12 月投产时唯一的收款方式，本表因此是资金的
+-- 唯一凭据来源：用户扫店内的收款码付款 → 上传付款截图 → 管理员复核。
+-- 完整设计见 docs/开发约定与设计说明.md 第九章。
+--
+-- 【为什么独立一张表，而不是继续用 biz_order.payment_proof 那一列】
+--   ① 四类收款都要凭证（订单 / 包场 / 月卡 / 商品），而那一列只长在订单上
+--   ② 复核是有状态的（待复核 / 已核对 / 未通过），被驳回后还会重新提交，
+--      一列存不下这些
+--   ③ 对账要按流水号反查，需要 idx_payment_no 这样的索引
+--   （那一列的注释已标废弃，列本身保留 —— DROP 不可逆，历史数据不该丢）
+--
+-- 【为什么不用逻辑删除、不继承 BaseEntity】
+--   凭证是财务凭据，语义上 append-only（照 biz_access_record 的先例）——
+--   行一旦产生就不该消失，只该被复核状态标记。而且逻辑删除与 uk_target
+--   唯一键天然冲突：软删的行仍占着键，删过一次就再也插不进同一目标。
+--   对照 biz_pay_qr —— 那张是普通运营数据，会改会停用，所以它有 deleted 列。
+--
+-- 【uk_target 的语义】一个收款目标至多一条凭证。驳回后重新提交走 UPDATE
+--   而不是再插一行 —— 代价是「这条凭证的历史」不留档，换来的是「提交」这个
+--   动作天然幂等：手机上连点两下不会产生两条凭证，也不会重复落账。
+--
+-- 【idx_payment_no 是干什么的】它让「同一流水号被多笔凭证引用」成为一条
+--   几行的 SQL。那是纯信任制下最值得防的作弊手法：一张截图付两单。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_payment_proof`;
+CREATE TABLE `biz_payment_proof` (
+  `id`                 BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `target_type`        VARCHAR(20)   NOT NULL                COMMENT '收款类型：ORDER 订单 / BOOKING 包场 / MONTHLY_CARD 月卡 / PRODUCT 商品',
+  `target_id`          BIGINT        NOT NULL                COMMENT '目标主键（订单 / 包场 / 月卡购买单 / 商品购买单的 ID）',
+  `order_no`           VARCHAR(32)   NOT NULL                COMMENT '商户订单号快照，对账时与本系统的单号勾稽',
+  `user_id`            BIGINT        NOT NULL                COMMENT '提交人用户 ID',
+  `amount`             DECIMAL(10,2) NOT NULL                COMMENT '提交时的应付额快照（元）',
+  `pay_qr_id`          BIGINT                 DEFAULT NULL   COMMENT '扫的是哪张收款码（biz_pay_qr.id），供事后追溯钱进了哪个账号',
+  `proof_url`          VARCHAR(255)  NOT NULL                COMMENT '付款截图的站内路径（/uploads/proof/xxx.jpg）',
+  `payment_no`         VARCHAR(64)            DEFAULT NULL   COMMENT '用户确认后的交易流水号，以它为准',
+  `ocr_payment_no`     VARCHAR(64)            DEFAULT NULL   COMMENT 'OCR 识别出的流水号，仅作辅助线索，人工复核时参考',
+  `ocr_amount`         DECIMAL(10,2)          DEFAULT NULL   COMMENT 'OCR 识别出的金额（元），与提交额不一致时值得人工看一眼',
+  `ocr_text`           VARCHAR(1000)          DEFAULT NULL   COMMENT 'OCR 原始文本，仅供人工复核参考（含付款人昵称等，不外泄）',
+  `verify_status`      VARCHAR(20)   NOT NULL DEFAULT 'SUBMITTED' COMMENT '复核状态：SUBMITTED 待复核 / CONFIRMED 已核对 / REJECTED 未通过',
+  `risk_flag`          VARCHAR(32)            DEFAULT NULL   COMMENT '风险标记：DUPLICATE_PAYMENT_NO 同一流水号被多笔凭证引用等',
+  `reconcile_batch_id` BIGINT                 DEFAULT NULL   COMMENT '命中的对账批次 ID，未参与对账时为空',
+  `confirmed_by`       BIGINT                 DEFAULT NULL   COMMENT '复核管理员 ID',
+  `confirmed_at`       DATETIME               DEFAULT NULL   COMMENT '复核时刻',
+  `reject_reason`      VARCHAR(200)           DEFAULT NULL   COMMENT '未通过原因，驳回时必填',
+  `created_at`         DATETIME      NOT NULL                COMMENT '提交时间',
+  `updated_at`         DATETIME      NOT NULL                COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_target` (`target_type`, `target_id`),
+  KEY `idx_verify_created` (`verify_status`, `created_at`),
+  KEY `idx_user_created` (`user_id`, `created_at`),
+  KEY `idx_payment_no` (`payment_no`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '付款凭证（扫码转账的截图、OCR 线索与复核记录）';
+
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ============================================================================
@@ -796,4 +941,129 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- 商品（biz_product + biz_product_order）同理不对应论文某一章 ——
 -- 它是独立于时长计费之外的第二类收入，与月卡同形（自己管目录与购买单，
 -- 收款处理器住在 order 包）。详见上面建表处与 backend 的 product 包说明。
+--
+-- 收款码（biz_pay_qr）与付款凭证（biz_payment_proof）同理不对应论文某一章 ——
+-- 扫码转账是 12 月投产时唯一的收款方式，两者都属于订单管理（模块 8）的支付能力，
+-- 代码住在 order 包。
+--
+-- 对账批次（biz_reconcile_batch）与对账差异（biz_reconcile_diff）同理 ——
+-- 它们是支付改造 Phase 5 的产物：把系统里的付款凭证与收款账号导出的账单勾稽起来，
+-- 让管理员从「逐条看 100%」降到「只看差异」。详见下面各自的建表处。
 -- ============================================================================
+
+
+-- ============================================================================
+-- 对账批次（不对应论文某一章，属于模块 8 的支付能力，Phase 5）
+--
+-- 2026-09-30 起扫码转账是 12 月投产时唯一的收款方式，管理员因此是唯一的对账环节。
+-- 前面的四张表（收款码 / 凭证 / OCR）解决的是「这一笔钱到没到账」，
+-- 这两张表解决的是「这一天到底收到了多少、跟系统里记的对不对得上」——
+-- 管理员从微信 App 或支付宝 App 导出账单（微信是 xlsx、支付宝是 CSV）上传，
+-- 系统解析出每一笔收款，与 biz_payment_proof 勾稽，输出差异。
+--
+-- 【为什么两张表而不是一张】
+--   批次是「一次上传 + 一次匹配」这个事件的记录，差异是它的产物。
+--   合成一张的话，「这次一共比了多少笔、跳过了多少笔」要在每一条差异上重复一遍，
+--   而且「一次都没差异的批次」会整条消失 —— 而那恰恰是最该留档的一种结果
+--   （「这一天我对过账，没有差异」）。
+--
+-- 【两张表都没有 deleted 列】与 biz_payment_proof 同一条纪律：它们是财务过程的
+--   记录，语义上 append-only。而且 biz_payment_proof.reconcile_batch_id 指回这里，
+--   软删会让「这条凭证属于哪一批」指向一条看起来不存在的记录。
+--   传错文件不做撤销 —— 后果只是多一条批次与少量差异，不值得为它引入删除语义。
+--
+-- 【账单文件为什么不落在 uploads/ 下】
+--   账单里含全部交易对手、备注、金额、时间，是本店最敏感的经营数据。
+--   而 /uploads/** 在 SecurityConfig.PUBLIC_PATHS 里是**公开**的（用户上传的头像
+--   与截图要用 <img src> 加载，浏览器不为图片请求带 Authorization 头）。
+--   所以账单走独立目录 uspace.reconcile.bill-dir，不注册静态资源映射、
+--   不进 PUBLIC_PATHS，只能通过带鉴权的下载接口取。
+--   ⚠️ 该目录绝不能落在 uspace.upload.dir 之下 —— 应用启动时会校验，重叠则拒绝启动。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_reconcile_batch`;
+CREATE TABLE `biz_reconcile_batch` (
+  `id`                  BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `store_id`            BIGINT        NOT NULL                COMMENT '所属门店 ID',
+  `channel`             VARCHAR(20)   NOT NULL                COMMENT '钱从哪导出来的：WXPAY 微信 / ALIPAY 支付宝 / STANDARD 系统标准模板（无法判定账号）。见 ReconcileChannel。由表头认出来的，不是人工选的',
+  `file_name`           VARCHAR(255)  NOT NULL                COMMENT '上传时的原始文件名，用于展示与下载时的文件名',
+  `bill_file_path`      VARCHAR(255)           DEFAULT NULL   COMMENT '账单原文件的落盘相对路径。留档失败时为空，且不阻断对账 —— 管理员的核心目的是把账对起来',
+  `file_sha256`         CHAR(64)               DEFAULT NULL   COMMENT '文件内容的 SHA-256，供事后辨认「这两个批次是不是同一份文件」—— 文件名可以随便改，内容不会',
+  -- 下面两列取自**账单内容**（交易时间的最小 / 最大值），不采信文件名，
+  -- 也不采信账单开头那两行「起始时间 / 终止时间」—— 那两行与实际记录可能对不上
+  `period_start`        DATETIME               DEFAULT NULL   COMMENT '账单内容里最早的交易时间，一条有效记录都没有时为空',
+  `period_end`          DATETIME               DEFAULT NULL   COMMENT '账单内容里最晚的交易时间',
+  -- 下面两列是**算法参数**而不是账单事实。存它们是为了事后答得了
+  -- 「为什么这条凭证没被算进来」—— 页面上也要显示这个区间
+  `window_start`        DATETIME               DEFAULT NULL   COMMENT '系统侧凭证的候选窗口下界 = period_start − uspace.reconcile.window-before-days',
+  `window_end`          DATETIME               DEFAULT NULL   COMMENT '系统侧凭证的候选窗口上界 = period_end + uspace.reconcile.window-after-days',
+  `bill_count`          INT           NOT NULL DEFAULT 0      COMMENT '账单侧解析出的「收入且成功」笔数',
+  `bill_amount`         DECIMAL(12,2) NOT NULL DEFAULT 0.00   COMMENT '账单侧收入合计（元）',
+  `bill_excluded_count` INT           NOT NULL DEFAULT 0      COMMENT '账单里未参与对账的笔数：收支方向不是「收入」的，以及交易类型不在白名单里的（个人收款账单里的转账、红包、别处买东西的退款）。只计数不参与匹配 —— 它们每一笔都找不到对应凭证。与 bill_count 并列显示：一份账单上写着收了多少、系统只认了多少，差额全在这里',
+  `bill_skipped_count`  INT           NOT NULL DEFAULT 0      COMMENT '账单侧因「单号已被之前的批次认领过」而跳过的笔数。重传同一份文件时它等于 bill_count，是回答「为什么这次匹配 0 笔」的唯一依据',
+  `proof_count`         INT           NOT NULL DEFAULT 0      COMMENT '系统侧参与比对的凭证数（落在窗口内、未被认领、未被驳回）',
+  `proof_amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00   COMMENT '系统侧参与比对的凭证金额合计（元）',
+  `proof_skipped_count` INT           NOT NULL DEFAULT 0      COMMENT '落在窗口内但已被之前批次认领、本次跳过的凭证数',
+  `matched_count`       INT           NOT NULL DEFAULT 0      COMMENT '匹配成功的笔数（单号相符 + 金额相符，已回写 reconcile_batch_id）',
+  `matched_amount`      DECIMAL(12,2) NOT NULL DEFAULT 0.00   COMMENT '匹配成功的金额合计（元）',
+  `diff_count`          INT           NOT NULL DEFAULT 0      COMMENT '本批次写入的差异条数（已去重）',
+  `created_by`          BIGINT                 DEFAULT NULL   COMMENT '执行对账的管理员 ID',
+  `created_at`          DATETIME      NOT NULL                COMMENT '对账时刻',
+  PRIMARY KEY (`id`),
+  -- 批次列表就是「本店 + 按时间倒序」，一条索引够用
+  KEY `idx_store_created` (`store_id`, `created_at`),
+  -- 事后查「这个文件是不是传过」，走内容指纹而不是文件名
+  KEY `idx_file_sha256` (`file_sha256`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '对账批次（一次「上传账单 + 跑一次匹配」的留档）';
+
+
+-- ============================================================================
+-- 对账差异明细
+--
+-- 【六类差异，声明顺序即优先级】（见 ReconcileDiffType，SQL 的 ORDER BY FIELD 与它对齐）
+--   REJECTED_IN_BILL  账单里收到了钱，而系统里那条凭证被驳回了
+--                     —— 最紧急：系统当前的结论与事实相反
+--   DUPLICATE_CLAIM   同一笔账单被多条凭证认领（一张截图付两单）
+--   PROOF_ONLY        系统有凭证、账单里找不到这笔钱（骗钱嫌疑）
+--   AMOUNT_MISMATCH   单号对上了但金额不符
+--   BILL_ONLY         账单里有这笔钱、系统里任何凭证都没认领（漏记 / 顾客没提交凭证）
+--   NO_PAYMENT_NO     凭证没填流水号，无法对账（信息不足，不是伪造）
+--
+--   ⚠️ PROOF_ONLY 与 NO_PAYMENT_NO 必须分开：流水号是选填的，
+--      合成一类就会把「没填」误报成「可疑」，而两者的处置动作完全相反。
+--
+-- 【为什么只有 handled 布尔、没有 status 三态】
+--   差异没有「处理中」这种中间态：管理员要么还没看（0），要么看完了写下结论（1）。
+--   引入一个中间态只会多一个没人会去更新的字段。
+--   也**不提供「取消已处理」**：那会让 handled 变成可反复翻转的状态、多一个入口，
+--   而标错了的条目仍然筛得出来、看得见。
+--
+-- 【本表只记录「标记 + 备注」，不做任何反向操作】
+--   与「资金动作入口越少越好」一致：本页不生成订单状态变更、不代提交凭证、
+--   不撤销批次。差异只是给人看的线索，钱怎么处置由人决定。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_reconcile_diff`;
+CREATE TABLE `biz_reconcile_diff` (
+  `id`           BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `batch_id`     BIGINT        NOT NULL                COMMENT '所属对账批次（biz_reconcile_batch.id）',
+  `diff_type`    VARCHAR(32)   NOT NULL                COMMENT '差异类型：REJECTED_IN_BILL / DUPLICATE_CLAIM / PROOF_ONLY / AMOUNT_MISMATCH / BILL_ONLY / NO_PAYMENT_NO。见 ReconcileDiffType',
+  `proof_id`     BIGINT                 DEFAULT NULL   COMMENT '相关凭证（biz_payment_proof.id）。BILL_ONLY 时为空 —— 那类说的正是「系统里没有任何凭证认领这笔钱」',
+  `payment_no`   VARCHAR(64)            DEFAULT NULL   COMMENT '归一化后的交易单号（去空白 + NFKC + 大写）。比对用的就是它，因此它与 biz_payment_proof.payment_no 的原始值可能差在空白或大小写上',
+  `order_no`     VARCHAR(32)            DEFAULT NULL   COMMENT '商户订单号快照，抄自凭证 —— 管理员凭它直接去订单页找人，不必先点开凭证',
+  `target_type`  VARCHAR(20)            DEFAULT NULL   COMMENT '收款类型快照（ORDER / BOOKING / MONTHLY_CARD / PRODUCT），抄自凭证。冗余一列是为了批次详情页不必逐条回查凭证（那是 N+1）',
+  `bill_amount`  DECIMAL(10,2)          DEFAULT NULL   COMMENT '账单侧金额（元）；PROOF_ONLY / NO_PAYMENT_NO 时为空',
+  `proof_amount` DECIMAL(10,2)          DEFAULT NULL   COMMENT '系统侧凭证金额（元）；BILL_ONLY 时为空',
+  `bill_time`    DATETIME               DEFAULT NULL   COMMENT '账单上这笔交易的时刻；账单侧无记录时为空',
+  `bill_summary` VARCHAR(100)           DEFAULT NULL   COMMENT '账单侧的商品或交易对方摘要，供人工判断差异时多一个上下文；账单侧无记录时为空',
+  `handled`      TINYINT       NOT NULL DEFAULT 0      COMMENT '是否已处理：0=待处理 1=已处理',
+  `handle_note`  VARCHAR(200)           DEFAULT NULL   COMMENT '处理备注，选填 —— 它是管理员给自己的备忘，不是给顾客的结论（对照 reject_reason 必填：那句要展示给用户）',
+  `handled_by`   BIGINT                 DEFAULT NULL   COMMENT '处理人管理员 ID',
+  `handled_at`   DATETIME               DEFAULT NULL   COMMENT '处理时刻',
+  `created_at`   DATETIME      NOT NULL                COMMENT '产生时刻',
+  PRIMARY KEY (`id`),
+  -- 批次详情页的默认查询是「某批次 + 只看未处理」（可再按类型筛）。
+  -- handled 放在 diff_type 前面：不筛类型时也用得上它，而筛类型是次要动作
+  KEY `idx_batch_handled_type` (`batch_id`, `handled`, `diff_type`),
+  -- 去重判断：「这个凭证 / 这个单号是不是已经有一条未处理的同类差异了」
+  KEY `idx_proof` (`proof_id`),
+  KEY `idx_payment_no` (`payment_no`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '对账差异明细（系统凭证与账单勾稽出来的不一致）';

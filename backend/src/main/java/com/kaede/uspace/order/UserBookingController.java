@@ -107,7 +107,7 @@ public class UserBookingController {
      * 用户感受完全一样（点开链接就进去了）。
      *
      * <p><b>令牌的有效性由包场时段界定</b>，不单独设过期时间：
-     * 时段一过，那个场次的排他性自然消失，令牌也就没有意义了。
+     * 时段一过、或包场被撤销退款，令牌立即失效（判在 {@code InviteTokenService} 里）。
      *
      * @param token 邀请令牌（43 位 URL-safe 字符串）
      * @return 包场信息与参与者名单；令牌无效时返回 404

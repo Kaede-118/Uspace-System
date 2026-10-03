@@ -61,6 +61,13 @@ export function formatDateTime(value) {
  *
  * <p>用于把一条已有记录回填进表单（如包场改期）。
  *
+ * <p>⚠️ <b>目前没有调用方</b>：包场排期的「自由时段」已经改成
+ * <b>日期 + 整点</b>两个输入框（见 {@code BookingManageView}），不再用
+ * {@code datetime-local} —— 手机上滚到分钟那一列才选得准，而包场只到小时一级。
+ *
+ * <p>留着它是因为下面 {@link fromInputDateTime} 那段说明<b>仍然成立</b>：
+ * 后端只认 {@code yyyy-MM-dd HH:mm:ss} 一种格式，往后任何要发时间的表单都会碰到它。
+ *
  * @param {string} str 形如 "2026-09-30 14:00:00"
  * @returns {string} 形如 "2026-09-30T14:00"；无法解析时返回空串
  */
@@ -89,6 +96,34 @@ export function fromInputDateTime(str) {
   const m = String(str).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/)
   if (!m) return ''
   return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6] || '00'}`
+}
+
+/**
+ * 「日期 + 整点小时」两个输入框 → 后端要的时间串。
+ *
+ * <p>与 {@link fromInputDateTime} 是同一个目的（拼出后端认的那唯一一种格式），
+ * 只是输入控件不同：包场与免费活动都<b>只到小时一级</b>，所以拆成两个框，
+ * 不用 {@code datetime-local} —— 手机上得滚到分钟那一列才选得准，
+ * 而这两个场景的分钟本来就没有意义（包场按时段卖；活动的边界宽松一点对顾客有利）。
+ *
+ * <p>拼出来是 {@code yyyy-MM-dd HH:00:00}，与 {@link formatDateTime} 的输出同格式，
+ * 所以下游（预览、回填）不必区分它是怎么来的。
+ *
+ * <p>⚠️ <b>两个页面共用一份</b>（包场排期、门店页的停业与免费时段）：
+ * 各写一份的话，「小时越界怎么算」这种判断迟早分岔，
+ * 而分岔的表现是某一张表单能提交、另一张死活提交不了。
+ *
+ * @param {string} date 日期，yyyy-MM-dd
+ * @param {string} hour 小时，'0' ~ '23'；允许用户手输不带前导零的形式
+ * @returns {string} 后端格式的时刻；填不全或小时越界时返回空串
+ */
+export function fromDateTimeHour(date, hour) {
+  const d = String(date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  const h = String(hour ?? '').trim()
+  if (!d || !/^\d{1,2}$/.test(h) || Number(h) > 23) {
+    return ''
+  }
+  return `${date} ${h.padStart(2, '0')}:00:00`
 }
 
 /**
@@ -189,6 +224,47 @@ export function formatCountdown(seconds) {
   const m = Math.floor((total % 3600) / 60)
   const s = total % 60
   return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${pad2(m)}:${pad2(s)}`
+}
+
+/**
+ * 到店时刻的展示（「在店用户」名册的卡片用）。
+ *
+ * <p>当天只给时刻；<b>跨天了就把「哪天」带上</b> —— 名册上有人是昨晚来的、
+ * 玩到凌晨跨了零点，也有人挂着一单好几天没结算（忘了点「结束使用」）。
+ * 只显示「03:20」的话，看的人会以为是今天凌晨来的。
+ *
+ * <ul>
+ *   <li>今天 → {@code 15:38}</li>
+ *   <li>昨天 → {@code 昨天 15:38}</li>
+ *   <li>前天 → {@code 前天 15:38}</li>
+ *   <li>更早 → {@code 9月30日 15:38}（不写年份 —— 名册上不会有隔年的单）</li>
+ * </ul>
+ *
+ * <p>⚠️ 与 {@link relativeTime}（公告流用的「N 分钟前 / N 天前」）<b>不是一回事，
+ * 不要合并</b>：那边要的是「多久以前」的相对感，这边要的是「哪个时刻」——
+ * 名册上写「3 天前」没有意义，看的人要知道的是他几点进的店。
+ *
+ * <p>「今天 / 昨天 / 前天」按<b>日历天</b>比，不是按「相差满 24 小时」算：
+ * 凌晨 1 点看昨晚 23 点进的店，相差才两小时，但那确实是「昨天」。
+ *
+ * @param {string} str 后端的时间串（形如 "2026-10-03 15:38:00"）
+ * @returns {string} 形如 "15:38" / "昨天 15:38" / "9月30日 15:38"；解析失败返回空串
+ */
+export function formatArrivalTime(str) {
+  const date = parseDateTime(str)
+  if (!date) return ''
+  const time = formatTime(str)
+
+  // 按日历天比：各自抹掉时分秒再相减
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000)
+
+  // days <= 0 一并按「今天」处理：负数只可能来自客户端时钟比服务端慢，
+  // 那种情况下显示的时刻是对的，硬要标成「明天」反而更怪
+  if (days <= 0) return time
+  if (days === 1) return `昨天 ${time}`
+  if (days === 2) return `前天 ${time}`
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
 }
 
 /**

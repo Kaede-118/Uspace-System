@@ -155,18 +155,31 @@ class NoticeMapperIntegrationTests {
     @Test
     @DisplayName("用户端列表：分页真的在 SQL 里生效，两页之间不重不漏")
     void selectPageForUser_pages() {
-        for (int i = 0; i < 3; i++) {
-            noticeMapper.insert(newManualNotice("第 " + i + " 条", null));
+        // ⚠️ 插 6 条、每页 3 条，让两页都由本用例自己的数据填满。
+        // 早先只插 3 条、每页 2 条，于是「第二页是满的」这个断言实际上
+        // 依赖开发库里本来存着公告 —— 库一被清空，它就红，
+        // 而红的原因与被测的分页逻辑毫无关系
+        List<Long> seeded = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            Notice notice = newManualNotice("分页样本 " + i, null);
+            noticeMapper.insert(notice);
+            seeded.add(notice.getId());
         }
 
-        List<Long> first = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 2)))
+        List<Long> first = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(1, 3)))
                 .getRecords().stream().map(Notice::getId).toList();
-        List<Long> second = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(2, 2)))
+        List<Long> second = ((Page<Notice>) noticeMapper.selectPageForUser(new Page<>(2, 3)))
                 .getRecords().stream().map(Notice::getId).toList();
 
-        assertEquals(2, first.size(), "LIMIT 没生效的话会整表拉回来，首页会变成一条长列表");
-        assertEquals(2, second.size(), "库里的公告远多于两页，第二页同样应当是满的");
+        assertEquals(3, first.size(), "LIMIT 没生效的话会整表拉回来，首页会变成一条长列表");
+        assertEquals(3, second.size(), "第二页同样应当是满的");
         assertTrue(first.stream().noneMatch(second::contains), "两页不能有重叠");
+
+        // 按 id 倒序，所以刚插的这 5 条必然占据前两页 —— 一条都不能漏。
+        // 这条断言还顺带钉住「没插重复行」
+        List<Long> union = new ArrayList<>(first);
+        union.addAll(second);
+        assertTrue(union.containsAll(seeded), "刚插入的 5 条都该被翻到");
     }
 
     @Test

@@ -2,10 +2,12 @@ package com.kaede.uspace.product;
 
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.product.dto.ProductCoverVo;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductSaveRequest;
 import com.kaede.uspace.product.dto.ProductVo;
 import jakarta.validation.Valid;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.validation.annotation.Validated;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * 商品管理接口（运营后台）。
@@ -40,8 +43,12 @@ public class AdminProductController {
 
     private final ProductService productService;
 
-    public AdminProductController(ProductService productService) {
+    private final ProductCoverService productCoverService;
+
+    public AdminProductController(ProductService productService,
+                                  ProductCoverService productCoverService) {
         this.productService = productService;
+        this.productCoverService = productCoverService;
     }
 
     /**
@@ -109,6 +116,32 @@ public class AdminProductController {
     @DeleteMapping("/{id}")
     public ResponseEntity<ApiResult<Void>> delete(@PathVariable Long id) {
         return ApiResult.of(productService.delete(id));
+    }
+
+    /**
+     * 上传一张商品封面图。
+     *
+     * <p><b>只返回路径，不写任何数据库</b> —— 前端把路径填进表单，
+     * 随新增 / 修改商品一起提交。三条理由见 {@link ProductCoverService}。
+     *
+     * <p>⚠️ <b>本方法必须留在本类里</b>：{@code @PreAuthorize} 标在类上，
+     * 一旦挪去别的 Controller（或写成 {@code /api/products/cover}），
+     * 它就变成任何登录用户都能调 —— 而且不会有任何报错。
+     *
+     * <p>⚠️ {@code required = false} 是刻意的：声明为必填时 Spring 抛的
+     * {@code MissingServletRequestPartException} 不在全局异常处理器名单里，
+     * 会落到兜底分支返回 500 —— 而它明明是「你忘了传文件」，该给 400。
+     *
+     * <p>路径 {@code /cover} 与 {@code /{id}} 不冲突（Spring 精确匹配优先），
+     * 与既有的 {@code /orders} 同一个模式。
+     *
+     * @param file 上传的图片，表单字段名固定为 {@code file}
+     * @return 封面图的站内相对路径
+     */
+    @PostMapping(value = "/cover", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResult<ProductCoverVo>> uploadCover(
+            @RequestParam(value = "file", required = false) MultipartFile file) {
+        return ApiResult.of(productCoverService.uploadCover(file));
     }
 
     /**

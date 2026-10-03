@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.security.TokenGenerator;
 import com.kaede.uspace.space.dto.BookingParticipantVo;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
 import com.kaede.uspace.space.dto.BookingVo;
@@ -23,6 +24,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -133,15 +135,18 @@ public class BookingService {
      *
      * @param pageNum  页码，从 1 开始
      * @param pageSize 每页条数
+     * @param scope    视图筛选：{@code active}（已生效 + 待付款）、{@code void}（已取消 + 已退款）、
+     *                 null 表示不筛
      * @return 成功时返回分页结果；门店不存在时返回 {@link ErrorCode#STORE_NOT_FOUND}
      */
-    public BizResult<PageResult<BookingVo>> listBookings(long pageNum, long pageSize) {
+    public BizResult<PageResult<BookingVo>> listBookings(long pageNum, long pageSize, String scope) {
         Long storeId = storeMapper.selectCurrentId();
         if (storeId == null) {
             return BizResult.fail(ErrorCode.STORE_NOT_FOUND);
         }
 
-        IPage<Booking> page = bookingMapper.selectPageByStore(new Page<>(pageNum, pageSize), storeId);
+        IPage<Booking> page = bookingMapper.selectPageByStore(
+                new Page<>(pageNum, pageSize), storeId, scope);
         return BizResult.ok(PageResult.of(page, BookingVo::from));
     }
 
@@ -364,14 +369,33 @@ public class BookingService {
         booking.setStartAt(request.getStartAt());
         booking.setEndAt(request.getEndAt());
         booking.setPrice(request.getPrice());
-        booking.setStatus(BookingStatus.PENDING_PAYMENT.name());
         booking.setRemark(trimToNull(request.getRemark()));
         booking.setCreatedBy(adminId);
+
+        /*
+         * 包场费为 0 的场次**即刻生效**，不走支付。
+         *
+         * 不放行的话它会永远卡在「待付款」：时段占着、邀请链接取不出来（那要 PAID 才给），
+         * 而且没有任何办法把它推进去 —— 支付回调会校验金额，0 元的单子根本走不到那一步。
+         *
+         * 令牌与「结清时刻」在 insert 时一次写完，不必先插一条待付款再 UPDATE：
+         * 状态从落下的那一刻就是终态，中间没有可观测的过渡态。
+         * payment_method / payment_no 留空 —— 确实没有任何支付方式与流水。
+         */
+        if (booking.getPrice().compareTo(BigDecimal.ZERO) == 0) {
+            booking.setStatus(BookingStatus.PAID.name());
+            booking.setInviteToken(TokenGenerator.generate());
+            booking.setPaidAt(LocalDateTime.now());
+        } else {
+            booking.setStatus(BookingStatus.PENDING_PAYMENT.name());
+        }
+
         bookingMapper.insert(booking);
 
-        log.info("[空间] 创建包场 {} 包场人={} 时段 {} ~ {} 价格={}",
+        log.info("[空间] 创建包场 {} 包场人={} 时段 {} ~ {} 价格={} 状态={}",
                 booking.getBookingNo(), booking.getHostUserId(),
-                booking.getStartAt(), booking.getEndAt(), booking.getPrice());
+                booking.getStartAt(), booking.getEndAt(), booking.getPrice(),
+                booking.getStatus());
         return BizResult.ok(BookingVo.from(booking));
     }
 

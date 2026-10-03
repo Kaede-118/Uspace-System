@@ -74,9 +74,14 @@ export function getPasscode(id) {
  * <p>返回体里的 {@code nextChangeInSeconds} / {@code nextChangeText} 是跳档预告，
  * <b>必须用后端给的秒数</b>，不要让前端拿绝对时刻去减 —— 客户端时钟不可信。
  *
+ * <p>返回体里的 {@code bill} 是三处说明性金额的来源（{@code discountAmount} /
+ * {@code cardFreeAmount} / {@code activityFreeAmount}），
+ * 账单组件拿它来解释「为什么便宜了」。
+ *
  * @param {number|string} id 订单 ID
- * @returns {Promise<{data:{segments, totalMinutes, totalAmount, payableAmount,
- *          discountAmount, cardFreeAmount, capped, nextChangeInSeconds, nextChangeText, previewAt}}>}
+ * @returns {Promise<{data:{bill:{segments, totalMinutes, totalAmount, discountAmount,
+ *          cardFreeAmount, activityFreeAmount}, stayMinutes, freeByBooking, cappedNow,
+ *          nextChangeInSeconds, nextChangeText, previewAt}}>}
  */
 export function getPreview(id) {
   return http.get(`/api/orders/${id}/preview`)
@@ -99,19 +104,10 @@ export function settleOrder(id) {
   return http.post(`/api/orders/${id}/settle`)
 }
 
-/**
- * 上传支付凭证（降级路径）。
- *
- * <p>运营方尚无商户号时的兜底：用户传一张转账截图，管理员人工核销。
- * 与线上通道<b>共用同一套状态机与字段</b>，只是支付方式记为 {@code QR_UPLOAD}。
- *
- * @param {number|string} id 订单 ID
- * @param {string} paymentProof 凭证图片路径（先调上传接口拿到）
- * @returns {Promise}
- */
-export function submitPaymentProof(id, paymentProof) {
-  return http.post(`/api/orders/${id}/payment-proof`, { paymentProof })
-}
+// 说明：这里曾有一个 submitPaymentProof（订单专属的上传凭证接口）。
+// 2026-09-30 起付款凭证由 api/payment.js 的 submitProof 统一受理 ——
+// 四类收款（订单 / 包场 / 月卡 / 商品）共用一个入口，
+// 挂在订单子路径下的那个端点已经删掉了。
 
 /**
  * 查我的订单（分页）。
@@ -130,6 +126,15 @@ export function listMyOrders(params = {}) {
 
 /**
  * 查订单详情。
+ *
+ * <p>比其他订单接口多两个账单字段（列表接口刻意不带，见后端 OrderVo 的说明）：
+ * <ul>
+ *   <li>{@code bill} —— 分段账单（{@code {segments, totalMinutes, totalAmount, ...}}），
+ *       结构与结算返回的 bill 完全一致，喂给 {@code BillSegmentList} 即可。
+ *       <b>可能为 null</b>：使用中的订单、以及老订单重算金额与落库对不上时都没有 ——
+ *       页面必须准备回落展示（日场/夜场汇总行），不能假定它一定在</li>
+ *   <li>{@code freeByBooking} —— 是否因包场减免了计费时长（解释「计费时长 < 在店时长」）</li>
+ * </ul>
  *
  * @param {number|string} id 订单 ID。不是本人的订单返回 404 而不是 403 ——
  *                           403 等于承认这个订单存在，可以靠状态码差异枚举单号

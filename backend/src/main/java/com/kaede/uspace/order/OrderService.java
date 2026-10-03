@@ -2,8 +2,12 @@ package com.kaede.uspace.order;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaede.uspace.billing.BillingPeriod;
 import com.kaede.uspace.billing.BillingService;
+import com.kaede.uspace.billing.FreePeriodService;
+import com.kaede.uspace.billing.FreeRange;
 import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.NextChange;
@@ -19,13 +23,15 @@ import com.kaede.uspace.lock.mapper.LockMapper;
 import com.kaede.uspace.order.dto.AdjustOrderRequest;
 import com.kaede.uspace.order.dto.CreateOrderRequest;
 import com.kaede.uspace.order.dto.MonthSpentVo;
+import com.kaede.uspace.order.dto.OrderBillSnapshot;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
 import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
-import com.kaede.uspace.order.dto.PaymentProofRequest;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.order.event.OrderEnteredEvent;
+import com.kaede.uspace.order.event.OrderLeftEvent;
 import com.kaede.uspace.order.mapper.OrderMapper;
 import com.kaede.uspace.promotion.MonthlyCardService;
 import com.kaede.uspace.space.BookingService;
@@ -35,6 +41,7 @@ import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -98,11 +105,45 @@ public class OrderService {
     private final ClosureService closureService;
     private final BookingService bookingService;
     private final BillingService billingService;
+    /**
+     * 免费活动（计费规则，模块 7）。
+     *
+     * <p>⚠️ 它住在 {@code billing} 包而不是 {@code space}：免费时段改的是<b>账单</b>，
+     * 不是准入 —— 与停业 / 包场那两条规则性质不同（那两条在这张表里各有自己的 Service）。
+     */
+    private final FreePeriodService freePeriodService;
     private final MonthlyCardService monthlyCardService;
     private final LockService lockService;
     private final InviteTokenService inviteTokenService;
     private final OrderProperties orderProperties;
     private final LockProperties lockProperties;
+
+    /**
+     * JSON 序列化器 —— 只用于一件事：分段账单快照（{@code biz_order.bill_snapshot}）的写与读。
+     *
+     * <p>注入的是 Spring 容器里那个全局配置过的 bean（时间格式
+     * {@code yyyy-MM-dd HH:mm:ss} 由公共层的 {@code JacksonConfig} 定制），不是自建一个 ——
+     * 写与读必须是同一套格式，两处各造一个 ObjectMapper 的话，
+     * 「写出去的时间格式读不回来」不会有任何提示，只会让快照静默地解析失败。
+     *
+     * <p>它不参与任何计算：账单怎么算在模块 7（{@link BillingService}），
+     * 快照只是把算好的那份结果原样存下、原样读回。
+     */
+    private final ObjectMapper objectMapper;
+
+    /**
+     * 事件发布器。
+     *
+     * <p><b>这是本类唯一一个「不认识具体是谁在听」的依赖</b>：它发布
+     * {@link OrderEnteredEvent} / {@link OrderLeftEvent}，至于有没有监听器、
+     * 监听器要拿去做什么，订单模块一概不知。QQ 群播报（模块 11）就是这么接上去的 ——
+     * 编译期 {@code order} 不认识 {@code qqbot}，将来把机器人拆成独立服务，
+     * 这边一行都不用改。
+     *
+     * <p>注入的是 Spring 的框架接口而非自定义发布器：它是个函数式接口，
+     * 测试里可以写成 {@code published::add} 一行，不必为它造一个假实现类。
+     */
+    private final ApplicationEventPublisher eventPublisher;
 
     public OrderService(OrderMapper orderMapper,
                         StoreMapper storeMapper,
@@ -111,11 +152,14 @@ public class OrderService {
                         ClosureService closureService,
                         BookingService bookingService,
                         BillingService billingService,
+                        FreePeriodService freePeriodService,
                         MonthlyCardService monthlyCardService,
                         LockService lockService,
                         InviteTokenService inviteTokenService,
                         OrderProperties orderProperties,
-                        LockProperties lockProperties) {
+                        LockProperties lockProperties,
+                        ApplicationEventPublisher eventPublisher,
+                        ObjectMapper objectMapper) {
         this.orderMapper = orderMapper;
         this.storeMapper = storeMapper;
         this.lockMapper = lockMapper;
@@ -123,11 +167,14 @@ public class OrderService {
         this.closureService = closureService;
         this.bookingService = bookingService;
         this.billingService = billingService;
+        this.freePeriodService = freePeriodService;
         this.monthlyCardService = monthlyCardService;
         this.lockService = lockService;
         this.inviteTokenService = inviteTokenService;
         this.orderProperties = orderProperties;
         this.lockProperties = lockProperties;
+        this.eventPublisher = eventPublisher;
+        this.objectMapper = objectMapper;
     }
 
     // ==================================================================
@@ -275,7 +322,18 @@ public class OrderService {
         log.info("[订单] 开门 orderNo={} userId={} 门店={} 密码有效期 {} ~ {} 包场={}",
                 orderNo, userId, storeId, now, passcodeEnd,
                 booking == null ? "无" : booking.getBookingNo());
-        return BizResult.ok(OrderOpenVo.of(order, false, false));
+
+        // 发布「到店」事件，QQ 群播报（模块 11）会监听它。
+        // ⚠️ 只在这里发 —— 上面那几个 return BizResult.fail 的早退分支
+        // （门店 / 门锁缺失、停业、包场拒绝、欠费、密码下发失败）都不是「到店」，
+        // 在方法开头发的话，被拒绝的请求也会往群里播一条「谁谁到店了」。
+        //
+        // ⚠️ 监听器用的是 @TransactionalEventListener(AFTER_COMMIT)：此刻事务还没提交，
+        // 事件也还没送达，用户这次「开门」的 HTTP 请求会一直等到播报发完才返回。
+        // 这是刻意的 —— 监听器要读在店名册，必须等这条订单落库对别人可见。
+        eventPublisher.publishEvent(new OrderEnteredEvent(
+                order.getId(), userId, orderNo, now));
+        return BizResult.ok(OrderOpenVo.of(order, false, false, inBookingAt(order, now)));
     }
 
     // ==================================================================
@@ -315,7 +373,7 @@ public class OrderService {
 
         LocalDateTime now = LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS);
         if (order.getPasscodeEnd() != null && order.getPasscodeEnd().isAfter(now)) {
-            return BizResult.ok(OrderOpenVo.of(order, false, false));
+            return BizResult.ok(OrderOpenVo.of(order, false, false, inBookingAt(order, now)));
         }
 
         return renewPasscode(order, now);
@@ -352,7 +410,7 @@ public class OrderService {
             order.setPasscodeEnd(end);
             log.info("[订单] 续期密码（不换密码）orderNo={} 新有效期 {} ~ {}",
                     order.getOrderNo(), now, end);
-            return BizResult.ok(OrderOpenVo.of(order, true, false));
+            return BizResult.ok(OrderOpenVo.of(order, true, false, inBookingAt(order, now)));
         }
 
         if (!PROVIDER_MOCK.equals(lockProperties.getProvider())) {
@@ -383,7 +441,7 @@ public class OrderService {
         order.setPasscodeStart(now);
         order.setPasscodeEnd(end);
         log.warn("[订单] 续期失败已降级为重新下发密码 orderNo={}（旧密码作废）", order.getOrderNo());
-        return BizResult.ok(OrderOpenVo.of(order, true, true));
+        return BizResult.ok(OrderOpenVo.of(order, true, true, inBookingAt(order, now)));
     }
 
     // ==================================================================
@@ -467,10 +525,13 @@ public class OrderService {
     /**
      * 算「下一次账单变化」的预告。
      *
-     * <p><b>只在真正有段在计费时才给预告</b>：包场时段内不产生计费段，
-     * 此时若照常算，会得出一个只对「包场前那段」成立的时刻 ——
-     * 而那段早已结束，用户看到的是「还有 0 秒进入下一档」这类坏掉的信息。
-     * 判据取账单最后一段的结束时刻是否就是此刻：包场挡在中间时它会更早。
+     * <p><b>包场期间不给跳档预告</b>：那段时间不计费，照常算的话会得出一个
+     * 只对「包场前那段」成立的时刻 —— 而那段早已结束，用户看到的是
+     * 「还有 0 秒进入下一档」这类坏掉的信息。判据取账单最后一段的结束时刻
+     * 是否就是此刻：包场挡在中间时它会更早。
+     *
+     * <p><b>但包场快结束时要给一条</b>：那之后就开始按分钟计费了，打算继续玩的人
+     * 得提前知道，否则他会看着一个不动的 ¥0.00 突然跳档。见 {@link #bookingEndingChange}。
      *
      * <p>起点传<b>当前计费段的起点</b>而不是整单的计费起点：订单可能已经跨过时段
      * （21:00 开始、现在 23:00），拿整单起点去算会得出一个属于日场的答案。
@@ -482,20 +543,73 @@ public class OrderService {
      * @param order 订单
      * @param bill  本次预览的账单
      * @param at    预览时刻
-     * @return 预告；此刻没有正在计费的段时返回 null
+     * @return 预告；此刻没有正在计费的段、且包场也还没到该提醒的时候，返回 null
      */
     private NextChange nextChange(Order order, BillingResult bill, LocalDateTime at) {
         List<SegmentBill> segments = bill.getSegments();
-        if (segments.isEmpty()) {
-            return null;
-        }
-        SegmentBill ongoing = segments.get(segments.size() - 1);
-        if (ongoing.getEndTime().isBefore(at)) {
-            // 当前时刻落在包场里：最后一段在包场开始那一刻就结束了
-            return null;
+        SegmentBill ongoing = segments.isEmpty() ? null : segments.get(segments.size() - 1);
+        if (ongoing == null || ongoing.getEndTime().isBefore(at)) {
+            // 当前时刻落在包场里（或整单都在包场里）：那段时间不计费，
+            // 报一句「还有 X 秒进入下一档 ¥4」是假话。但包场快结束时得说一声
+            return bookingEndingChange(order, at);
         }
         return billingService.nextChange(ongoing.getStartTime(), at,
-                bill.getMonthSpentBefore(), queryCardCoverage(order));
+                bill.getMonthSpentBefore(), queryCardCoverage(order),
+                queryFreeRanges(order, ongoing.getStartTime(), at));
+    }
+
+    /**
+     * 包场即将结束时的预告。
+     *
+     * <p><b>为什么包场期间平时不提示、快结束时反而要提示</b>：包场时段不计费，
+     * 报「还有 X 秒进入下一档 ¥4」是句假话；而包场一结束就重新开始按分钟计费，
+     * 打算继续玩的人需要提前知道。提前量见 {@code uspace.order.booking-end-warning}。
+     *
+     * @param order 订单
+     * @param at    当前时刻
+     * @return 预告；此刻不在包场里、或离包场结束还早时返回 null
+     */
+    private NextChange bookingEndingChange(Order order, LocalDateTime at) {
+        Booking ongoing = ongoingBookingAt(order, at);
+        if (ongoing == null) {
+            return null;
+        }
+        long seconds = Duration.between(at, ongoing.getEndAt()).getSeconds();
+        if (seconds <= 0 || seconds > orderProperties.getBookingEndWarning().getSeconds()) {
+            return null;
+        }
+        return NextChange.at(seconds, "包场结束，之后按时长计费");
+    }
+
+    /**
+     * 此刻是否落在某场包场时段内。
+     *
+     * @param order 订单
+     * @param at    时刻
+     * @return 在包场时段内返回 true
+     */
+    private boolean inBookingAt(Order order, LocalDateTime at) {
+        return ongoingBookingAt(order, at) != null;
+    }
+
+    /**
+     * 取此刻正在进行的那一场包场。
+     *
+     * <p>⚠️ <b>与 {@link #findCoveringBookings} 的区别</b>：那个返回的是
+     * 「与订单区间有过交集的场次」，<b>包含已经结束的与还没开始的</b> ——
+     * 它服务于计费剪切，剪切要的是「区间交叠」而不是「此刻在不在」。
+     * 这里只要「此刻正在进行」的那一场。
+     *
+     * @param order 订单
+     * @param at    时刻
+     * @return 正在进行的那场包场；不在任何包场里时返回 null
+     */
+    private Booking ongoingBookingAt(Order order, LocalDateTime at) {
+        return findCoveringBookings(order, at).stream()
+                // 半开区间 [start, end)：开始时刻当刻算在里面，结束时刻当刻就不算了
+                .filter(b -> !at.isBefore(b.getStartAt()) && at.isBefore(b.getEndAt()))
+                .findFirst()
+                .orElse(null);
     }
 
     // ==================================================================
@@ -525,7 +639,8 @@ public class OrderService {
         }
 
         LocalDateTime endTime = LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS);
-        return BizResult.ok(applySettlement(order, endTime, null, null));
+        return BizResult.ok(applySettlement(order, endTime, null, null,
+                OrderLeftEvent.Source.USER));
     }
 
     /**
@@ -573,7 +688,7 @@ public class OrderService {
             if (isBookingParticipant(booking, order)) {
                 continue;
             }
-            applySettlement(order, startAt, null, null);
+            applySettlement(order, startAt, null, null, OrderLeftEvent.Source.BOOKING_CLEAR);
             settled++;
             log.info("[订单] 包场清场 orderNo={} userId={} 计费截止={}",
                     order.getOrderNo(), order.getUserId(), startAt);
@@ -614,10 +729,14 @@ public class OrderService {
      * @param endTime      离场时刻
      * @param operatorId   操作的管理员 ID；为 null 表示用户自己结算
      * @param adjustReason 调整原因；为 null 表示用户自己结算
+     * @param source       这次结算由哪条路径产生。<b>不能由 {@code operatorId} 推出</b> ——
+     *                     用户自助与包场清场都传 null，只有调用方自己知道是哪一种。
+     *                     它只用于决定播报的措辞，不影响任何算钱结果
      * @return 结算视图
      */
     private OrderSettleVo applySettlement(Order order, LocalDateTime endTime,
-                                          Long operatorId, String adjustReason) {
+                                          Long operatorId, String adjustReason,
+                                          OrderLeftEvent.Source source) {
         List<Booking> bookings = findCoveringBookings(order, endTime);
         BillingResult bill = calculateBill(order, endTime, bookings);
         LocalDateTime billingStart = bill.getStartTime();
@@ -646,14 +765,21 @@ public class OrderService {
         int stayMinutes = (int) Duration.between(order.getStartTime(), endTime).toMinutes();
 
         BigDecimal cardFree = bill.getCardFreeAmount();
+        BigDecimal activityFree = bill.getActivityFreeAmount();
+
+        // 分段账单快照：日场/夜场两列只是汇总，段的边界、档数、单价、封顶与免单标记
+        // 都装不进「合计」里，而订单详情页要按段展示。序列化失败只记警告存 null ——
+        // 快照是展示用的副本，不该因为它写不进去而让整笔结算回滚（顾客结不了账）。
+        String snapshot = serializeBill(bill, !bookings.isEmpty());
+
         if (operatorId == null) {
             orderMapper.updateSettlement(order.getId(), endTime, stayMinutes, dayMinutes,
                     dayAmount, nightMinutes, nightAmount, total, bill.getDiscountAmount(),
-                    cardFree, total, targetStatus);
+                    cardFree, activityFree, total, targetStatus, snapshot);
         } else {
             orderMapper.updateAdjustment(order.getId(), endTime, stayMinutes, dayMinutes,
                     dayAmount, nightMinutes, nightAmount, total, bill.getDiscountAmount(),
-                    cardFree, total, targetStatus, operatorId, adjustReason);
+                    cardFree, activityFree, total, targetStatus, operatorId, adjustReason, snapshot);
         }
 
         // 同步内存对象，供视图构造使用
@@ -664,6 +790,8 @@ public class OrderService {
         order.setPayableAmount(total);
         order.setDiscountAmount(bill.getDiscountAmount());
         order.setCardFreeAmount(cardFree);
+        order.setActivityFreeAmount(activityFree);
+        order.setBillSnapshot(snapshot);
         if (free) {
             order.setPaidAt(endTime);
         }
@@ -672,6 +800,16 @@ public class OrderService {
         log.info("[订单] 结算 orderNo={} 计费区间 {} ~ {} 合计={} 状态={}{}",
                 order.getOrderNo(), billingStart, endTime, total, targetStatus,
                 operatorId == null ? "" : "（管理员调整）");
+
+        // 发布「离店」事件，QQ 群播报（模块 11）会监听它。
+        // 放在这一个点上，三条离店路径（用户自助 / 包场清场 / 管理员补录）就都覆盖到了，
+        // 算钱逻辑不必分叉；措辞的分叉交给 source，见 OrderLeftEvent.Source 的说明。
+        //
+        // ⚠️ 与到店事件同理：此时事务尚未提交，监听器是 AFTER_COMMIT 的，
+        // 所以调用方会等播报发完才返回。
+        eventPublisher.publishEvent(new OrderLeftEvent(
+                order.getId(), order.getUserId(), order.getOrderNo(),
+                endTime, stayMinutes, total, free, source));
         return OrderSettleVo.of(order, billingStart, !bookings.isEmpty(), bill);
     }
 
@@ -791,7 +929,9 @@ public class OrderService {
         if (order == null) {
             return BizResult.fail(ErrorCode.ORDER_NOT_FOUND);
         }
-        return BizResult.ok(OrderVo.from(order));
+        OrderVo vo = OrderVo.from(order);
+        attachBill(vo, order);
+        return BizResult.ok(vo);
     }
 
     /**
@@ -825,7 +965,187 @@ public class OrderService {
         if (order == null) {
             return BizResult.fail(ErrorCode.ORDER_NOT_FOUND);
         }
-        return BizResult.ok(OrderVo.from(order));
+        OrderVo vo = OrderVo.from(order);
+        attachBill(vo, order);
+        return BizResult.ok(vo);
+    }
+
+    // ==================================================================
+    // 分段账单（快照写入、读取与老订单重算）
+    // ==================================================================
+
+    /**
+     * 把一份账单序列化成快照 JSON，供 {@code biz_order.bill_snapshot} 落库。
+     *
+     * <p>序列化失败不抛异常、返回 null —— 快照是【展示用的副本】，
+     * 不该因为它写不进去而让整笔结算回滚（顾客会结不了账）。
+     *
+     * @param bill          结算算出的账单
+     * @param freeByBooking 是否因命中包场而减免了计费时长
+     * @return JSON 字符串；序列化失败时为 null
+     */
+    private String serializeBill(BillingResult bill, boolean freeByBooking) {
+        try {
+            return objectMapper.writeValueAsString(OrderBillSnapshot.of(bill, freeByBooking));
+        } catch (JsonProcessingException e) {
+            log.warn("[订单] 账单快照序列化失败，本次结算不存快照 errmsg={}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 解析订单上的快照 JSON。
+     *
+     * <p><b>解析失败与「快照为空」是同一条回落路径</b>：记警告、返回 null，
+     * 由调用方去试重算 —— 快照坏掉不该让订单详情整个打不开。
+     *
+     * @param order 订单
+     * @return 快照；为空或解析失败时返回 null
+     */
+    private OrderBillSnapshot parseSnapshot(Order order) {
+        String json = order.getBillSnapshot();
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, OrderBillSnapshot.class);
+        } catch (JsonProcessingException e) {
+            log.warn("[订单] 账单快照解析失败，将尝试按当前规则重算 orderNo={} errmsg={}",
+                    order.getOrderNo(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 给订单视图附上分段账单（快照优先，老订单按当前规则重算兜底）。
+     *
+     * <p><b>只有详情接口用它，列表接口刻意不附</b>：一页 20 条订单各带一份账单
+     * 会让响应体白白大出许多，老订单还要逐条重算。
+     *
+     * <p>回落的次序是「快照 → 重算 → 什么都不给」：
+     * <ol>
+     *   <li>快照存在且能解析 —— 用它。快照是结算那一刻的权威记录，
+     *       计费规则与价格后来怎么调都不影响已结算订单的明细</li>
+     *   <li>没有快照（2026-10-03 快照机制上线前结算的老订单）—— 按当前规则重算，
+     *       但只有金额与落库完全一致才敢用，见 {@link #recomputeBill}</li>
+     *   <li>都不行 —— {@code bill} 留空，前端回落到日场/夜场汇总行。
+     *       <b>宁可不展示，也不展示一份与落库金额对不上的假明细</b></li>
+     * </ol>
+     *
+     * <p>使用中的订单（没有 {@code endTime}）不附：费用还在走，
+     * 那一刻的账单在结账预览接口里现算。
+     *
+     * @param vo    待填充的订单视图
+     * @param order 订单实体
+     */
+    private void attachBill(OrderVo vo, Order order) {
+        if (order.getEndTime() == null) {
+            return;
+        }
+        OrderBillSnapshot snapshot = parseSnapshot(order);
+        if (snapshot == null) {
+            snapshot = recomputeBill(order);
+        }
+        if (snapshot == null) {
+            return;
+        }
+        vo.setBill(snapshot.getBill());
+        vo.setFreeByBooking(snapshot.isFreeByBooking());
+    }
+
+    /**
+     * 为「快照机制之前结算的老订单」重算一份账单，作为详情展示的最后一路兜底。
+     *
+     * <p><b>两种优惠状态各算一遍，谁能复现落库金额就用谁。</b> 为什么不直接用
+     * {@link #queryMonthSpent}：那个查询是「该月【全部】已支付订单之和」，
+     * 重算时包含本单自身（结算时不含），可能把月累计顶过优惠门槛、算出优惠价来 ——
+     * 实测数据里就有现成的例子：一笔 225 元的订单自己就把 200 元的门槛顶穿了。
+     * 与其去猜「结算前的累计额是多少」，不如把「走原价」与「走优惠价」两种可能
+     * 都算出来，直接问：哪一种能复现这一单的落库金额？这是个闭集，答案唯一或不存在。
+     *
+     * <p><b>月卡与活动同样是枚举，不是「按落库免额猜」。</b> 这两样都是可变输入，
+     * 而落库数据分不清三种情形：(a) 结算时没有、后来才有（用户买卡、补排活动）；
+     * (b) 结算时就有、也确实减免了；(c) 结算时有、但恰好没减免任何钱 ——
+     * 它只通过<b>切段</b>影响了结果（活动边界也是切分线，多切一段就多享一次宽限，
+     * 而「被月卡盖过的活动段只记月卡」会让免额显示为 0）。所以四种组合
+     * （卡用/不用 × 活动用/不用）都算一遍，与「两算取一」是同一个思路：
+     * 与其猜输入，不如枚举输入，谁能复现落库金额就用谁。
+     *
+     * <p><b>金额对不上就不返回</b>（活动被删改、包场被撤销、计费规则调整过，
+     * 都会造成这种偏差）—— 重算只是给老订单的补偿，不能拿来冒充历史事实。
+     *
+     * <p>命中的那份账单会把 {@code monthSpentBefore} 清空：重算无从得知
+     * 「结算前」的累计额，留着一个编造的数字会让账单上那句
+     * 「结算前本月已消费 ¥X」撒谎。少一句解释，好过多一句错的。
+     *
+     * @param order 已结算的订单（{@code endTime} 非空）
+     * @return 可展示的快照；所有组合都与落库对不上时返回 null
+     */
+    private OrderBillSnapshot recomputeBill(Order order) {
+        try {
+            List<Booking> bookings = findCoveringBookings(order, order.getEndTime());
+            CardCoverage coverage = queryCardCoverage(order);
+            List<FreeRange> freeRanges = queryFreeRanges(order, order.getStartTime(), order.getEndTime());
+
+            // 枚举顺序：优先「都引入」（最接近结算当时的完整输入），逐项撤掉再试。
+            // 组合数最多 2×2×2 = 8，全是纯内存计算 —— 查询只在上面的三行各一次
+            CardCoverage[] cardOptions = { coverage, null };
+            List<List<FreeRange>> activityOptions = List.of(freeRanges, List.of());
+            for (BigDecimal monthSpent : List.of(BigDecimal.ZERO, billingService.discountThreshold())) {
+                for (CardCoverage cardOption : cardOptions) {
+                    for (List<FreeRange> activityOption : activityOptions) {
+                        BillingResult bill = calculateBill(order, order.getEndTime(), bookings,
+                                monthSpent, cardOption, activityOption);
+                        if (billMatches(order, bill)) {
+                            bill.setMonthSpentBefore(null);
+                            return OrderBillSnapshot.of(bill, !bookings.isEmpty());
+                        }
+                    }
+                }
+            }
+            log.warn("[订单] 老订单重算与落库金额对不上，详情不展示分段账单 orderNo={} 落库合计={}",
+                    order.getOrderNo(), order.getTotalAmount());
+            return null;
+        } catch (RuntimeException e) {
+            // 重算依赖当前库里的活动 / 月卡 / 包场数据，任何一环出意外
+            // 都只该让详情页少一块账单，而不是让整个接口 500
+            log.warn("[订单] 老订单重算失败，详情不展示分段账单 orderNo={} errmsg={}",
+                    order.getOrderNo(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 重算的账单是否与落库金额一致。
+     *
+     * <p>四个金额逐一对比较（{@code compareTo} 而非 {@code equals} —— 列是
+     * {@code DECIMAL(10,2)}、重算结果是任意标度的 BigDecimal，用 {@code equals}
+     * 会栽在标度上）。全等才认这一份：只要有一个对不上，就说明重算的输入
+     * （规则、活动、包场、月卡）与结算当时已经不是同一套了。
+     *
+     * @param order 订单（读取落库的四个金额）
+     * @param bill  重算出的账单
+     * @return true 表示四个金额全部一致
+     */
+    private static boolean billMatches(Order order, BillingResult bill) {
+        return sameAmount(order.getTotalAmount(), bill.getTotalAmount())
+                && sameAmount(order.getDiscountAmount(), bill.getDiscountAmount())
+                && sameAmount(order.getCardFreeAmount(), bill.getCardFreeAmount())
+                && sameAmount(order.getActivityFreeAmount(), bill.getActivityFreeAmount());
+    }
+
+    /**
+     * 两个金额是否等值（null 安全）。
+     *
+     * @param left  落库金额，可为 null
+     * @param right 重算金额
+     * @return 双方都非空时按 {@code compareTo} 比较；一方为空时只有都为空才算一致
+     */
+    private static boolean sameAmount(BigDecimal left, BigDecimal right) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        return left.compareTo(right) == 0;
     }
 
     // ==================================================================
@@ -868,37 +1188,8 @@ public class OrderService {
             return BizResult.fail(ErrorCode.ORDER_STATUS_INVALID, "离场时刻不能是未来时刻");
         }
 
-        return BizResult.ok(applySettlement(order, endTime, adminId, trimToNull(request.getReason())));
-    }
-
-    // ==================================================================
-    // 支付凭证（人工核销降级路径）
-    // ==================================================================
-
-    /**
-     * 用户提交支付凭证（付款截图）。
-     *
-     * <p>订单仍留在待支付状态，等管理员核销才转已支付 —— 转账动作是管理员做的，
-     * 用户的提交只是「我付了，你看」。
-     *
-     * @param userId  当前登录用户 ID
-     * @param orderId 订单 ID
-     * @param request 凭证请求
-     * @return 成功返回空数据
-     */
-    @Transactional
-    public BizResult<Void> submitPaymentProof(Long userId, Long orderId, PaymentProofRequest request) {
-        Order order = findOwnedOrder(userId, orderId);
-        if (order == null) {
-            return BizResult.fail(ErrorCode.ORDER_NOT_FOUND);
-        }
-        if (!OrderStatus.PENDING_PAYMENT.name().equals(order.getStatus())) {
-            return BizResult.fail(ErrorCode.ORDER_STATUS_INVALID, "只有待支付的订单才能提交支付凭证");
-        }
-
-        orderMapper.updatePaymentProof(orderId, trimToNull(request.getPaymentProof()));
-        log.info("[订单] 用户提交支付凭证 orderNo={}", order.getOrderNo());
-        return BizResult.ok(null);
+        return BizResult.ok(applySettlement(order, endTime, adminId,
+                trimToNull(request.getReason()), OrderLeftEvent.Source.ADMIN_ADJUST));
     }
 
     // ==================================================================
@@ -937,9 +1228,46 @@ public class OrderService {
      * @return 计费结果
      */
     private BillingResult calculateBill(Order order, LocalDateTime endTime, List<Booking> bookings) {
+        return calculateBill(order, endTime, bookings, queryMonthSpent(order));
+    }
+
+    /**
+     * 同上，但「结算前当月累计额」由调用方给。
+     *
+     * <p><b>为什么要把 monthSpent 抽成参数</b>：它平时取自 {@link #queryMonthSpent}
+     * （结算与预览都走那条路），但订单详情的「老订单重算」（见 {@link #recomputeBill}）
+     * 不能用它 —— 那个查询是「该月已支付订单之和」，重算时【包含本单自身】，
+     * 而结算时不含，会把月累计顶过优惠门槛、算出与落库不符的金额。
+     * 重算改为把两种优惠状态各算一遍，monthSpent 因此是「必不达标」与「必达标」两个极端值。
+     *
+     * @param order      订单
+     * @param endTime    离场时刻
+     * @param bookings   本单期间命中的已付款包场
+     * @param monthSpent 结算前当月累计实付额，决定本单走原价还是优惠价
+     * @return 计费结果
+     */
+    private BillingResult calculateBill(Order order, LocalDateTime endTime, List<Booking> bookings,
+                                        BigDecimal monthSpent) {
+        return calculateBill(order, endTime, bookings, monthSpent,
+                queryCardCoverage(order),
+                queryFreeRanges(order, order.getStartTime(), endTime));
+    }
+
+    /**
+     * 同上，但月卡覆盖与免费活动也由调用方给。
+     *
+     * <p><b>为什么这两个也要能传</b>：结算与预览走上面的四参版（现查现用），
+     * 而老订单重算（{@link #recomputeBill}）要在「落库没减过月卡 / 活动」时
+     * 传 {@code null} 与空列表，把这两样【后来才有的】可变输入排除出去 ——
+     * 否则用户买了卡之后，他买卡之前的全部历史订单都会重算失败。
+     *
+     * @param coverage   月卡覆盖范围；null 表示不引入月卡
+     * @param freeRanges 免费活动区间；空列表表示不引入活动
+     */
+    private BillingResult calculateBill(Order order, LocalDateTime endTime, List<Booking> bookings,
+                                        BigDecimal monthSpent, CardCoverage coverage,
+                                        List<FreeRange> freeRanges) {
         List<TimeRange> ranges = billableRanges(order.getStartTime(), endTime, bookings);
-        BigDecimal monthSpent = queryMonthSpent(order);
-        CardCoverage coverage = queryCardCoverage(order);
 
         if (ranges.isEmpty()) {
             // 整段被包场覆盖：把计费起止都落在离场时刻，表示「这段没有任何计费」。
@@ -950,7 +1278,8 @@ public class OrderService {
 
         List<BillingResult> parts = new ArrayList<>();
         for (TimeRange range : ranges) {
-            parts.add(billingService.calculate(range.from(), range.to(), monthSpent, coverage));
+            parts.add(billingService.calculate(range.from(), range.to(), monthSpent,
+                    coverage, freeRanges));
         }
         // 起点取【实际计费起点】（第一段的开始），不是订单的开门时刻 ——
         // 包场人提前到店时两者相差几小时，返回开门时刻会让前端展示出
@@ -1081,6 +1410,24 @@ public class OrderService {
     }
 
     /**
+     * 查询本单区间内命中的免费活动区间。
+     *
+     * <p>与 {@link #queryCardCoverage} 同一套口径：解析放在这里由 {@code calculateBill}
+     * 统一调用，让「结账预览」与「实际结算」不可能各判一套。
+     *
+     * <p>传的是<b>完整的计费区间</b>而不是包场剪除后的某一段：活动与订单怎么相交，
+     * 由 {@code BillingService} 的切段逻辑去裁 —— 那是边界口径的唯一定义处。
+     *
+     * @param order 订单
+     * @param from  区间起点（通常是订单的开门时刻）
+     * @param to    区间终点（离场时刻或预览时刻）
+     * @return 免费区间列表；没有活动时返回空列表（不必判 null）
+     */
+    private List<FreeRange> queryFreeRanges(Order order, LocalDateTime from, LocalDateTime to) {
+        return freePeriodService.findRangesFor(order.getStoreId(), from, to);
+    }
+
+    /**
      * 合并多段的计费结果为一份账单。
      *
      * <p>整单属性（是否优惠、结算前累计额）取第一段的 —— 各段传入的
@@ -1101,6 +1448,7 @@ public class OrderService {
         merged.setTotalAmount(sumOf(parts, BillingResult::getTotalAmount));
         merged.setDiscountAmount(sumOf(parts, BillingResult::getDiscountAmount));
         merged.setCardFreeAmount(sumOf(parts, BillingResult::getCardFreeAmount));
+        merged.setActivityFreeAmount(sumOf(parts, BillingResult::getActivityFreeAmount));
         merged.setMonthSpentBefore(parts.get(0).getMonthSpentBefore());
         merged.setDiscounted(parts.get(0).isDiscounted());
         return merged;
@@ -1127,6 +1475,7 @@ public class OrderService {
         bill.setTotalAmount(BigDecimal.ZERO);
         bill.setDiscountAmount(BigDecimal.ZERO);
         bill.setCardFreeAmount(BigDecimal.ZERO);
+        bill.setActivityFreeAmount(BigDecimal.ZERO);
         bill.setMonthSpentBefore(monthSpent);
         bill.setDiscounted(false);
         return bill;

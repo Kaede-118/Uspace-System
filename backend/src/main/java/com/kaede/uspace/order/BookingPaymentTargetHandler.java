@@ -68,6 +68,23 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
     /**
      * {@inheritDoc}
      *
+     * <p><b>包场等复核，不即交付</b> —— 它交付的是一份<b>排他性</b>：
+     * 付款成功会生成邀请令牌，此后这场时段只有持令牌的人进得来
+     * （见 {@link #markPaid}）。令牌一旦发出去就收不回来，而它同时意味着
+     * 「这个时段别人不能来玩了」—— 一次误放行的代价是一场包场被搅局，
+     * 所以宁可让管理员扫一眼截图。
+     *
+     * <p>这与订单正好相反：订单买的是一段已经发生过的服务，交付物早就消耗掉了；
+     * 包场买的是一份<b>还未行使的权利</b>，发出去就作数。
+     */
+    @Override
+    public boolean deliverOnSubmit() {
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * <p>这里校验的是「发起支付的人是不是包场人」—— 包场由管理员排期时
      * 就指定了包场人，只有他能付这笔钱。被邀请者不需要付款（包场费已预付）。
      */
@@ -79,6 +96,22 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
         }
         if (!BookingStatus.PENDING_PAYMENT.name().equals(booking.getStatus())) {
             return BizResult.fail(ErrorCode.BUSINESS_REJECTED, "该包场当前不需要支付");
+        }
+        return BizResult.ok(toTarget(booking));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>归属校验仍认 {@code hostUserId} —— 包场费只有包场人付，
+     * 被邀请者不需要付款（那是包场人预付掉的）。状态则不校验：
+     * 提交凭证时包场应当处于什么状态，由 {@code PaymentProofService} 判断。
+     */
+    @Override
+    public BizResult<PaymentTarget> loadForProof(Long id, Long userId) {
+        Booking booking = bookingMapper.selectById(id);
+        if (booking == null || !booking.getHostUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.BOOKING_NOT_FOUND);
         }
         return BizResult.ok(toTarget(booking));
     }

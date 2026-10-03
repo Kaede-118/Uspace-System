@@ -14,20 +14,58 @@
  * 传错不会报错，只会永远返回第一页 —— 每个函数的注释里都标了。
  */
 import http from './http'
+import { uploadImage } from './upload'
 
 /* ==================== 用户管理 ==================== */
 
 /**
- * 分页查用户。
+ * 分页查用户，支持筛选与排序。
+ *
+ * <p>每一条记录的 `cardType`（生效中的月卡类型）与 `totalStayMinutes`
+ * （累计在店分钟数）都是后端**算出来的**，不是用户表上的列。
+ *
+ * <p>⚠️ 排序靠 `sortBy` + `desc`，而 `sortBy` 的取值只认三个：
+ * `createdAt` / `totalPaid` / `stayMinutes`。传别的后端会**回落到默认排序**
+ * 而不是报错 —— 所以排序「没生效」时先检查拼写，别以为是接口坏了。
  *
  * @param {object} [params]
- * @param {string} [params.keyword] 按用户名 / 昵称模糊搜索
- * @param {number} [params.page]    页码（注意：这里用 page，不是 pageNum）
- * @param {number} [params.size]    每页条数
+ * @param {string} [params.keyword]  匹配登录名 / 昵称 / QQ 号
+ * @param {string} [params.role]     USER / ADMIN
+ * @param {number} [params.status]   1=正常 0=禁用
+ * @param {boolean} [params.hasCard] 只看有（true）/ 没有（false）生效月卡的用户
+ * @param {string} [params.cardType] ALL_DAY / NIGHT；**只在 hasCard=true 时有意义**
+ * @param {string} [params.sortBy]   排序键，见上
+ * @param {boolean} [params.desc]    是否降序
+ * @param {number} [params.page]     页码（注意：这里用 page，不是 pageNum）
+ * @param {number} [params.size]     每页条数
  * @returns {Promise<{data:{total, current, size, records}}>}
  */
 export function listUsers(params = {}) {
   return http.get('/api/admin/users', { params })
+}
+
+/**
+ * 修改用户资料（管理员侧）。
+ *
+ * <p><b>这是全站唯一能改 QQ 号的入口</b> —— 用户自己在「编辑资料」里改不了，
+ * 后端会返回 40937「QQ 号需要联系管理员修改」。
+ *
+ * <p>⚠️ <b>它是全量替换语义</b>：没传的字段等于清空。页面必须先把当前值
+ * 回填、提交时一起带上，否则会把手机号、偏好一起抹掉。
+ *
+ * <p>`id` 与登录名不在请求体里 —— 前者由路径指定，后者干脆不可改
+ * （登录名是登录凭据的一半，改了用户会在毫不知情的情况下登不进去）。
+ *
+ * @param {number|string} id 目标用户 ID
+ * @param {object} data
+ * @param {string} [data.nickname]   昵称，传 null 清空（会按 QQ → 登录名兜底）
+ * @param {string} [data.phone]      手机号，传 null 清空
+ * @param {string} [data.qq]         QQ 号，传 null **解绑**
+ * @param {string} [data.preference] 游玩偏好，传 null 清空
+ * @returns {Promise<{data:object}>} 更新后的用户详情
+ */
+export function updateUser(id, data) {
+  return http.put(`/api/admin/users/${id}`, data)
 }
 
 /**
@@ -139,6 +177,61 @@ export function updateClosure(id, data) {
  */
 export function deleteClosure(id) {
   return http.delete(`/api/admin/store/closures/${id}`)
+}
+
+/* ==================== 免费时段（活动） ==================== */
+
+/**
+ * 分页查免费活动。
+ *
+ * <p>活动区间内所有订单实收为 0 —— 店里照常营业、门照开，只是账单不计费。
+ * 与停业（拒绝新订单）不是一回事，两者在后台是「门店」页的两个 tab。
+ *
+ * @param {object} [params]
+ * @param {number} [params.page] 页码（与停业同一套，用 page/size）
+ * @param {number} [params.size] 每页条数
+ * @returns {Promise<{data:{total, current, size, records}}>}
+ */
+export function listFreePeriods(params = {}) {
+  return http.get('/api/admin/store/free-periods', { params })
+}
+
+/**
+ * 新增免费活动。
+ *
+ * <p>与已有活动重叠会被拒绝（40945）—— 首尾相接的两场不算重叠。
+ *
+ * @param {object} data
+ * @param {string} data.startAt 开始时刻，格式 {@code yyyy-MM-dd HH:mm:ss}
+ * @param {string} data.endAt   结束时刻
+ * @param {string} [data.reason] 活动名称，如「跨年活动」
+ * @returns {Promise}
+ */
+export function createFreePeriod(data) {
+  return http.post('/api/admin/store/free-periods', data)
+}
+
+/**
+ * 改免费活动。
+ *
+ * @param {number|string} id 活动 ID
+ * @param {object} data 同 {@link createFreePeriod}
+ * @returns {Promise}
+ */
+export function updateFreePeriod(id, data) {
+  return http.put(`/api/admin/store/free-periods/${id}`, data)
+}
+
+/**
+ * 删免费活动（逻辑删除）。
+ *
+ * <p>删完立刻不再免单，已发生的订单不受影响（金额在结算时就已落库）。
+ *
+ * @param {number|string} id 活动 ID
+ * @returns {Promise}
+ */
+export function deleteFreePeriod(id) {
+  return http.delete(`/api/admin/store/free-periods/${id}`)
 }
 
 /* ==================== 包场排期 ==================== */
@@ -397,18 +490,9 @@ export function adjustOrder(id, data) {
   return http.post(`/api/admin/orders/${id}/adjust`, data)
 }
 
-/**
- * 人工核销（降级路径）。
- *
- * <p>用户传了转账截图、管理员确认到账后调它，等价于收到了一次支付回调。
- *
- * @param {number|string} id 订单 ID
- * @param {string} paymentNo 支付流水号（管理员手工填）
- * @returns {Promise}
- */
-export function confirmPayment(id, paymentNo) {
-  return http.post(`/api/admin/orders/${id}/confirm-payment`, { paymentNo })
-}
+// 说明：这里曾有一个 confirmPayment（订单专属的人工核销接口）。
+// 2026-09-30 起付款凭证由下面的 confirmProof 统一复核 ——
+// 后台列出来的每一条【就是】凭证本身，不再需要「先查目标有没有凭证」那一步。
 
 /* ==================== 商品 ==================== */
 
@@ -434,7 +518,7 @@ export function listAdminProducts(params = {}) {
  *
  * @param {object} data
  * @param {string} data.name 名称
- * @param {string} [data.cover] 封面图路径
+ * @param {string} [data.cover] 封面图路径，由 {@link uploadProductCover} 上传得到
  * @param {string} [data.description] 描述
  * @param {number|string} data.price 售价
  * @param {number} data.stock 库存
@@ -468,6 +552,21 @@ export function updateProduct(id, data) {
  */
 export function deleteProduct(id) {
   return http.delete(`/api/admin/products/${id}`)
+}
+
+/**
+ * 上传商品封面图（multipart）。
+ *
+ * <p><b>只返回图片路径，不写任何数据库</b> —— 把返回的 `cover` 填进表单，
+ * 随新增 / 修改商品一起提交。三条理由：新增商品时还没有 ID 可写、
+ * 表单是「填一半可以取消」的语义、传错可以反复换一张。
+ *
+ * @param {File} file 图片文件。后端按【文件头】判类型（JPG / PNG / WebP），
+ *                    不看 Content-Type；上限 2MB
+ * @returns {Promise<{data:{cover:string}}>} `data.cover` 是站内相对路径
+ */
+export function uploadProductCover(file) {
+  return uploadImage('/api/admin/products/cover', file)
 }
 
 /**
@@ -605,4 +704,249 @@ export function createAccessRecord(data) {
  */
 export function mockOpen(data) {
   return http.post('/api/admin/access-records/mock-open', data)
+}
+
+/* ==================== 收款码 ==================== */
+
+/**
+ * 列出全部收款码（含停用的）。
+ *
+ * <p>{@code enabled} 为 0 的也会返回 —— 后台必须看得到停用的码，
+ * 否则停用之后就再也找不回它了，而「临时停用、过阵子再开」正是最常见的用法。
+ * 用户端能看到的只有启用中的，那是另一个接口（{@code api/payment.js} 的
+ * {@code listPayQrs}）。
+ *
+ * @returns {Promise<{data:Array<{id,channel,channelLabel,name,imageUrl,enabled,sort,updatedAt}>}>}
+ */
+export function listAdminPayQrs() {
+  return http.get('/api/admin/pay-qrs')
+}
+
+/**
+ * 新增一张收款码。
+ *
+ * @param {object} data
+ * @param {string} data.channel  WXPAY 微信 / ALIPAY 支付宝
+ * @param {string} data.name     显示名，如「微信收款码」
+ * @param {string} data.imageUrl 图片路径，由 {@link uploadPayQrImage} 上传得到
+ * @param {number} data.enabled  1 启用 / 0 停用。⚠️ 必传：漏传后端会返回 400，
+ *                               而不是替你选一个默认值（两种默认都会出错事）
+ * @param {number} [data.sort]   排序值，不传按 0
+ * @returns {Promise}
+ */
+export function createPayQr(data) {
+  return http.post('/api/admin/pay-qrs', data)
+}
+
+/**
+ * 修改一张收款码（全量替换）。
+ *
+ * <p><b>没传的字段就是清空</b>，所以提交时要把整张表单带上（除了 {@code sort}，
+ * 它不传按 0 处理）。这与商品、机台的 PUT 语义一致。
+ *
+ * @param {number|string} id 收款码 ID
+ * @param {object} data 同上
+ * @returns {Promise}
+ */
+export function updatePayQr(id, data) {
+  return http.put(`/api/admin/pay-qrs/${id}`, data)
+}
+
+/**
+ * 删除一张收款码（逻辑删除）。
+ *
+ * <p>只是「不再出现在任何列表里」，行还留在库中 ——
+ * 历史付款凭证上记着它，物理删掉就说不清那笔钱当时扫的是哪张码了。
+ *
+ * @param {number|string} id 收款码 ID
+ * @returns {Promise}
+ */
+export function deletePayQr(id) {
+  return http.delete(`/api/admin/pay-qrs/${id}`)
+}
+
+/**
+ * 上传收款码图片（multipart）。
+ *
+ * <p><b>只返回图片路径，不写任何数据库</b> —— 把返回的 `imageUrl` 填进表单，
+ * 随新增 / 修改一起提交。与商品封面是同一套语义。
+ *
+ * <p>⚠️ 图片会由前端的 {@code processImage(file, 'payqr')} 处理成
+ * <b>不裁剪、不缩放、PNG 格式</b> —— 二维码转成 JPEG 的话透明底会变黑，
+ * 码就扫不出来了。
+ *
+ * @param {File} file 图片文件。后端按【文件头】判类型（JPG / PNG / WebP）；
+ *                    上限 2MB
+ * @returns {Promise<{data:{imageUrl:string}}>} `data.imageUrl` 是站内相对路径
+ */
+export function uploadPayQrImage(file) {
+  return uploadImage('/api/admin/pay-qrs/image', file)
+}
+
+/* ==================== 付款凭证复核 ==================== */
+
+/**
+ * 分页列出付款凭证。
+ *
+ * <p>不传 `verifyStatus` 时返回全部，排序是「有风险的 → 待复核的 → 新的」——
+ * 后台默认视图就靠它：一打开先看到的应该是最需要处理的那几条。
+ *
+ * @param {object} params
+ * @param {number} [params.page] 页码，从 1 开始
+ * @param {number} [params.size] 每页条数，最多 100
+ * @param {string} [params.verifyStatus] SUBMITTED 待复核 / CONFIRMED 已核对 /
+ *                                       REJECTED 未通过，不传则全部
+ * @returns {Promise<{data:{records:Array, total:number, ...}}>}
+ *          `records` 每项含 `proofUrl`（截图）、`amount`（应付额）、
+ *          `delivered`（该笔是否已交付 —— 见 {@link rejectProof}）
+ */
+export function listAdminProofs({ page = 1, size = 10, verifyStatus = '' } = {}) {
+  return http.get('/api/admin/payment-proofs', { params: { page, size, verifyStatus } })
+}
+
+/**
+ * 复核通过。
+ *
+ * <p>对订单与商品而言这是**纯登记**（钱在用户提交那一刻就算收到了）；
+ * 对包场与月卡而言**此刻才交付** —— 邀请令牌与月卡都产生在这一步。
+ *
+ * @param {number|string} id 凭证 ID
+ * @returns {Promise}
+ */
+export function confirmProof(id) {
+  return http.post(`/api/admin/payment-proofs/${id}/confirm`)
+}
+
+/**
+ * 复核不通过。
+ *
+ * <p>⚠️ **驳回不会回退已经发生的交付**：订单与商品在用户提交那刻就落账了
+ * （订单已支付、库存已扣、累计消费已加），系统不做自动回退，只能人工处置。
+ * 所以列表里 `delivered` 为 true 的条目，驳回之后还有一步要做 ——
+ * 后台用醒目标记提示这一点。
+ *
+ * @param {number|string} id     凭证 ID
+ * @param {string}        reason 未通过原因（必填，会展示给用户）
+ * @returns {Promise}
+ */
+export function rejectProof(id, reason) {
+  return http.post(`/api/admin/payment-proofs/${id}/reject`, { reason })
+}
+
+/* ==================== 对账（支付改造 Phase 5） ==================== */
+
+/**
+ * 上传账单并执行对账。
+ *
+ * <p>一次上传就是一个批次，<b>没有「先预览再确认」</b>：对账不改任何业务状态
+ *（不碰订单、不碰复核结论），传错一份已经对过的账单会走「已被认领」那一支、
+ * 零差异，所以不值得为它引入一个中间态。
+ *
+ * <p><b>不需要传渠道</b>：微信还是支付宝由表头认出来。让管理员多选一个东西，
+ * 就多一个选错的机会，而选错的后果是数据错且不会报错。
+ *
+ * <p>响应里直接带着解析结果（账单多少笔、合计多少、覆盖哪段时间）——
+ * 管理员据此就能看出自己有没有传错文件。
+ *
+ * @param {File} file 账单文件（微信 xlsx / 支付宝 CSV / 标准模板 CSV）
+ * @returns {Promise<{data:object}>} data 是完整的批次视图
+ */
+export function uploadReconcileBill(file) {
+  const form = new FormData()
+  form.append('file', file)
+  // ⚠️ 不要手写 Content-Type：axios 认出 FormData 会自己补 boundary，
+  // 手写的那个字符串少了 boundary，后端解析不出任何字段
+  return http.post('/api/admin/reconcile-batches', form)
+}
+
+/**
+ * 分页查对账批次。
+ *
+ * @param {object} [params]
+ * @param {number} [params.page] 页码（注意：这里用 page，不是 pageNum）
+ * @param {number} [params.size] 每页条数
+ * @returns {Promise<{data:{total, current, size, records}}>}
+ *          `records` 每项含 `unhandledCount`（还有几条差异没处理）与
+ *          `hasBillFile`（下载按钮可不可用）
+ */
+export function listReconcileBatches({ page = 1, size = 10 } = {}) {
+  return http.get('/api/admin/reconcile-batches', { params: { page, size } })
+}
+
+/**
+ * 取一个批次的详情。
+ *
+ * <p>比列表多一个 `diffTypeCounts`（各类差异各多少条）。
+ * ⚠️ **某个类型一条都没有时那个键不存在**，取值要用 `?? 0`。
+ *
+ * @param {number|string} id 批次 ID
+ * @returns {Promise<{data:object}>}
+ */
+export function getReconcileBatch(id) {
+  return http.get(`/api/admin/reconcile-batches/${id}`)
+}
+
+/**
+ * 分页查某个批次的差异明细。
+ *
+ * <p>排序由后端给：待处理的在前，同类里按紧急程度排。
+ *
+ * @param {number|string} batchId    批次 ID
+ * @param {object}        [params]
+ * @param {number}        [params.page]     页码
+ * @param {number}        [params.size]     每页条数
+ * @param {string}        [params.diffType] 类型筛选，空串表示不过滤
+ * @param {number|null}   [params.handled]  处理状态（0 / 1），null 表示不过滤
+ * @returns {Promise<{data:{total, current, size, records}}>}
+ */
+export function listReconcileDiffs(batchId, { page = 1, size = 20, diffType = '', handled = null } = {}) {
+  return http.get(`/api/admin/reconcile-batches/${batchId}/diffs`, {
+    params: { page, size, diffType, handled }
+  })
+}
+
+/**
+ * 标记一条差异已处理。
+ *
+ * <p><b>这个动作不改任何业务数据</b> —— 不改订单状态、不代提交凭证、不撤批次。
+ * 差异只是给人看的线索，钱怎么处置由人决定。
+ *
+ * @param {number|string} id   差异 ID
+ * @param {string}        note 处理备注，<b>选填</b>
+ *        （它是管理员给自己的备忘，不是给顾客的结论，所以不强制填）
+ * @returns {Promise}
+ */
+export function handleReconcileDiff(id, note) {
+  return http.post(`/api/admin/reconcile-diffs/${id}/handle`, { note })
+}
+
+/**
+ * 下载账单原文件。
+ *
+ * <p>⚠️ <b>不能用 `<a href="/api/admin/reconcile-batches/{id}/file">` 打开</b>：
+ * 那样不会带上 `Authorization` 头，拿到的是 401。而且账单是敏感数据，
+ * 服务端刻意把它放在公开的 `/uploads/` 之外，只认这个带鉴权的接口。
+ *
+ * <p>所以走 blob：拿到数据后在内存里拼一个临时地址触发下载，用完立刻释放 ——
+ * 不释放的话每点一次下载就多占一份文件大小的内存，直到刷新页面才回收。
+ *
+ * @param {number|string} id       批次 ID
+ * @param {string}        fileName 下载时的文件名（后端也给了，这里用列表里那条）
+ * @returns {Promise<void>}
+ */
+export async function downloadReconcileBill(id, fileName = '账单') {
+  const resp = await http.get(`/api/admin/reconcile-batches/${id}/file`, {
+    responseType: 'blob'
+  })
+  const url = URL.createObjectURL(resp.data)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = fileName
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
 }

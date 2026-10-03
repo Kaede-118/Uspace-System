@@ -57,4 +57,14 @@ public class OrderProperties {
      * 两者的关系由 {@code OrderServiceTests} 的用例钉住。
      */
     private Duration participantLeadDuration = Duration.ofMinutes(5);
+
+    /**
+     * 包场结束前多久，开始在计时卡片上提示「之后按时长计费」。默认 15 分钟。
+     *
+     * <p><b>为什么包场期间平时不提示、快结束时才提示</b>：包场时段不计费，
+     * 报一句「还有 X 秒进入下一档 ¥4」是假话；但包场一结束就重新按分钟计费，
+     * 打算继续玩的人需要提前知道 —— 否则他会看着一个不动的 ¥0.00 突然跳到 ¥4，
+     * 中间没有任何预兆。15 分钟够他决定是收手还是再来一局（一局的下限约 6 分钟）。
+     */
+    private Duration bookingEndWarning = Duration.ofMinutes(15);
 }

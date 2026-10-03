@@ -59,8 +59,9 @@ public class BillingResult {
      * <p>对应订单表的 {@code discount_amount} 列，由计费服务直接给出，
      * 免得订单、统计、QQ 机器人各处重复实现一遍优惠金额的算法。
      *
-     * <p>注意它<b>不含</b>月卡免掉的部分（那是 {@link #cardFreeAmount}）——
-     * 两种优惠并行存在、互不重叠，混在一起的话，
+     * <p>注意它<b>不含</b>月卡免掉的部分（那是 {@link #cardFreeAmount}）、
+     * 也<b>不含</b>免费活动免掉的部分（那是 {@link #activityFreeAmount}）——
+     * 三种优惠并行存在、互不重叠，混在一起的话，
      * 统计口径里「优惠活动的效果」会虚高，且事后无法拆开。
      */
     private BigDecimal discountAmount;
@@ -73,4 +74,16 @@ public class BillingResult {
      * 理由见该字段的说明。
      */
     private BigDecimal cardFreeAmount;
+
+    /**
+     * 本单因免费活动免掉的金额（元）。不在活动区间内时为 0。
+     *
+     * <p>对应订单表的 {@code activity_free_amount} 列。与 {@link #cardFreeAmount}
+     * 一样<b>逐段累加</b>而非反推，理由同该字段的说明。
+     *
+     * <p>⚠️ <b>不含被月卡覆盖的段</b>：月卡用户本来就免费，活动并没有为他省下什么。
+     * 两个口径混在一起的话，复盘一场活动「送出去多少钱」会虚高 ——
+     * 而那种错不会有任何报错，只会让运营以为活动比实际更划算。
+     */
+    private BigDecimal activityFreeAmount;
 }

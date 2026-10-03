@@ -53,6 +53,30 @@ public class AdminUserVo {
     /** 累计实付总额 = orderPaid + cardPaid */
     private BigDecimal totalPaid;
 
+    /**
+     * 生效中的月卡类型：{@code ALL_DAY} / {@code NIGHT}；没有生效卡时为 null。
+     *
+     * <p>它是<b>算出来的</b>，不是 {@code sys_user} 上的列 —— 判定口径与
+     * 结算免单、在店名册完全一致（状态为生效中、且今天落在卡的起止日期之间）。
+     * 口径不一致的话，运营会看到「列表说他有卡、结账却照收钱」这种对不上的现象。
+     *
+     * <p>只给 code，中文名由前端映射（与在店名册的做法一致）。
+     */
+    private String cardType;
+
+    /**
+     * 累计在店时长（分钟）。<b>同样是算出来的</b>：对 {@code biz_order.stay_minutes} 求和。
+     *
+     * <p>⚠️ 与「累计消费」的口径差异要留意：<b>这个数包含了免费时段、也包含包场那几小时</b>
+     * （在店时长是「人在店里待了多久」，不是「计费了多久」）。
+     * 两个数字并排展示时它们本来就不该相等，别当成 bug。
+     *
+     * <p>只累加已结算的订单（{@code stay_minutes} 列在 {@code IN_USE} 期间是 NULL），
+     * 所以「正在店里玩着」的那一段不计入 —— 它是尚未定局的数，
+     * 计入的话刷新一次跳一次。
+     */
+    private Long totalStayMinutes;
+
     /** 注册时间 */
     private LocalDateTime createdAt;
 

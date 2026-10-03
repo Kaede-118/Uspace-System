@@ -4,7 +4,6 @@ import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.order.dto.AdjustOrderRequest;
-import com.kaede.uspace.order.dto.ConfirmPaymentRequest;
 import com.kaede.uspace.order.dto.OrderSettleVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import jakarta.validation.Valid;
@@ -30,10 +29,13 @@ import java.time.LocalDateTime;
  *
  * <p>权限声明放在<b>类上</b>而不是每个方法上 —— 少一处遗漏的机会。
  *
- * <p>这里有两个「人工兜底」的入口：调整时长与核销支付。
- * 它们的存在不是因为系统不可靠，而是因为两件事本质上需要人判断：
- * 顾客可能忘记点「结束使用」，而运营方在拿到支付商户号之前
- * 只能靠人核对付款截图。
+ * <p>这里有一个「人工兜底」的入口：调整时长。它的存在不是因为系统不可靠，
+ * 而是因为这件事本质上需要人判断 —— 顾客可能忘记点「结束使用」，
+ * 只有查了监控才知道他是什么时候走的。
+ *
+ * <p><b>核销付款凭证的入口不在这里</b>，而在 {@code AdminPaymentProofController}：
+ * 凭证是四类收款共用的（订单 / 包场 / 月卡 / 商品），挂在订单下面
+ * 就等于给它开了一个只认订单的旁路 —— 那正是 2026-09-30 改造前的情形。
  */
 @RestController
 @RequestMapping("/api/admin/orders")
@@ -42,11 +44,9 @@ import java.time.LocalDateTime;
 public class AdminOrderController {
 
     private final OrderService orderService;
-    private final PaymentService paymentService;
 
-    public AdminOrderController(OrderService orderService, PaymentService paymentService) {
+    public AdminOrderController(OrderService orderService) {
         this.orderService = orderService;
-        this.paymentService = paymentService;
     }
 
     /**
@@ -111,24 +111,5 @@ public class AdminOrderController {
                                                            @Valid @RequestBody AdjustOrderRequest request,
                                                            @AuthenticationPrincipal UserPrincipal me) {
         return ApiResult.of(orderService.adjustOrder(id, request, me.id()));
-    }
-
-    /**
-     * 人工核销支付（降级路径）。
-     *
-     * <p>用户上传付款截图后，管理员核对到账再确认。订单必须已经提交过凭证 ——
-     * 没有凭证就核销等于凭空把订单标成已支付。核销人记在
-     * {@code confirmed_by} 上，与线上回调（系统自动确认）区分得开。
-     *
-     * @param id      订单 ID
-     * @param request 支付交易号，可空
-     * @param me      当前登录的管理员
-     * @return 成功返回空数据
-     */
-    @PostMapping("/{id}/confirm-payment")
-    public ResponseEntity<ApiResult<Void>> confirmPayment(@PathVariable Long id,
-                                                          @Valid @RequestBody ConfirmPaymentRequest request,
-                                                          @AuthenticationPrincipal UserPrincipal me) {
-        return ApiResult.of(paymentService.confirmPayment(id, me.id(), request));
     }
 }

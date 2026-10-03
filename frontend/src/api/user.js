@@ -4,6 +4,7 @@
  * <p>路径前缀 {@code /api/user}。注册匿名，其余需登录。
  */
 import http from './http'
+import { uploadImage } from './upload'
 
 /**
  * 注册。
@@ -22,6 +23,40 @@ import http from './http'
  */
 export function register(data) {
   return http.post('/api/user/register', data)
+}
+
+/**
+ * 取一个 QQ 验证码。
+ *
+ * <p>返回体里有两个东西，<b>职责完全不同</b>：
+ * - `code` —— 给用户，复制了发到 QQ 群里。它不是凭证（群里所有人都看得见）
+ * - `challengeId` —— **是**凭证，留在页面里。轮询状态与提交注册都要带上它
+ *
+ * <p>少了 challengeId 会出两个洞：轮询只能拿 QQ 去问（等于给所有人一个
+ * 「查这个 QQ 注册没有」的探测器），以及群里任何一个看到验证码的人
+ * 都能抢先用那个 QQ 注册。
+ *
+ * @param {string} qq 要验证的 QQ 号
+ * @returns {Promise<{data:{challengeId, code, expiresAt, ttlSeconds}}>}
+ */
+export function issueQqVerify(qq) {
+  return http.post('/api/user/qq-verify', { qq })
+}
+
+/**
+ * 查 QQ 验证状态（注册页轮询用）。
+ *
+ * <p>⚠️ **是 POST 不是 GET**，虽然它只读。因为它要带 challengeId，
+ * 而那是个能换取账号绑定的凭证 —— 放进 URL 查询参数会落进访问日志、
+ * 浏览器历史与反向代理日志，看到日志的人就能抢先注册。
+ *
+ * @param {string} qq          用户在页面里填的 QQ
+ * @param {string} challengeId 签发时给出的凭证
+ * @returns {Promise<{data:{verified, expiresAt}}>} verified 是**布尔**，
+ *          不是字符串状态 —— 后端刻意如此，写错一个字母就永远不相等那种坑
+ */
+export function getQqVerifyStatus(qq, challengeId) {
+  return http.post('/api/user/qq-verify/status', { qq, challengeId })
 }
 
 /**
@@ -83,30 +118,14 @@ export function uploadAvatar(file) {
 /**
  * 上传背景图（multipart）。
  *
- * @param {File} file 图片文件，约 6:1 横长图。后端不做宽高比校验，
- *                    比例由前端 {@code object-fit: cover} 裁切
+ * <p>⚠️ 传进来的图会先被 {@code utils/image.js} 压成 3:1 的横长条
+ *（与 UserCard 素材区比例一致）—— 卡片上的 {@code object-fit: cover}
+ * 因此等于原样铺满、不会再裁第二次。比 3:1 更宽的素材（如 6:1 的舞萌姓名框）
+ * 按「保留右半」裁切（2026-10-03 定）。后端不做宽高比校验。
+ *
+ * @param {File} file 图片文件，任意比例（上传前会裁成 3:1）
  * @returns {Promise} 成功时 data 是完整的用户资料
  */
 export function uploadBanner(file) {
   return uploadImage('/api/user/me/banner', file)
-}
-
-/**
- * 上传图片的公共实现。
- *
- * <p>⚠️ <b>不要手动设 {@code Content-Type}</b>：必须让浏览器自己带上
- * {@code multipart/form-data; boundary=...}，手写的那个字符串里没有 boundary，
- * 后端解析不出任何字段，报的还是「请选择要上传的图片」——看起来像没选文件。
- *
- * @param {string} url  上传端点
- * @param {File}   file 文件
- * @returns {Promise}
- */
-function uploadImage(url, file) {
-  const form = new FormData()
-  // 字段名固定为 file（后端 @RequestParam("file")），改成别的会返回 400
-  form.append('file', file)
-  return http.post(url, form, {
-    headers: { 'Content-Type': 'multipart/form-data' }
-  })
 }

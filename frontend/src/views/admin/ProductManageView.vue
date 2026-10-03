@@ -10,6 +10,11 @@
  * （后端如此，不是笔误）。传错不会报错，只会永远返回第一页 ——
  * 表现为「翻页没反应」，而控制台里一行异常都没有。
  *
+ * <p><b>封面图有自己的上传端点</b>（{@code POST /api/admin/products/cover}），
+ * 但它<b>只产路径、不写库</b> —— 上传拿到的那串路径填进表单，
+ * 仍然随下面那个全量 {@code PUT} 一起提交。所以「既然有单独的封面接口，
+ * 为什么保存还要全量提交」这个疑问的答案是：那个接口只负责把文件存下来。
+ *
  * <p>⚠️ <b>商品没有「只改上下架」的接口</b>（机台有 {@code PUT /{id}/status}，
  * 商品没有），所以上下架必须走全量替换的 {@code PUT}：把整条记录读出来、
  * 改掉 {@code enabled}、再整体提交。只发一个 {@code {enabled: 0}} 的话，
@@ -22,6 +27,7 @@ import {
   createProduct,
   updateProduct,
   deleteProduct,
+  uploadProductCover,
   listAdminProductOrders
 } from '@/api/admin'
 import { toastSuccess, toastError } from '@/composables/useToast'
@@ -31,6 +37,7 @@ import { PRODUCT_ORDER_STATUS, productOrderStatusCls } from '@/utils/labels'
 import AdminPager from '@/components/AdminPager.vue'
 import AdminSheet from '@/components/AdminSheet.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import ImageUploader from '@/components/ImageUploader.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
 
 /** 每页条数。⚠️ 本页两个列表的分页参数都是 pageNum + pageSize */
@@ -86,6 +93,32 @@ const form = ref({
 const formError = ref('')
 const submitting = ref(false)
 
+/**
+ * 封面图是否正在上传。
+ *
+ * <p>用来禁用「确定」：上传还没回来就点保存的话，{@code form.cover} 还是旧值，
+ * 提交成功、接口 200，而封面悄悄丢了（新增时）或还是上一张（编辑时）。
+ */
+const coverUploading = ref(false)
+
+/**
+ * 封面传完了：接口只返回 {@code {cover}}，填进表单，等提交时随全量替换一起走。
+ *
+ * <p>⚠️ <b>弹层已经关掉就直接丢弃</b>：管理员传完图立刻取消、又打开另一件商品时，
+ * 这个响应可能才回来 —— 不挡的话，路径会写到【另一件商品】的表单上，
+ * 而他若无其事地点保存，B 商品就带上了 A 的封面。全程没有任何报错。
+ */
+function onCoverUploaded(data) {
+  if (!formVisible.value) return
+  form.value.cover = data?.cover || ''
+}
+
+/** 「确定」按钮的文案：上传中优先提示它，免得管理员以为界面卡住了。 */
+const submitText = computed(() => {
+  if (coverUploading.value) return '图片上传中…'
+  return submitting.value ? '提交中…' : '确定'
+})
+
 /* ---------------- 删除确认 ---------------- */
 
 const removing = ref(null)
@@ -126,9 +159,6 @@ const restockPreview = computed(() => {
   const ok = restockValue.value !== '' && Number.isFinite(to) && to >= 0
   return { ok, from, to: ok ? Math.trunc(to) : null }
 })
-
-/** 表单里封面路径的预览地址。空路径不预览。 */
-const coverPreview = computed(() => form.value.cover.trim())
 
 /**
  * 拉取商品列表。
@@ -594,14 +624,23 @@ onMounted(load)
       </div>
 
       <div class="field">
-        <label class="field-label" for="p-cover">封面图地址（选填）</label>
-        <input id="p-cover" v-model="form.cover" class="field-input" maxlength="255" placeholder="/uploads/xxx.jpg" />
-        <div v-if="coverPreview" class="product__preview">
-          <img :src="coverPreview" alt="封面预览" />
-        </div>
-        <p class="product__hint">
-          后台暂未提供图片上传，这里填站内路径（与头像同一种格式）。
-        </p>
+        <label class="field-label">封面图（选填）</label>
+        <ImageUploader
+          kind="product"
+          shape="square"
+          :url="form.cover"
+          hint="会自动裁成正方形；不传则商城里显示占位图"
+          @uploaded="onCoverUploaded"
+          @uploading="coverUploading = $event"
+        />
+        <!--
+          保留「清空封面」这个能力：原来是清空文本框就能撤掉，
+          换成上传器之后要补一个按钮。置空后 buildBody 送上去的是空串，
+          后端归一成 null 即撤掉封面（全量替换语义）。
+        -->
+        <button v-if="form.cover" class="product__cover-remove" @click="form.cover = ''">
+          移除封面
+        </button>
       </div>
 
       <div class="field">
@@ -636,8 +675,12 @@ onMounted(load)
 
       <template #footer>
         <button class="btn btn-ghost" @click="formVisible = false">取消</button>
-        <button class="btn btn-primary" :disabled="submitting" @click="submit">
-          {{ submitting ? '提交中…' : '确定' }}
+        <!--
+          ⚠️ 上传中也要禁用：图片还没传完就提交的话，form.cover 还是旧值，
+          提交成功、接口 200，而封面悄悄丢了
+        -->
+        <button class="btn btn-primary" :disabled="submitting || coverUploading" @click="submit">
+          {{ submitText }}
         </button>
       </template>
     </AdminSheet>
@@ -842,19 +885,14 @@ onMounted(load)
   opacity: 0.6;
 }
 
-.product__preview {
+/*
+ * 「移除封面」：上传器下方的一个小按钮。
+ * 用中性色而不是危险色 —— 撤掉封面随时可以重传，不是破坏性操作。
+ */
+.product__cover-remove {
   margin-top: var(--sp-2);
-  width: 96px;
-  height: 96px;
-  border-radius: var(--r-btn);
-  overflow: hidden;
-  background: var(--c-icon-bg);
-}
-
-.product__preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  font-size: 12px;
+  color: var(--c-text-sub);
 }
 
 .product__info {

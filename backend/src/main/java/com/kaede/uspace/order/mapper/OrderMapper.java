@@ -347,8 +347,11 @@ public interface OrderMapper extends BaseMapper<Order> {
      * @param totalAmount    实收合计（已扣月卡免除）
      * @param discountAmount 月度优惠金额（说明性，已含在合计中）
      * @param cardFreeAmount 月卡免掉的金额（说明性，已从合计中扣除）
+     * @param activityFreeAmount 活动免掉的金额（说明性，已从合计中扣除）
      * @param payableAmount  应付金额
      * @param status         目标状态名
+     * @param billSnapshot   分段账单快照（JSON）。序列化失败时传 null ——
+     *                       快照是展示用的副本，不该因为它写不进去而让结算失败
      * @return 受影响行数；0 表示订单不是使用中状态，或记录不存在
      */
     @Update("""
@@ -362,7 +365,9 @@ public interface OrderMapper extends BaseMapper<Order> {
                    total_amount     = #{totalAmount},
                    discount_amount  = #{discountAmount},
                    card_free_amount = #{cardFreeAmount},
+                   activity_free_amount = #{activityFreeAmount},
                    payable_amount   = #{payableAmount},
+                   bill_snapshot    = #{billSnapshot},
                    status           = #{status},
                    updated_at       = NOW()
              WHERE id = #{id}
@@ -379,8 +384,10 @@ public interface OrderMapper extends BaseMapper<Order> {
                          @Param("totalAmount") BigDecimal totalAmount,
                          @Param("discountAmount") BigDecimal discountAmount,
                          @Param("cardFreeAmount") BigDecimal cardFreeAmount,
+                         @Param("activityFreeAmount") BigDecimal activityFreeAmount,
                          @Param("payableAmount") BigDecimal payableAmount,
-                         @Param("status") String status);
+                         @Param("status") String status,
+                         @Param("billSnapshot") String billSnapshot);
 
     /**
      * 管理员人工调整时长并重算金额。
@@ -405,10 +412,13 @@ public interface OrderMapper extends BaseMapper<Order> {
      * @param totalAmount    实收合计（已扣月卡免除）
      * @param discountAmount 月度优惠金额
      * @param cardFreeAmount 月卡免掉的金额
+     * @param activityFreeAmount 活动免掉的金额
      * @param payableAmount  应付金额
      * @param status         目标状态名
      * @param adjustedBy     调整人（管理员 ID）
      * @param adjustReason   调整原因
+     * @param billSnapshot   分段账单快照（JSON）。人工调整会重算账单，
+     *                       因此快照要【跟着重写】—— 否则详情页展示的还是调整前那一份
      * @return 受影响行数；0 表示订单已支付/已删除，或记录不存在
      */
     @Update("""
@@ -422,7 +432,9 @@ public interface OrderMapper extends BaseMapper<Order> {
                    total_amount     = #{totalAmount},
                    discount_amount  = #{discountAmount},
                    card_free_amount = #{cardFreeAmount},
+                   activity_free_amount = #{activityFreeAmount},
                    payable_amount   = #{payableAmount},
+                   bill_snapshot    = #{billSnapshot},
                    status           = #{status},
                    adjusted         = 1,
                    adjusted_by      = #{adjustedBy},
@@ -443,10 +455,12 @@ public interface OrderMapper extends BaseMapper<Order> {
                          @Param("totalAmount") BigDecimal totalAmount,
                          @Param("discountAmount") BigDecimal discountAmount,
                          @Param("cardFreeAmount") BigDecimal cardFreeAmount,
+                         @Param("activityFreeAmount") BigDecimal activityFreeAmount,
                          @Param("payableAmount") BigDecimal payableAmount,
                          @Param("status") String status,
                          @Param("adjustedBy") Long adjustedBy,
-                         @Param("adjustReason") String adjustReason);
+                         @Param("adjustReason") String adjustReason,
+                         @Param("billSnapshot") String billSnapshot);
 
     /**
      * 支付成功：转入已支付并写全支付字段。
@@ -482,28 +496,4 @@ public interface OrderMapper extends BaseMapper<Order> {
                  @Param("paymentNo") String paymentNo,
                  @Param("paidAt") LocalDateTime paidAt,
                  @Param("confirmedBy") Long confirmedBy);
-
-    /**
-     * 用户提交支付凭证（人工核销的降级路径）。
-     *
-     * <p>上传截图这个动作本身就等于「声明走人工核销」，所以顺手把
-     * {@code payment_method} 标成 {@code QR_UPLOAD}。若用户之后又走线上支付成功，
-     * {@link #markPaid} 会把它覆盖成实际通道，这里写的值自然失效 —— 无害。
-     *
-     * <p>订单仍留在 {@code PENDING_PAYMENT}，等管理员核销才转 {@code PAID}。
-     *
-     * @param id           订单 ID
-     * @param paymentProof 截图存储路径
-     * @return 受影响行数；0 表示订单不是待支付状态，或记录不存在
-     */
-    @Update("""
-            UPDATE biz_order
-               SET payment_proof  = #{paymentProof},
-                   payment_method = 'QR_UPLOAD',
-                   updated_at     = NOW()
-             WHERE id = #{id}
-               AND status = 'PENDING_PAYMENT'
-               AND deleted = 0
-            """)
-    int updatePaymentProof(@Param("id") Long id, @Param("paymentProof") String paymentProof);
 }

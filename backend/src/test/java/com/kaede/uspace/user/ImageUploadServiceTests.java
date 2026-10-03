@@ -3,6 +3,7 @@ package com.kaede.uspace.user;
 import com.kaede.uspace.common.config.UploadProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.upload.ImageStorage;
 import com.kaede.uspace.user.dto.UserProfileVo;
 import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.BeforeEach;
@@ -96,7 +97,9 @@ class ImageUploadServiceTests {
         user.setTotalPaid(BigDecimal.ZERO);
         userId = fakeMapper.seed(user).getId();
 
-        service = new ImageUploadService(props, fakeMapper.asMapper());
+        // 落盘那一段已经抽到公共层，这里给它同一个 props —— 两者共享引用，
+        // 所以下面那些「构造之后再改配置」的用例（如超限）仍然生效
+        service = new ImageUploadService(fakeMapper.asMapper(), new ImageStorage(props));
     }
 
     // ==================================================================

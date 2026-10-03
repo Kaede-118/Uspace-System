@@ -19,6 +19,7 @@ import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatDateTime, formatTime, formatMoney } from '@/utils/format'
 import { versionedUrl } from '@/utils/image'
+import { copyText } from '@/utils/clipboard'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -72,34 +73,20 @@ async function loadInvite() {
   }
 }
 
-/** 复制链接。剪贴板 API 在非 HTTPS 下不可用，所以留一条降级路径。 */
+/**
+ * 复制链接。
+ *
+ * <p>降级路径在 {@code utils/clipboard.js} 里（它与扫码转账的「复制金额」
+ * 共用同一份实现）—— 非 HTTPS 环境下 {@code navigator.clipboard} 不可用，
+ * 而手机连局域网调试正是这种情形。
+ */
 async function onCopy() {
   try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(inviteUrl.value)
-    } else {
-      copyFallback(inviteUrl.value)
-    }
+    await copyText(inviteUrl.value)
     toastSuccess('链接已复制，发给朋友即可')
   } catch {
     toastError('复制失败，请长按链接手动复制')
   }
-}
-
-/**
- * 剪贴板降级方案：临时 textarea + execCommand。
- *
- * @param {string} text 要复制的文本
- */
-function copyFallback(text) {
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  document.execCommand('copy')
-  document.body.removeChild(ta)
 }
 
 function onClose() {
