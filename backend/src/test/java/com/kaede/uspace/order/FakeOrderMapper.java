@@ -129,6 +129,7 @@ public class FakeOrderMapper implements InvocationHandler {
             case "selectPageByUser" -> selectPageByUser(args);
             case "selectPageForAdmin" -> selectPageForAdmin(args);
             case "updatePasscode" -> updatePasscode(args);
+            case "updateOneTimePasscode" -> updateOneTimePasscode(args);
             case "updateSettlement" -> updateSettlement(args);
             case "updateAdjustment" -> updateAdjustment(args);
             case "markPaid" -> markPaid(args);
@@ -359,6 +360,26 @@ public class FakeOrderMapper implements InvocationHandler {
         order.setPasscode((String) args[1]);
         order.setPasscodeStart((LocalDateTime) args[2]);
         order.setPasscodeEnd((LocalDateTime) args[3]);
+        return 1;
+    }
+
+    /**
+     * 记下最新一串一次性密码。带「使用中」状态守卫。
+     *
+     * <p>⚠️ <b>守卫必须复刻</b>：真实 SQL 上有 {@code AND status = 'IN_USE'}，
+     * 假实现漏掉它，「已结算的订单不能再写密码」这类用例会测成永远通过 ——
+     * 而那种「假绿」比没有用例更危险。
+     *
+     * @param args 依次为 id、passcode、endTime
+     * @return 受影响行数
+     */
+    private int updateOneTimePasscode(Object[] args) {
+        Order order = guard((Long) args[0], OrderStatus.IN_USE.name()::equals);
+        if (order == null) {
+            return 0;
+        }
+        order.setOneTimePasscode((String) args[1]);
+        order.setOneTimePasscodeEnd((LocalDateTime) args[2]);
         return 1;
     }
 

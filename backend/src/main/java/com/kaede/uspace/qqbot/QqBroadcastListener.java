@@ -137,7 +137,7 @@ public class QqBroadcastListener {
             }
             String name = displayName(event.userId());
             String head = leftHeadline(name, event.source())
-                    + "，本次 " + formatDuration(event.stayMinutes());
+                    + "，本次 " + QqReplyText.duration(event.stayMinutes());
 
             // 不含金额的版本：能说的是「要不要付」，不能说「付多少」
             String plain = event.free() ? head + "（无需支付）" : head + "，请到网页端完成支付";
@@ -235,19 +235,15 @@ public class QqBroadcastListener {
     /**
      * 把分钟数拼成人话。
      *
-     * <p>与 {@link QqCommandService} 里那个是同一套规则。两处各写一份的代价是
-     * 「改了一处忘了另一处」，所以第二个出现的地方就该抽出来 —— 目前只有两处、
-     * 且都极短，先留着，第三次出现时抽。
+     * <p>原本这里有一份与 {@code QqCommandService} 重复的实现，注释写着
+     * 「第三次出现时抽」—— 加了 {@code /看看自己} 与 {@code /结账} 之后
+     * 第三次如约而至，已统一到 {@link QqReplyText#duration(int)}。
+     * 两处各写一份的代价是「改了这处忘了那处」，表现是同一个时长在两处说法不一致。
      *
      * @param minutes 分钟数
      * @return 形如 {@code 35 分钟} / {@code 1 小时 20 分}
      */
     private static String formatDuration(int minutes) {
-        if (minutes < 60) {
-            return minutes + " 分钟";
-        }
-        int hours = minutes / 60;
-        int rest = minutes % 60;
-        return rest == 0 ? hours + " 小时" : hours + " 小时 " + rest + " 分";
+        return QqReplyText.duration(minutes);
     }
 }

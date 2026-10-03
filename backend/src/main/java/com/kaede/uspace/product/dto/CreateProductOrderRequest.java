@@ -18,6 +18,17 @@ import lombok.Data;
 @Data
 public class CreateProductOrderRequest {
 
+    /**
+     * 单次购买的数量上限。
+     *
+     * <p><b>它是一个常量而不是写在注解里的字面量</b>：{@code ProductService#createOrder}
+     * 也要用它 —— 群里下单那条路<b>绕过了 Web 层的 Bean Validation</b>
+     * （注解只在 Controller 入参上生效），只靠这里的 {@code @Max} 挡不住
+     * {@code /可乐-100}，而一个负数数量会算出一笔负金额的订单。
+     * 两处各写一份 99 的话，改一处漏一处不会有任何报错。
+     */
+    public static final int MAX_QUANTITY = 99;
+
     /** 商品 ID */
     @NotNull(message = "请选择商品")
     private Long productId;
@@ -25,6 +36,6 @@ public class CreateProductOrderRequest {
     /** 数量。不传按 1 件算 */
     @NotNull(message = "请填写购买数量")
     @Min(value = 1, message = "购买数量至少为 1")
-    @Max(value = 99, message = "单次最多购买 99 件")
+    @Max(value = MAX_QUANTITY, message = "单次最多购买 " + MAX_QUANTITY + " 件")
     private Integer quantity;
 }

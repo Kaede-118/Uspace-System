@@ -3,20 +3,24 @@ package com.kaede.uspace.lock.mock;
 import com.kaede.uspace.lock.LockProperties;
 import com.kaede.uspace.lock.LockService;
 import com.kaede.uspace.lock.dto.AddPasscodeRequest;
+import com.kaede.uspace.lock.dto.GetOneTimePasscodeRequest;
 import com.kaede.uspace.lock.dto.LockRecordDto;
 import com.kaede.uspace.lock.dto.LockStatus;
+import com.kaede.uspace.lock.dto.OneTimePasscodeResult;
 import com.kaede.uspace.lock.dto.PasscodeResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 门锁服务的<b>模拟实现</b>，不访问外网、不依赖真实硬件。
@@ -47,8 +51,22 @@ public class MockLockServiceImpl implements LockService {
     /** 模拟的开门方式取值，代表「键盘密码开门」。真实取值以通通锁文档为准 */
     private static final int MOCK_OPEN_TYPE_KEYBOARD_PWD = 2;
 
+    /**
+     * 一次性密码的固有窗口。
+     *
+     * <p>通通锁的单次密码（{@code keyboardPwdType=1}）规则是
+     * <b>自生效时刻起 6 小时内只能使用一次</b>，本系统不参与决定这个时长。
+     */
+    private static final Duration SINGLE_USE_WINDOW = Duration.ofHours(6);
+
     /** 已下发的密码，key 为 {@code lockId:keyboardPwd} */
     private final Map<String, IssuedPasscode> issued = new ConcurrentHashMap<>();
+
+    /**
+     * 密码 ID 序列。真实场景由锁云分配，模拟实现用自增，
+     * 起点 1000 是为了贴近官方文档示例里的 {@code 10236} 那种量级。
+     */
+    private final AtomicLong passcodeIdSequence = new AtomicLong(1000);
 
     /** 模拟产生的开门记录，按锁 ID 分组 */
     private final Map<Long, List<LockRecordDto>> records = new ConcurrentHashMap<>();
@@ -95,7 +113,7 @@ public class MockLockServiceImpl implements LockService {
 
         String keyboardPwd = request.getKeyboardPwd();
         if (keyboardPwd == null || keyboardPwd.isBlank()) {
-            keyboardPwd = randomPasscode();
+            keyboardPwd = randomPasscode(request.getLockId());
         }
 
         IssuedPasscode passcode = new IssuedPasscode(
@@ -103,13 +121,55 @@ public class MockLockServiceImpl implements LockService {
                 keyboardPwd,
                 request.getStartTime(),
                 request.getEndTime(),
-                request.getKeyboardPwdName());
+                request.getKeyboardPwdName(),
+                passcodeIdSequence.incrementAndGet(),
+                false);
         issued.put(key(request.getLockId(), keyboardPwd), passcode);
 
         log.info("[Mock门锁] 下发限时密码成功 lockId={} pwd={} 有效期 {} ~ {} 名称={}",
                 request.getLockId(), keyboardPwd, request.getStartTime(), request.getEndTime(),
                 request.getKeyboardPwdName());
         return PasscodeResult.ok(keyboardPwd);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>模拟实现：随机生成一串 6 位数字，窗口取「生效起 6 小时」，
+     * 并标记为一次性 —— {@link #simulateOpen} 用过一次就会把它从 {@code issued} 里移除。
+     *
+     * <p>沿用与 {@link #addPasscode} 相同的两道真实约束（模拟网络故障、远程下发能力）：
+     * 真实的 {@code keyboardPwd/get} 同样是远程调用，模拟实现不该比真锁宽松。
+     */
+    @Override
+    public OneTimePasscodeResult getOneTimePasscode(GetOneTimePasscodeRequest request) {
+        if (!simulateNetwork("获取一次性密码")) {
+            return OneTimePasscodeResult.fail(-1, "模拟网络异常：获取一次性密码失败");
+        }
+        // 远程能力：真实的 keyboardPwd/get 本就是远程调用（没有 addType 那种「本地蓝牙添加」
+        // 的选项），纯蓝牙锁连不上网关就取不到 —— 模拟实现照此拒绝，不给自己开后门
+        if (!properties.getMock().isRemoteSupported()) {
+            return OneTimePasscodeResult.fail(-4043, "该锁未接入网关，无法远程获取密码");
+        }
+
+        LocalDateTime startTime = request.getStartTime() != null
+                ? request.getStartTime() : LocalDateTime.now();
+        LocalDateTime endTime = startTime.plus(SINGLE_USE_WINDOW);
+
+        String keyboardPwd = randomPasscode(request.getLockId());
+        IssuedPasscode passcode = new IssuedPasscode(
+                request.getLockId(),
+                keyboardPwd,
+                startTime,
+                endTime,
+                request.getKeyboardPwdName(),
+                passcodeIdSequence.incrementAndGet(),
+                true);
+        issued.put(key(request.getLockId(), keyboardPwd), passcode);
+
+        log.info("[Mock门锁] 获取一次性密码成功 lockId={} pwd={} id={} 有效期 {} ~ {}（用一次即焚）",
+                request.getLockId(), keyboardPwd, passcode.keyboardPwdId(), startTime, endTime);
+        return OneTimePasscodeResult.ok(keyboardPwd, passcode.keyboardPwdId(), startTime, endTime);
     }
 
     /**
@@ -207,13 +267,29 @@ public class MockLockServiceImpl implements LockService {
      * @throws IllegalArgumentException 当密码不存在或已失效时抛出
      */
     public LockRecordDto simulateOpen(Long lockId, String keyboardPwd, Long userId) {
-        if (issued.get(key(lockId, keyboardPwd)) == null) {
+        String cacheKey = key(lockId, keyboardPwd);
+        IssuedPasscode passcode = issued.get(cacheKey);
+        if (passcode == null) {
             throw new IllegalArgumentException("密码不存在或已失效：lockId=" + lockId);
         }
 
+        // 有效期检查：真锁在窗口外会拒绝输入，模拟实现照此拒绝 ——
+        // 少了这一条，模拟实现就比真锁宽松，超期密码在演示里照样能开门
+        LocalDateTime now = LocalDateTime.now();
+        if (now.isBefore(passcode.startTime()) || now.isAfter(passcode.endTime())) {
+            throw new IllegalArgumentException("密码已过期：lockId=" + lockId);
+        }
+
         LockRecordDto record = new LockRecordDto(
-                lockId, keyboardPwd, LocalDateTime.now(), MOCK_OPEN_TYPE_KEYBOARD_PWD, userId);
+                lockId, keyboardPwd, now, MOCK_OPEN_TYPE_KEYBOARD_PWD, userId);
         records.computeIfAbsent(lockId, k -> new CopyOnWriteArrayList<>()).add(record);
+
+        // 一次性密码：用后即焚。真锁在正确输入一次之后就把单次密码作废，
+        // 因此第二次使用会落到上面那条「密码不存在」的分支上
+        if (passcode.singleUse()) {
+            issued.remove(cacheKey);
+            log.info("[Mock门锁] 一次性密码已使用并作废 lockId={} pwd={}", lockId, keyboardPwd);
+        }
 
         log.info("[Mock门锁] 模拟开门 lockId={} pwd={} userId={}", lockId, keyboardPwd, userId);
         return record;
@@ -250,14 +326,26 @@ public class MockLockServiceImpl implements LockService {
     }
 
     /**
-     * 生成一个 6 位数字密码。
+     * 生成一个 6 位数字密码，且保证同一把锁上当前不重复。
      *
      * <p>通通锁的键盘密码为 6~7 位数字，具体位数由锁型号决定。
      *
+     * <p>⚠️ <b>撞号必须重摇</b>：{@code issued} 的 key 是 {@code lockId:密码}，
+     * 同一把锁上的固定限时密码与一次性密码若撞上同样的 6 位数字，会<b>静默覆盖</b> ——
+     * 表现是「用一次性密码开了一次门，固定密码莫名其妙没了」，极难排查。
+     *
+     * @param lockId 锁 ID，用于查重
      * @return 6 位数字字符串，不足位补前导零
+     * @throws IllegalStateException 连续 100 次都撞号（正常不可能发生）
      */
-    private String randomPasscode() {
-        return String.format("%06d", random.nextInt(1_000_000));
+    private String randomPasscode(Long lockId) {
+        for (int i = 0; i < 100; i++) {
+            String candidate = String.format("%06d", random.nextInt(1_000_000));
+            if (!issued.containsKey(key(lockId, candidate))) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("无法生成不重复的密码：lockId=" + lockId);
     }
 
     /**
@@ -279,10 +367,14 @@ public class MockLockServiceImpl implements LockService {
      * @param startTime       生效时间
      * @param endTime         失效时间
      * @param keyboardPwdName 密码名称，便于后台识别用途
+     * @param keyboardPwdId   密码 ID。真实场景由锁云分配，模拟实现自增
+     * @param singleUse       是否一次性密码。为 true 时 {@link #simulateOpen} 用过一次即移除
      */
     private record IssuedPasscode(Long lockId, String keyboardPwd,
                                   LocalDateTime startTime, LocalDateTime endTime,
-                                  String keyboardPwdName) {
+                                  String keyboardPwdName,
+                                  Long keyboardPwdId,
+                                  boolean singleUse) {
 
         /**
          * 返回一个仅有效期不同、其余字段相同的新实例。
@@ -292,7 +384,8 @@ public class MockLockServiceImpl implements LockService {
          * @return 新的密码记录
          */
         IssuedPasscode withValidity(LocalDateTime startTime, LocalDateTime endTime) {
-            return new IssuedPasscode(lockId, keyboardPwd, startTime, endTime, keyboardPwdName);
+            return new IssuedPasscode(lockId, keyboardPwd, startTime, endTime,
+                    keyboardPwdName, keyboardPwdId, singleUse);
         }
     }
 }

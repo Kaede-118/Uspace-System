@@ -564,6 +564,20 @@ public enum ErrorCode {
     PRODUCT_STATUS_INVALID(HttpStatus.CONFLICT, 40933, "当前商品状态不支持该操作"),
 
     /**
+     * 商品名已被占用（2026-10-04 加）。
+     *
+     * <p>它是 {@code uk_name} 那条数据库唯一键在应用层的对应物。加这道键是因为
+     * <b>群里的下单指令按名字找商品</b>（{@code /可乐-2}）——
+     * 名字一旦能重复，系统就只能靠猜，而猜错是给顾客下错单。
+     *
+     * <p>⚠️ <b>数据库唯一键不含 {@code deleted}，所以「已删除的商品」也占着名字</b>，
+     * 查重必须与它口径一致（不筛 {@code deleted}）—— 否则会出现
+     * 「接口说名字可用、插进去却撞唯一键」，用户看到的是一句 500。
+     * 与 {@link #DEVICE_NO_EXISTS} 同一套做法（那个是 40927）。
+     */
+    PRODUCT_NAME_EXISTS(HttpStatus.CONFLICT, 40946, "已存在同名商品，换一个名字吧"),
+
+    /**
      * 只有已付款的包场才能撤销退款。
      *
      * <p><b>与 {@link #BOOKING_NOT_EDITABLE}（40914）说的不是一件事</b>：

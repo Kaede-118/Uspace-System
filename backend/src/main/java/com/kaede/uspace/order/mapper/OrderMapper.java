@@ -328,6 +328,38 @@ public interface OrderMapper extends BaseMapper<Order> {
                        @Param("endTime") LocalDateTime endTime);
 
     /**
+     * 记下最新一串一次性密码（模块 11 的群指令 {@code /开门} 用）。
+     *
+     * <p>每次 {@code /开门} 都会取一串新的并<b>覆盖</b>这里 —— 不做复用，
+     * 因为「判断旧的那串还在不在」同样要花一次门锁云调用，与直接生成成本相同
+     * （详见 {@code OneTimePasscodeService} 的类注释）。
+     *
+     * <p>写它只为两件事：<b>结算时知道该撤哪一串</b>、以及排障时查得到
+     * （列值在结算后不清空，与 {@code passcode} 三列同构）。
+     *
+     * <p>与 {@link #updatePasscode} 一样带 {@code status = 'IN_USE'} 守卫：
+     * 已结算的订单不该再被写进新密码。<b>用显式 SQL 而不是 {@code updateById}</b> ——
+     * 后者的「跳过 null 字段」语义写不出清空，这个坑本项目已经踩过数次。
+     *
+     * @param id       订单 ID
+     * @param passcode 一次性密码
+     * @param endTime  失效时刻（生成起 6 小时）
+     * @return 受影响行数；0 表示订单不是使用中状态，或记录不存在
+     */
+    @Update("""
+            UPDATE biz_order
+               SET one_time_passcode     = #{passcode},
+                   one_time_passcode_end = #{endTime},
+                   updated_at            = NOW()
+             WHERE id = #{id}
+               AND status = 'IN_USE'
+               AND deleted = 0
+            """)
+    int updateOneTimePasscode(@Param("id") Long id,
+                              @Param("passcode") String passcode,
+                              @Param("endTime") LocalDateTime endTime);
+
+    /**
      * 写入结算结果（用户点「结束使用」）。
      *
      * <p>金额各项都取自计费服务算出的分段结果，且都已是<b>实收</b>

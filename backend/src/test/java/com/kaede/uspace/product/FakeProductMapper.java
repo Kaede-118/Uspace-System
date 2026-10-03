@@ -97,6 +97,8 @@ public class FakeProductMapper implements InvocationHandler {
             case "insert" -> insert((Product) args[0]);
             case "selectById" -> selectById((Long) args[0]);
             case "selectOnSaleList" -> selectOnSaleList();
+            case "selectLiveByName" -> selectLiveByName((String) args[0]);
+            case "countByName" -> countByName(args);
             case "selectPageBy" -> selectPageBy(args);
             case "updateProduct" -> updateProduct((Product) args[0]);
             case "deleteById" -> deleteById((Long) args[0]);
@@ -160,6 +162,47 @@ public class FakeProductMapper implements InvocationHandler {
                                 Comparator.nullsFirst(Comparator.naturalOrder()))
                         .thenComparing(Product::getId))
                 .toList();
+    }
+
+    /**
+     * 按名字查未删除的商品。对应真 SQL 的
+     * {@code WHERE name = ? AND deleted = 0}。
+     *
+     * @param name 商品名，可为 null
+     * @return 商品；不存在或已删除时返回 null
+     */
+    private Product selectLiveByName(String name) {
+        if (name == null) {
+            return null;
+        }
+        return rows.values().stream()
+                .filter(FakeProductMapper::isAlive)
+                .filter(p -> name.equals(p.getName()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * 数同名商品。⚠️ <b>含已逻辑删除的</b> —— 与真 SQL 严格一致
+     * （那边刻意不写 {@code deleted = 0}，因为它要对应 {@code uk_name} 那条键）。
+     *
+     * <p>假实现若顺手筛掉 {@code deleted}，「删掉之后名字仍被占着」这条用例
+     * 在单测里就永远是绿的，而真机上会撞唯一键 ——
+     * 与 {@link #updateProduct} 那条注释同源：<b>假实现比真 SQL 宽松，等于没测</b>。
+     *
+     * @param args 依次为商品名、要排除的商品 ID（可为 null）
+     * @return 同名商品数
+     */
+    private int countByName(Object[] args) {
+        String name = (String) args[0];
+        Long excludeId = (Long) args[1];
+        if (name == null) {
+            return 0;
+        }
+        return (int) rows.values().stream()
+                .filter(p -> name.equals(p.getName()))
+                .filter(p -> excludeId == null || !excludeId.equals(p.getId()))
+                .count();
     }
 
     /**

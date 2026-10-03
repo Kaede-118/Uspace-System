@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import lombok.Data;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * OneBot v11 的入站事件（协议映射层）。
  *
@@ -82,8 +85,26 @@ public class OneBotEvent {
     /** 发送者 QQ 号。QQ 验证按它查表，绝不按消息里的验证码遍历查找 */
     private Long userId;
 
-    /** 原始消息文本。指令从这里解析，不走 {@code message} 数组（见类注释）*/
+    /**
+     * 原始消息文本，含 CQ 码。
+     *
+     * <p><b>指令一律从这里解析</b> —— 它是「用户实际打了什么」的原样呈现，
+     * 而 {@code message} 数组是同一句话的结构化视图。两条路取文本会得到同一结果，
+     * 但这里能顺带处理全角标点、@ 前缀这些文本层面的东西。
+     *
+     * <p>⚠️ <b>但图片拿不到</b>：这里只有一段 {@code [CQ:image,file=xxx.jpg]}，
+     * <b>没有可下载的地址</b>。要图得看 {@link #images()}。
+     */
     private String rawMessage;
+
+    /**
+     * 消息段数组。
+     *
+     * <p>仅当 NapCat 配了 {@code messagePostFormat: "array"} 时有值 ——
+     * 本项目的两份配置都是 {@code array}（配成 {@code string} 的话这里会是 null，
+     * 而图片也就取不到了）。
+     */
+    private List<OneBotMessageSegment> message;
 
     /** 发送者信息。字段可能缺失，不可作为权限依据 —— 见 {@link OneBotSender} 类注释 */
     private OneBotSender sender;
@@ -121,6 +142,58 @@ public class OneBotEvent {
         return (POST_TYPE_MESSAGE.equals(postType) || POST_TYPE_MESSAGE_SENT.equals(postType))
                 && MESSAGE_TYPE_GROUP.equals(messageType)
                 && groupId != null;
+    }
+
+    /**
+     * 取这条消息里的图片（按出现顺序）。
+     *
+     * <p><b>为什么非得看数组</b>：图片在 {@code raw_message} 里只剩一段
+     * {@code [CQ:image,file=xxx.jpg]} —— <b>没有可下载的地址</b>；
+     * 而段里带着 {@code url}，那才是能真正取到的图。
+     * 群内传付款截图那条路靠的就是它。
+     *
+     * <p>缺字段一律<b>跳过而不是抛异常</b>：协议端版本不同，图片段的 {@code url}
+     * 未必总有；与其让整条消息解析失败，不如把它当成「这次没图」。
+     *
+     * @return 图片列表；没有图片段（或没配 array 格式）时返回空列表
+     */
+    public List<OneBotImage> images() {
+        if (message == null || message.isEmpty()) {
+            return List.of();
+        }
+        List<OneBotImage> images = new ArrayList<>();
+        for (OneBotMessageSegment segment : message) {
+            if (!OneBotMessageSegment.TYPE_IMAGE.equals(segment.getType())
+                    || segment.getData() == null) {
+                continue;
+            }
+            images.add(new OneBotImage(
+                    asString(segment.getData().get("file")),
+                    asString(segment.getData().get("url"))));
+        }
+        return images;
+    }
+
+    /**
+     * 这条消息里有没有图片。
+     *
+     * @return 有图片段返回 true
+     */
+    public boolean hasImage() {
+        return !images().isEmpty();
+    }
+
+    /**
+     * 安全地把段里的值当字符串取。
+     *
+     * <p>不同协议端给的类型未必一致（{@code file_size} 有的给字符串有的给数字），
+     * 统一走 {@code String.valueOf} 而不是强转，免得为这种事抛 ClassCastException。
+     *
+     * @param value 段里的原始值，可为 null
+     * @return 字符串；null 时返回 null
+     */
+    private static String asString(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     /**

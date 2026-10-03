@@ -625,6 +625,23 @@ class OrderServiceTests {
         assertNotNull(event.amount(), "金额随事件带出，供店主群的播报使用");
     }
 
+    @Test
+    @DisplayName("结算：⚠️ 两串密码都被撤销（固定密码 + 群指令发的一次性密码）")
+    void settleOrder_revokesBothPasscodes() {
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                LocalDateTime.now().minusHours(2), null);
+        order.setPasscode("111111");
+        order.setOneTimePasscode("222222");
+
+        service.settleOrder(USER_ID, order.getId());
+
+        assertTrue(lockService.wasDeleted(order.getLockId(), "111111"),
+                "固定密码要撤 —— 不撤的话用户结算完还能再进去玩，账单与在店事实就对不上了");
+        assertTrue(lockService.wasDeleted(order.getLockId(), "222222"),
+                "⚠️ 一次性密码也要撤：它在群里发出去过、传播面最广，"
+                        + "不撤就成了「传播越广的密码活得越久」—— 正好反了");
+    }
+
     // ==================================================================
     // 查看密码与续期
     // ==================================================================

@@ -99,6 +99,31 @@ public class ProductService {
     }
 
     /**
+     * 按名字查一件商品 —— <b>群里的下单指令走这条</b>（{@code /可乐-2}）。
+     *
+     * <p>群里没有地方填商品 ID，顾客打出来的就是名字，所以名字必须能定位到唯一一件 ——
+     * 这正是 {@code uk_name} 那条唯一键存在的理由。
+     *
+     * <p>返回的 {@code ProductVo} 与列表、详情<b>同一口径</b>
+     * （可售量、售罄与否都算上了未支付的占用），所以群里报的「还剩几件」
+     * 与网页上看到的必然一致。名字对不上时返回
+     * {@link ErrorCode#PRODUCT_NOT_FOUND}，由调用方决定怎么说话。
+     *
+     * <p>⚠️ <b>不在这里判断「能不能下单」</b>：下架、售罄、库存不足各有各的错误码与
+     * 文案，都由 {@link #createOrder} 一处给出。这里只负责「找到它」。
+     *
+     * @param name 商品名，去掉首尾空白后精确匹配
+     * @return 成功时返回商品；没有这件商品时返回 {@link ErrorCode#PRODUCT_NOT_FOUND}
+     */
+    public BizResult<ProductVo> findLiveByName(String name) {
+        Product product = productMapper.selectLiveByName(trimToNull(name));
+        if (product == null) {
+            return BizResult.fail(ErrorCode.PRODUCT_NOT_FOUND);
+        }
+        return BizResult.ok(ProductVo.from(product, pendingQuantityOf(product.getId())));
+    }
+
+    /**
      * 下单买商品，落一条待支付购买单。
      *
      * <p>付款走模块 8 的统一支付入口（{@code POST /api/payments}，
@@ -142,6 +167,14 @@ public class ProductService {
         }
 
         int quantity = request.getQuantity() == null ? 1 : request.getQuantity();
+        // ⚠️ 数量范围必须在这里再挡一道：Bean Validation 的 @Min/@Max 只作用于
+        // Controller 入参，而【群里的下单指令直接调本方法】—— 少了这一道，
+        // /可乐-0 会建出一笔 0 元的单、/可乐--5 会算出一笔负金额的订单，
+        // 而且两者都不报任何错
+        if (quantity < 1 || quantity > CreateProductOrderRequest.MAX_QUANTITY) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID,
+                    "单次最多买 " + CreateProductOrderRequest.MAX_QUANTITY + " 件、至少 1 件");
+        }
         int available = product.availableStock(pendingQuantityOf(product.getId()));
         if (available < quantity) {
             return BizResult.fail(ErrorCode.PRODUCT_SOLD_OUT,
@@ -243,6 +276,11 @@ public class ProductService {
     public BizResult<ProductVo> create(ProductSaveRequest request) {
         Product product = new Product();
         applyRequest(product, request);
+        // 名字查重。数据库上那条 uk_name 才是最终防线（并发下只靠这里挡不住），
+        // 但先查一次能把「撞键」变成一句人话 —— 否则用户看到的是一句 500
+        if (productMapper.countByName(product.getName(), null) > 0) {
+            return BizResult.fail(ErrorCode.PRODUCT_NAME_EXISTS);
+        }
         productMapper.insert(product);
 
         log.info("[商品] 新增商品 id={} 名称={} 价格={} 库存={}",
@@ -268,6 +306,11 @@ public class ProductService {
             return BizResult.fail(ErrorCode.PRODUCT_NOT_FOUND);
         }
         applyRequest(product, request);
+        // 改名同样要查重，且要排开自己（{@code excludeId}）—— 不改名只改价格时，
+        // 不排开自己的话每一次保存都会被自己挡住
+        if (productMapper.countByName(product.getName(), id) > 0) {
+            return BizResult.fail(ErrorCode.PRODUCT_NAME_EXISTS);
+        }
         // 走显式 SQL 而不是 updateById：后者的默认字段策略会跳过 null 字段，
         // 而「没传就是清空」正是 PUT 的语义。少了这一步，撤封面、清描述都做不到，
         // 且不会报任何错（接口 200，刷新后旧值还在）

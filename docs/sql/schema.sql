@@ -501,6 +501,13 @@ CREATE TABLE `biz_order` (
   `passcode`        VARCHAR(10)   DEFAULT NULL            COMMENT '下发的限时密码',
   `passcode_start`  DATETIME      DEFAULT NULL            COMMENT '密码生效时间',
   `passcode_end`    DATETIME      DEFAULT NULL            COMMENT '密码失效时间',
+  -- ⚠️ 下面两列是【群指令】那条路径专用的一次性密码（模块 11），与上面三列并存：
+  --    上面那串是「可反复使用的限时密码」（网页端查看 + /开门 时私聊发一份，用于兜底），
+  --    这一串是「用一次即焚的一次性密码」（只在群里发）。两者是两条独立的进门路径。
+  --    ⚠️ 结算后【不清空】，与 passcode 三列同构 —— 保留为历史痕迹；
+  --       它也【绝不进任何订单视图】（OrderVo / OrderOpenVo 都不带，只有 qqbot 内部消费）。
+  `one_time_passcode`     VARCHAR(10) DEFAULT NULL        COMMENT '群指令下发的一次性密码（单次有效）',
+  `one_time_passcode_end` DATETIME    DEFAULT NULL        COMMENT '一次性密码失效时刻（生成起 6 小时）',
 
   -- 计费区间
   `start_time`      DATETIME      DEFAULT NULL            COMMENT '用户点击开门的时刻，计费起点',
@@ -792,6 +799,15 @@ CREATE TABLE `biz_product` (
   `updated_at`  DATETIME      NOT NULL                COMMENT '更新时间',
   `deleted`     TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
   PRIMARY KEY (`id`),
+  -- ⚠️ 商品名唯一（2026-10-04 加）。加它是因为【群里的下单指令按名字找商品】：
+  --    名字一旦能重复，「/可乐-2」到底是哪一件就只能靠系统猜 ——
+  --    而猜错的后果是给顾客下错单、扣错库存，当场还没人看得出来。
+  --    与 uk_username / uk_qq 同源：唯一键【不含 deleted】，逻辑删除过的名字
+  --    会被一直占着（想再用那个名字得先改已删记录）。这是刻意的取舍 ——
+  --    把 deleted 拼进唯一键的话，同一件商品删第二次就会撞键，
+  --    而那是 MyBatis-Plus 的一次普通 UPDATE 失败，表现是「删不掉商品」，
+  --    比「名字被占着」难查得多，且与 uk_username 那套先例不一致。
+  UNIQUE KEY `uk_name` (`name`),
   -- 用户端列表就是「上架的、按 sort_no 排」，这条索引直接服务。
   -- 排序时 id 兜底：sort_no 由管理员随手填、撞值常见，只按它排会让同值行
   -- 的先后由存储引擎决定 —— 翻页时表现为「某件商品没出现过」

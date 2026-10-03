@@ -24,6 +24,9 @@ public class OneBotAction {
     /** 发送群消息的 Action 名 */
     public static final String ACTION_SEND_GROUP_MSG = "send_group_msg";
 
+    /** 发送私聊消息的 Action 名 */
+    public static final String ACTION_SEND_PRIVATE_MSG = "send_private_msg";
+
     /** 动作名，如 {@code send_group_msg} */
     private String action;
 
@@ -58,6 +61,33 @@ public class OneBotAction {
 
         OneBotAction action = new OneBotAction();
         action.setAction(ACTION_SEND_GROUP_MSG);
+        action.setParams(params);
+        action.setEcho(echo);
+        return action;
+    }
+
+    /**
+     * 构造一个「发送私聊消息」的动作。
+     *
+     * <p>目前唯一的用途：群指令 {@code /开门} 把<b>固定的限时密码</b>单独发给本人 ——
+     * 群消息所有人可见，密码不能出现在那里。
+     *
+     * <p>{@code auto_escape} 同样取 true，理由与群消息那份完全相同（见上）：
+     * 私聊的文本里会带订单号与门店名，同样是拼出来的字符串。
+     *
+     * @param userId 目标 QQ 号
+     * @param text   消息文本，按纯文本发送
+     * @param echo   回显串，供日志追踪
+     * @return 可直接序列化发送的动作对象
+     */
+    public static OneBotAction sendPrivateMessage(Long userId, String text, String echo) {
+        Map<String, Object> params = new HashMap<>(4);
+        params.put("user_id", userId);
+        params.put("message", text);
+        params.put("auto_escape", true);
+
+        OneBotAction action = new OneBotAction();
+        action.setAction(ACTION_SEND_PRIVATE_MSG);
         action.setParams(params);
         action.setEcho(echo);
         return action;

@@ -2,8 +2,10 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.lock.LockService;
 import com.kaede.uspace.lock.dto.AddPasscodeRequest;
+import com.kaede.uspace.lock.dto.GetOneTimePasscodeRequest;
 import com.kaede.uspace.lock.dto.LockRecordDto;
 import com.kaede.uspace.lock.dto.LockStatus;
+import com.kaede.uspace.lock.dto.OneTimePasscodeResult;
 import com.kaede.uspace.lock.dto.PasscodeResult;
 
 import java.time.LocalDateTime;
@@ -40,12 +42,25 @@ public class FakeLockService implements LockService {
     /** 下发密码的固定返回值，便于断言。可真机生成的是随机 6 位数字 */
     private String passcode = "123456";
 
+    /** 一次性密码的固定返回值，便于断言 */
+    private String oneTimePasscode = "654321";
+
+    /** 下一次 getOneTimePasscode 是否失败 */
+    private boolean nextOneTimeFails = false;
+
+    /** 已被撤销的密码，供断言「结算时删了哪几串」 */
+    private final Set<String> deleted = new HashSet<>();
+
     private int addCalls = 0;
     private int changeCalls = 0;
     private int deleteCalls = 0;
+    private int oneTimeCalls = 0;
 
     /** 最后一次 addPasscode 收到的请求，供断言「传给锁的窗口参数对不对」 */
     private AddPasscodeRequest lastAddRequest;
+
+    /** 最后一次 getOneTimePasscode 收到的请求 */
+    private GetOneTimePasscodeRequest lastOneTimeRequest;
 
     /** 最后一次 changePasscode 收到的时间窗口 */
     private LocalDateTime lastChangeStart;
@@ -87,6 +102,27 @@ public class FakeLockService implements LockService {
         return this;
     }
 
+    /**
+     * 让下一次 {@code getOneTimePasscode} 失败，模拟门锁云调用异常。
+     *
+     * @return 本对象，便于链式调用
+     */
+    public FakeLockService failNextOneTime() {
+        this.nextOneTimeFails = true;
+        return this;
+    }
+
+    /**
+     * 设定 {@code getOneTimePasscode} 返回的密码。
+     *
+     * @param oneTimePasscode 一次性密码
+     * @return 本对象，便于链式调用
+     */
+    public FakeLockService withOneTimePasscode(String oneTimePasscode) {
+        this.oneTimePasscode = oneTimePasscode;
+        return this;
+    }
+
     /** @return {@code addPasscode} 的累计调用次数 */
     public int addCalls() {
         return addCalls;
@@ -100,6 +136,30 @@ public class FakeLockService implements LockService {
     /** @return {@code deletePasscode} 的累计调用次数 */
     public int deleteCalls() {
         return deleteCalls;
+    }
+
+    /** @return {@code getOneTimePasscode} 的累计调用次数 */
+    public int oneTimeCalls() {
+        return oneTimeCalls;
+    }
+
+    /** @return 最后一次 {@code getOneTimePasscode} 的请求；从未调用过时为 null */
+    public GetOneTimePasscodeRequest lastOneTimeRequest() {
+        return lastOneTimeRequest;
+    }
+
+    /**
+     * 某个密码是否被撤销过。
+     *
+     * <p>供断言「结算时把两串密码都撤了」—— 只看 {@link #deleteCalls()} 的计数
+     * 分不出删的是哪一串。
+     *
+     * @param lockId      锁 ID
+     * @param keyboardPwd 密码
+     * @return 撤销过返回 true
+     */
+    public boolean wasDeleted(Long lockId, String keyboardPwd) {
+        return deleted.contains(key(lockId, keyboardPwd));
     }
 
     /** @return 最后一次 {@code addPasscode} 的请求；从未调用过时为 null */
@@ -145,6 +205,30 @@ public class FakeLockService implements LockService {
     /**
      * {@inheritDoc}
      *
+     * <p>模拟实现：返回固定的 {@link #oneTimePasscode} 并累加调用计数。
+     *
+     * <p>⚠️ <b>计数是给「每次 /开门 都重新取一串」这条策略钉的守门钉</b> ——
+     * 若哪天有人加回「复用（判断旧的那串还在不在）」，计数断言会立刻变红，
+     * 而那个改动恰好是团队讨论过、明确放弃的方案（判断成本与生成相同）。
+     */
+    @Override
+    public OneTimePasscodeResult getOneTimePasscode(GetOneTimePasscodeRequest request) {
+        oneTimeCalls++;
+        lastOneTimeRequest = request;
+
+        if (nextOneTimeFails) {
+            nextOneTimeFails = false;
+            return OneTimePasscodeResult.fail(-1, "模拟网络异常：获取一次性密码失败");
+        }
+
+        LocalDateTime start = request.getStartTime() != null
+                ? request.getStartTime() : LocalDateTime.now();
+        return OneTimePasscodeResult.ok(oneTimePasscode, 1000L + oneTimeCalls, start, start.plusHours(6));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * <p>模拟实现：只改有效期窗口，密码本身不变 —— 与真实的
      * {@code MockLockServiceImpl#changePasscode} 语义一致，
      * 模块 8 的「续期不换密码」正是建立在这条语义上。
@@ -179,6 +263,7 @@ public class FakeLockService implements LockService {
     public PasscodeResult deletePasscode(Long lockId, String keyboardPwd) {
         deleteCalls++;
         issued.remove(key(lockId, keyboardPwd));
+        deleted.add(key(lockId, keyboardPwd));
         return PasscodeResult.ok(keyboardPwd);
     }
 

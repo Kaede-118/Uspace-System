@@ -157,7 +157,9 @@ class ImageStorageTests {
     @Test
     @DisplayName("校验：没带文件 → 40001，并附上「请选择要上传的图片」")
     void store_nullFileCarriesTheHintMessage() {
-        BizResult<StoredImage> result = storage.store("avatar", "u1", null);
+        // ⚠️ 那个强转不能省：加了 store(byte[]) 重载之后，裸的 null 两个都匹配得上，
+        // 编译期直接报「对 store 的引用不明确」。这里要测的是网页上传那条路
+        BizResult<StoredImage> result = storage.store("avatar", "u1", (MultipartFile) null);
 
         assertFalse(result.isSuccess());
         assertEquals(ErrorCode.UPLOAD_FILE_INVALID, result.getError());

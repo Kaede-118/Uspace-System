@@ -143,22 +143,65 @@ public class OneBotClient {
         if (groupId == null || text == null || text.isEmpty()) {
             return false;
         }
+        String echo = "uspace-" + echoSequence.incrementAndGet();
+        return dispatch(OneBotAction.sendGroupMessage(groupId, text, echo), echo,
+                "群消息 groupId=" + groupId);
+    }
+
+    /**
+     * 给某个人发一条私聊消息。
+     *
+     * <p>目前唯一的用途是群指令 {@code /开门}：把<b>固定的限时密码</b>单独发给本人 ——
+     * 群消息所有人可见，密码不能出现在那里。
+     *
+     * <p>⚠️ <b>返回 true 只代表「帧发出去了」，不代表对方收到了</b>：
+     * 本类不等 Action 响应（见类注释），而 NapCat 对「不是好友」的私聊是
+     * <b>异步</b>返回失败的 —— 于是「发出去了」与「送达了」在这里无法区分。
+     * 所以调用方<b>永远要准备一条降级路径</b>（在群里补一句「到网页端看」），
+     * 不能把「私聊成功」当成前提。
+     *
+     * @param userId 目标 QQ 号
+     * @param text   消息文本，按纯文本发送（CQ 码会被转义，见 {@link OneBotAction}）
+     * @return 帧确实发出去了返回 true
+     */
+    public boolean sendPrivateMessage(Long userId, String text) {
+        if (userId == null || text == null || text.isEmpty()) {
+            return false;
+        }
+        String echo = "uspace-" + echoSequence.incrementAndGet();
+        return dispatch(OneBotAction.sendPrivateMessage(userId, text, echo), echo,
+                "私聊 userId=" + userId);
+    }
+
+    /**
+     * 把一个构造好的动作发出去 —— 群消息与私聊共用这一段。
+     *
+     * <p>四种情况（没连接、连接已关闭、序列化失败、发送抛异常）一律记日志 + 返回 false，
+     * <b>绝不往外抛</b>：调用方里有订单的 {@code @TransactionalEventListener} 回调，
+     * 异常会沿着 {@code publishEvent} 冒回业务方法，把一笔已经成功的订单
+     * 变成「用户看到开门失败」。
+     *
+     * @param action      要发送的动作
+     * @param echo        回显串，仅用于日志
+     * @param description 目标描述，仅用于日志，如「群消息 groupId=1001」
+     * @return 确实发出去了返回 true
+     */
+    private boolean dispatch(OneBotAction action, String echo, String description) {
         WebSocketSession current = session.get();
         if (current == null || !current.isOpen()) {
             // 这是「正常但值得知道」的状态：NapCat 没跑、或刚断线正在重连。
             // 用 WARN 而不是 ERROR —— 错误日志应当留给真正需要人介入的事
-            log.warn("[QQ机器人] 当前没有可用的 OneBot 连接，消息未发出 groupId={}", groupId);
+            log.warn("[QQ机器人] 当前没有可用的 OneBot 连接，消息未发出 {}", description);
             return false;
         }
 
-        String echo = "uspace-" + echoSequence.incrementAndGet();
         try {
-            OneBotAction action = OneBotAction.sendGroupMessage(groupId, text, echo);
             current.sendMessage(new TextMessage(objectMapper.writeValueAsString(action)));
-            log.info("[QQ机器人] 已发送 groupId={} echo={} 内容={}", groupId, echo, text);
+            log.info("[QQ机器人] 已发送 {} echo={} 内容={}",
+                    description, echo, action.getParams().get("message"));
             return true;
         } catch (Exception e) {
-            log.error("[QQ机器人] 发送群消息失败 groupId={} echo={}", groupId, echo, e);
+            log.error("[QQ机器人] 发送失败 {} echo={}", description, echo, e);
             return false;
         }
     }

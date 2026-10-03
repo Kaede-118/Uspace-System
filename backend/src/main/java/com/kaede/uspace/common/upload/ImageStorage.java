@@ -84,12 +84,6 @@ public class ImageStorage {
      * @return 成功时返回落盘结果（URL + 磁盘路径）；校验不过时返回对应错误码
      */
     public BizResult<StoredImage> store(String kind, String baseName, MultipartFile file) {
-        // 两个路径片段是我们自己拼进 target 的，理论上调用方不会传脏值。
-        // 但这条检查是 O(1) 的，而漏掉的代价是「写到另一个子目录里去」——
-        // 它仍在根目录内，normalize 那道防线看不见它，所以只能在这里挡
-        requirePathSegment(kind, "kind");
-        requirePathSegment(baseName, "baseName");
-
         // file 为 null 是「请求里压根没带 file 部分」，Controller 把该参数声明为可选
         // 就是为了让它落到这里变成 400，而不是抛一个未处理的 Servlet 异常变成 500
         if (file == null || file.isEmpty()) {
@@ -105,6 +99,49 @@ public class ImageStorage {
         } catch (IOException e) {
             throw new UncheckedIOException("读取上传流失败", e);
         }
+        return store(kind, baseName, bytes);
+    }
+
+    /**
+     * 同上，但直接收字节数组。
+     *
+     * <p><b>为什么需要它</b>：图片不只来自网页表单 —— QQ 群里发来的付款截图
+     * 是一串字节（从 NapCat 给的地址下回来的），它压根没有 {@code MultipartFile}
+     * 这层载体。为了迁就那个接口去手搓一个假的 MultipartFile 是本末倒置：
+     * 上传的本质就是「给我字节 + 一个名字」，{@code MultipartFile} 只是网页那层的形状。
+     *
+     * <p>校验与落盘逻辑与上面那版<b>完全共用</b>（都走 {@code storeBytes}），
+     * 两条路径不会分岔。
+     *
+     * @param kind     子目录名，同 {@link #store(String, String, MultipartFile)}
+     * @param baseName 文件名主干，同 {@link #store(String, String, MultipartFile)}
+     * @param bytes    图片字节，可为 null（表示没取到图）
+     * @return 成功时返回落盘结果；校验不过时返回对应错误码
+     */
+    public BizResult<StoredImage> store(String kind, String baseName, byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return BizResult.fail(ErrorCode.UPLOAD_FILE_INVALID, "请选择要上传的图片");
+        }
+        if (bytes.length > uploadProperties.getMaxImageBytes()) {
+            return BizResult.fail(ErrorCode.UPLOAD_FILE_TOO_LARGE);
+        }
+        return storeBytes(kind, baseName, bytes);
+    }
+
+    /**
+     * 落盘的主体：上面两个入口都走这里。
+     *
+     * @param kind     子目录名
+     * @param baseName 文件名主干
+     * @param bytes    非空的图片字节，大小已校验
+     * @return 落盘结果
+     */
+    private BizResult<StoredImage> storeBytes(String kind, String baseName, byte[] bytes) {
+        // 两个路径片段是我们自己拼进 target 的，理论上调用方不会传脏值。
+        // 但这条检查是 O(1) 的，而漏掉的代价是「写到另一个子目录里去」——
+        // 它仍在根目录内，normalize 那道防线看不见它，所以只能在这里挡
+        requirePathSegment(kind, "kind");
+        requirePathSegment(baseName, "baseName");
 
         ImageType type = ImageType.detect(bytes);
         if (type == null) {

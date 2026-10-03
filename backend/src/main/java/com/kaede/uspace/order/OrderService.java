@@ -462,6 +462,24 @@ public class OrderService {
         return BizResult.ok(OrderVo.from(orderMapper.selectActiveByUser(userId)));
     }
 
+    /**
+     * 查询当前<b>未结清</b>的订单：进行中（{@code IN_USE}）或待支付（{@code PENDING_PAYMENT}）。
+     *
+     * <p>与 {@link #findCurrentOrder} <b>刻意分开，不要合并</b>，理由与
+     * {@code OrderMapper} 里那两个查询同源：那个只认 {@code IN_USE}，
+     * 因为首页要拿它决定「开门 / 查看密码」——待支付的订单密码早已撤销，
+     * 返回它会让首页给出一个点不动的「查看密码」。而本方法要的恰恰是
+     * 「这个人手上还有一笔账没了结」，供群里的 {@code /结账} 用：
+     * 已经停过表、但还没付款时，再发一次 {@code /结账} 应当重新撑起付款入口
+     * （待付金额与网页端链接），而不是回一句「你没有在计时的订单」。
+     *
+     * @param userId 用户 ID
+     * @return 成功时返回最近一条未结清的订单，一条都没有时 {@code data} 为 null
+     */
+    public BizResult<OrderVo> findUnsettledOrder(Long userId) {
+        return BizResult.ok(OrderVo.from(orderMapper.selectUnsettledByUser(userId)));
+    }
+
     // ==================================================================
     // 结账预览
     // ==================================================================
@@ -821,14 +839,43 @@ public class OrderService {
      *
      * @param order 订单
      */
+    /**
+     * 撤销这张订单上的两串密码：固定的限时密码，与群指令发过的一次性密码。
+     *
+     * <p><b>为什么一次性密码也要撤</b>：它虽然在群里发出去后传播面最广，
+     * 有效期（6 小时）却比私聊那份限时密码（12 小时）还短 —— 不撤的话就成了
+     * 「传播越广的密码活得越久」，正好反了。何况结算完人就不该再进
+     * （进去就是一段没有订单的用电，计费口径也对不上）。
+     *
+     * <p>两串各自撤销、互不影响：一次性密码如果已经被用过（用后即焚），
+     * 删除会失败，那正是它应有的状态 —— 只记 WARN，绝不抛。
+     * 撤销本身是幂等的，抛异常会把已经算好写好的账单回滚掉，那是更坏的结果。
+     *
+     * @param order 已结算的订单（内存对象，两串密码的值取自它）
+     */
     private void revokePasscode(Order order) {
-        if (order.getPasscode() == null || order.getLockId() == null) {
+        if (order.getLockId() == null) {
             return;
         }
-        PasscodeResult result = lockService.deletePasscode(order.getLockId(), order.getPasscode());
+        revokeOnePasscode(order, order.getPasscode(), "限时密码");
+        revokeOnePasscode(order, order.getOneTimePasscode(), "一次性密码");
+    }
+
+    /**
+     * 撤销单串密码，失败只记警告。
+     *
+     * @param order      订单
+     * @param passcode   密码内容，为 null 表示这张订单没有这一串
+     * @param label      日志里用的名字（「限时密码」/「一次性密码」）
+     */
+    private void revokeOnePasscode(Order order, String passcode, String label) {
+        if (passcode == null) {
+            return;
+        }
+        PasscodeResult result = lockService.deletePasscode(order.getLockId(), passcode);
         if (!result.isSuccess()) {
-            log.warn("[订单] 撤销密码失败，将由有效期兜底 orderNo={} errmsg={}",
-                    order.getOrderNo(), result.getErrmsg());
+            log.warn("[订单] 撤销{}失败，将由有效期兜底 orderNo={} errmsg={}",
+                    label, order.getOrderNo(), result.getErrmsg());
         }
     }
 

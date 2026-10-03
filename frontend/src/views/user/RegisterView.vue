@@ -7,17 +7,23 @@
  * 这是刻意的模块边界，不是遗漏。
  *
  * <p><b>QQ 号那一栏带一整套验证流程</b>：填了 QQ 就必须先证明这个号是本人的 ——
- * 点「获取验证码」拿到 6 位码，把它发到 QQ 群，机器人在群里看到后回执给后端，
- * 状态转「已验证」之后才提交得了。理由见后端 QqVerifyService 的类注释：
- * 群播报与群查询全靠 sys_user.qq 认人，而这个号在注册页填的时候没有任何可信度。
+ * 点「获取验证码」拿到一条 <code>/验证 123456</code> 指令，<b>整条复制</b>发到 QQ 群，
+ * 机器人在群里看到后回执给后端，状态转「已验证」之后才提交得了。
+ * 理由见后端 QqVerifyService 的类注释：群播报与群查询全靠 sys_user.qq 认人，
+ * 而这个号在注册页填的时候没有任何可信度。
+ *
+ * <p>⚠️ <b>复制的必须是整条指令、不能只给数字</b>：后端现在只认带前缀的
+ * <code>/验证 123456</code>（纯数字已被当成闲聊静默），
+ * 只发数字过去将得不到任何回应，而用户无从知道为什么。
  */
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { register, issueQqVerify, getQqVerifyStatus } from '@/api/user'
 import { login } from '@/api/auth'
 import { setAuth } from '@/stores/user'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
+import { copyText } from '@/utils/clipboard'
 
 const router = useRouter()
 
@@ -175,6 +181,30 @@ async function onIssueCode() {
   } catch (err) {
     qqVerify.value.issuing = false
     toastError(errorMessage(err, '获取验证码失败，请稍后重试'))
+  }
+}
+
+/**
+ * 发到群里的整条指令。
+ *
+ * <p>⚠️ <b>复制的必须是整条指令，不能只给那 6 位数字</b>：后端现在只认
+ * {@code /验证 123456} 这种形式（纯数字已被当成闲聊静默），
+ * 用户只复制数字发过去将得不到任何回应，而他无从知道为什么。
+ */
+const verifyCommand = computed(() => `/验证 ${qqVerify.value.code}`)
+
+/**
+ * 复制验证指令。
+ *
+ * <p>复制失败时把整条指令显示在提示里让用户手打 —— 比不上复制方便，
+ * 但比「点了一下没反应」好。故意带上前缀，免得他手打时漏掉。
+ */
+async function onCopyVerify() {
+  try {
+    await copyText(verifyCommand.value)
+    toastSuccess('已复制，去群里粘贴发送即可')
+  } catch (err) {
+    toastError('复制失败，请手动发送：' + verifyCommand.value)
   }
 }
 
@@ -347,7 +377,13 @@ async function onSubmit() {
         >
           <template v-if="qqVerify.verified">已验证 ✓ 这个 QQ 号可以注册了</template>
           <template v-else>
-            把 <b class="qq-hint__code">{{ qqVerify.code }}</b> 发到 QQ 群，验证会自动完成…
+            复制下面这行发到 QQ 群，验证会自动完成：
+            <span class="qq-hint__cmd">
+              <b class="qq-hint__code">{{ verifyCommand }}</b>
+              <button type="button" class="btn btn-ghost qq-hint__copy" @click="onCopyVerify">
+                复制
+              </button>
+            </span>
           </template>
         </p>
       </div>
@@ -443,6 +479,20 @@ async function onSubmit() {
   font-size: 16px;
   letter-spacing: 2px;
   color: var(--c-primary);
+}
+
+/* 指令 + 复制按钮排一行；指令本身不换行，换行会让「/验证 123456」被拆开看 */
+.qq-hint__cmd {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  white-space: nowrap;
+}
+
+.qq-hint__copy {
+  padding: 2px 10px;
+  font-size: 12px;
 }
 
 .register__foot {

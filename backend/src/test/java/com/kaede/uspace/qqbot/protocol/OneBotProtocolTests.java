@@ -172,6 +172,22 @@ class OneBotProtocolTests {
     }
 
     @Test
+    @DisplayName("协议：发私聊的动作带有 auto_escape 与 user_id")
+    void action_sendPrivateMessageEscapesCqCode() throws Exception {
+        OneBotAction action = OneBotAction.sendPrivateMessage(12345L, "你的固定密码：111111", "uspace-9");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertTrue(json.contains("\"action\":\"send_private_msg\""), "动作名要符合规范");
+        assertTrue(json.contains("\"user_id\":12345"), "私聊按 QQ 号发，不是群号");
+        assertTrue(json.contains("\"auto_escape\":true"),
+                "私聊文本里同样会带订单号与门店名，转义的理由与群消息那份完全相同");
+        // ⚠️ 这个类存在的理由就是「协议字段拼错了会静默失败」——
+        // 写错成 user_id 以外的名字，NapCat 那边只会当作参数缺失，
+        // 而本系统看到的只是「私聊没发出去」
+        assertFalse(json.contains("group_id"), "私聊动作里不该出现群号字段");
+    }
+
+    @Test
     @DisplayName("协议：动作响应按 status 判定成功")
     void actionResponse_readsStatus() throws Exception {
         OneBotActionResponse ok = objectMapper.readValue("""

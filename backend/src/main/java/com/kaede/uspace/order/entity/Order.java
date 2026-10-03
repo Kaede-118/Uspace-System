@@ -73,6 +73,23 @@ public class Order extends BaseEntity {
     /** 密码失效时间。过期后用户点「查看密码」会自动续期（不换密码，只推有效期） */
     private LocalDateTime passcodeEnd;
 
+    /**
+     * 群指令（{@code /开门}）下发的一次性密码，<b>用一次即焚</b>。
+     *
+     * <p>它与上面的 {@link #passcode} 是<b>两条独立的进门路径</b>：那一串是可反复使用的
+     * 限时密码（网页端可查、私聊发一份，用于兜底）；这一串只在群里发、只能开一次门。
+     * 每次 {@code /开门} 都会重新取一串 —— 不做复用，理由见
+     * {@code OneTimePasscodeService} 的类注释。
+     *
+     * <p><b>⚠️ 它绝不能出现在任何订单视图里</b>（{@code OrderVo} / {@code OrderOpenVo}
+     * 都不带它），只在 {@code qqbot} 包内部消费。结算时会被撤销，但列值不清空
+     * （与 passcode 三列同构，保留为历史痕迹）。
+     */
+    private String oneTimePasscode;
+
+    /** 一次性密码的失效时刻（生成起 6 小时，通通锁单次密码的固有规则） */
+    private LocalDateTime oneTimePasscodeEnd;
+
     /** 计费起点 = 用户点击「开门」的时刻。与订单创建同一时刻 */
     private LocalDateTime startTime;
 

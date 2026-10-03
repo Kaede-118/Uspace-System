@@ -523,4 +523,109 @@ class ProductServiceTests {
     void delete_rejectsUnknownProduct() {
         assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.delete(9999L).getError());
     }
+
+    // ==================================================================
+    // 下单数量：群里那条路绕过了 Bean Validation
+    // ==================================================================
+
+    @Test
+    @DisplayName("⚠️ 数量范围由 Service 兜底 —— Bean Validation 只管得到 Controller 入参")
+    void createOrder_validatesQuantityRange() {
+        Product product = seedProduct("可乐", "3.50", 100);
+
+        assertEquals(ErrorCode.PARAM_INVALID,
+                service.createOrder(USER_ID, request(product.getId(), 0)).getError(),
+                "0 件会建出一笔 0 元的单");
+        assertEquals(ErrorCode.PARAM_INVALID,
+                service.createOrder(USER_ID, request(product.getId(), 100)).getError(),
+                "上限是 99，与网页端的 @Max 同一个数（两处共用一个常量）");
+        assertEquals(ErrorCode.PARAM_INVALID,
+                service.createOrder(USER_ID, request(product.getId(), -5)).getError(),
+                "⚠️ 负数量会算出一笔【负金额】的订单，而且不报任何错");
+
+        assertTrue(service.createOrder(USER_ID, request(product.getId(), 99)).isSuccess(),
+                "上限之内照常下单");
+    }
+
+    // ==================================================================
+    // 商品名唯一：群里的下单指令按名字找商品，全靠它才不会下错单
+    // ==================================================================
+
+    @Test
+    @DisplayName("按名字查：上架的下架的都找得到，找不到返回 404")
+    void findLiveByName_returnsEvenDisabled() {
+        seedProduct("可乐 500ml", "3.50", 10);
+        Product disabled = seedProduct("王老吉 500ml", "4.00", 10);
+        disabled.setEnabled(0);
+
+        assertEquals("可乐 500ml", service.findLiveByName("可乐 500ml").getData().getName());
+        assertEquals("王老吉 500ml", service.findLiveByName("王老吉 500ml").getData().getName(),
+                "⚠️ 下架的也要找得到 —— 调用方要能区分「没有这件商品」与「这件已下架」，"
+                        + "前者指去 /菜单，后者让他等上架，两句话不一样");
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.findLiveByName("不存在").getError());
+    }
+
+    @Test
+    @DisplayName("按名字查：去掉首尾空白，但中间的空格一个字都不能少")
+    void findLiveByName_trimsButKeepsInnerSpaces() {
+        seedProduct("王老吉 250ml（绿）", "2.00", 10);
+
+        assertTrue(service.findLiveByName("  王老吉 250ml（绿） ").isSuccess(),
+                "从群里复制名字时容易带上首尾空格");
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND,
+                service.findLiveByName("王老吉250ml（绿）").getError(),
+                "⚠️ 中间那个空格不能忽略：一旦做模糊匹配，就要面对「同时匹配到两件」，"
+                        + "而唯一键管不住模糊等价");
+    }
+
+    @Test
+    @DisplayName("新增：同名被拒（靠它保证群里的名字不会指向两件商品）")
+    void create_rejectsDuplicateName() {
+        seedProduct("可乐", "3.50", 10);
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("可乐");
+        request.setPrice(new BigDecimal("3.00"));
+        request.setStock(5);
+
+        assertEquals(ErrorCode.PRODUCT_NAME_EXISTS, service.create(request).getError());
+    }
+
+    @Test
+    @DisplayName("⚠️ 已删除的商品仍占着名字 —— 查重口径必须与那条唯一键严格一致")
+    void create_rejectsNameTakenByDeletedProduct() {
+        Product deleted = seedProduct("可乐", "3.50", 10);
+        service.delete(deleted.getId());
+
+        ProductSaveRequest request = new ProductSaveRequest();
+        request.setName("可乐");
+        request.setPrice(new BigDecimal("3.00"));
+        request.setStock(5);
+
+        assertEquals(ErrorCode.PRODUCT_NAME_EXISTS, service.create(request).getError(),
+                "数据库那条 uk_name 不含 deleted，已删的「可乐」仍然占着这个名字。"
+                        + "查重这边若顺手筛掉 deleted（照 DeviceMapper 写就会这样），"
+                        + "接口会说「名字可用」而保存时撞唯一键，用户拿到一句 500");
+    }
+
+    @Test
+    @DisplayName("修改：改成别人已用的名字被拒；不改名时不能把自己挡住")
+    void update_rejectsDuplicateNameButIgnoresSelf() {
+        seedProduct("可乐", "3.50", 10);
+        Product water = seedProduct("矿泉水", "2.00", 10);
+
+        ProductSaveRequest rename = new ProductSaveRequest();
+        rename.setName("可乐");
+        rename.setPrice(new BigDecimal("2.00"));
+        rename.setStock(10);
+        assertEquals(ErrorCode.PRODUCT_NAME_EXISTS,
+                service.update(water.getId(), rename).getError());
+
+        ProductSaveRequest keepName = new ProductSaveRequest();
+        keepName.setName("矿泉水");
+        keepName.setPrice(new BigDecimal("2.50"));
+        keepName.setStock(10);
+        assertTrue(service.update(water.getId(), keepName).isSuccess(),
+                "⚠️ 不排开自己的话，每一次普通的保存都会被自己挡住");
+    }
 }

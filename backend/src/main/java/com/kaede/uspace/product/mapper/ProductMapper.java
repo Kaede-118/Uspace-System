@@ -39,6 +39,52 @@ public interface ProductMapper extends BaseMapper<Product> {
     List<Product> selectOnSaleList();
 
     /**
+     * 按名字精确查一件<b>未删除</b>的商品（群里的下单指令用它找商品）。
+     *
+     * <p><b>返回单个对象而不是列表</b>：{@code uk_name} 保证同名至多一条。
+     * 返回 List 等于把「可能有多个」这个不存在的前提写进接口，
+     * 而调用方迟早会为它写一段永远不会执行的分支 —— 那比不写更糟，
+     * 因为读代码的人会以为那种情况真的会发生。
+     *
+     * <p>⚠️ <b>不筛 {@code enabled}</b>：调用方要能区分「没有这个商品」与
+     * 「这个商品已下架」—— 前者让用户去发 {@code /菜单} 看准确名称，
+     * 后者要告诉他等上架。两句话不一样，所以状态交给调用方判。
+     *
+     * <p>名字<b>精确匹配</b>（去掉首尾空白之后）。刻意不做「忽略空格 / 大小写」的
+     * 模糊匹配：商品名里带空格是常事（「王老吉 250ml（绿）」），
+     * 一旦放宽就同时放宽了「匹配到两件」的可能，而唯一键管不住那种模糊等价。
+     * 名字写不准确时由 {@code /菜单} 兜住 —— 那里给的是可复制的准确名称。
+     *
+     * @param name 商品名，调用方先去首尾空白
+     * @return 商品；不存在或已逻辑删除时返回 null
+     */
+    @Select("SELECT * FROM biz_product WHERE name = #{name} AND deleted = 0")
+    Product selectLiveByName(@Param("name") String name);
+
+    /**
+     * 数一数同名商品有几件 —— <b>含已逻辑删除的</b>。
+     *
+     * <p>⚠️ <b>刻意不写 {@code deleted = 0}，与上面的 {@code selectLiveByName} 正好相反</b>。
+     * 它对应的是 {@code uk_name} 那条唯一键，而那条键<b>不含 deleted</b> ——
+     * 逻辑删除过的商品仍然占着名字。两者口径差这一点点的后果很具体：
+     * 后台提示「名字可用」，保存时却撞唯一键，用户拿到一句 500 而不知道该改哪里。
+     *
+     * <p>与 {@code DeviceMapper#countByDeviceNo} 的差别也在这里（那个筛了 {@code deleted}），
+     * <b>不要照着它改</b>。
+     *
+     * @param name      商品名
+     * @param excludeId 要排除的商品 ID（改自己时传自己的 ID），新增时传 null
+     * @return 同名商品数；0 表示这个名字可用
+     */
+    @Select("""
+            SELECT COUNT(*)
+              FROM biz_product
+             WHERE name = #{name}
+               AND (#{excludeId} IS NULL OR id <> #{excludeId})
+            """)
+    int countByName(@Param("name") String name, @Param("excludeId") Long excludeId);
+
+    /**
      * 分页查询商品，供运营后台使用。
      *
      * <p>两个筛选条件都可空，空则不过滤 —— 用 {@code #{x} IS NULL OR ...}

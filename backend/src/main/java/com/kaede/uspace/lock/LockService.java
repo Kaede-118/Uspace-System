@@ -1,8 +1,10 @@
 package com.kaede.uspace.lock;
 
 import com.kaede.uspace.lock.dto.AddPasscodeRequest;
+import com.kaede.uspace.lock.dto.GetOneTimePasscodeRequest;
 import com.kaede.uspace.lock.dto.LockRecordDto;
 import com.kaede.uspace.lock.dto.LockStatus;
+import com.kaede.uspace.lock.dto.OneTimePasscodeResult;
 import com.kaede.uspace.lock.dto.PasscodeResult;
 
 import java.time.LocalDateTime;
@@ -39,6 +41,30 @@ public interface LockService {
      * @return 下发结果，成功时包含最终生效的密码
      */
     PasscodeResult addPasscode(AddPasscodeRequest request);
+
+    /**
+     * 获取一串一次性密码（单次密码）。
+     *
+     * <p>对应通通锁 {@code POST /v3/keyboardPwd/get}，参数
+     * {@code keyboardPwdType=1}（单次）、{@code keyboardPwdVersion=4}（三代锁）。
+     *
+     * <p><b>它与 {@link #addPasscode} 的区别是本质的，不是「换个参数」</b>：
+     * <ul>
+     *   <li>{@code addPasscode} 下发的是<b>可自定义内容</b>的限时密码，
+     *       而通通锁只允许自定义密码是「限时」类型（见上）</li>
+     *   <li>本方法拿到的密码<b>由锁云生成、内容不可指定</b>，规则是
+     *       「自生效起 6 小时内只能使用一次」—— 用掉即焚</li>
+     * </ul>
+     * 群指令 {@code /开门} 走的就是本方法：它要的正是「用一次就作废」的语义。
+     *
+     * <p><b>调用额度</b>：1 次。本系统的策略是<b>每次需要都重新获取</b>，
+     * 不做「判断旧的那串还在不在」—— 那个判断同样要花 1 次调用（查密码列表
+     * 或拉开门记录），与直接生成成本相同，却多出一段可能已经失效的缓存。
+     *
+     * @param request 获取参数，含锁 ID 与生效时刻
+     * @return 获取结果，成功时包含密码内容、锁云侧 ID 与有效期窗口
+     */
+    OneTimePasscodeResult getOneTimePasscode(GetOneTimePasscodeRequest request);
 
     /**
      * 修改已有密码的有效期。

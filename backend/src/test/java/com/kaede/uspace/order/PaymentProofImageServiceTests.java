@@ -179,7 +179,9 @@ class PaymentProofImageServiceTests {
     @Test
     @DisplayName("请求里没带 file 部分 → 拒绝，且根本不调识别")
     void upload_missingFileSkipsRecognition() {
-        BizResult<ProofImageVo> result = service.upload(null);
+        // ⚠️ 强转不能省：加了 upload(byte[]) 重载之后裸的 null 两个都匹配得上，
+        // 编译期报「对 upload 的引用不明确」。这里要测的是网页表单那条路
+        BizResult<ProofImageVo> result = service.upload((MultipartFile) null);
 
         assertEquals(ErrorCode.UPLOAD_FILE_INVALID, result.getError(),
                 "没带 file 要落到 Service 的校验里变成 400，而不是抛成 500");

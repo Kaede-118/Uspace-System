@@ -88,9 +88,35 @@ public class PaymentProofImageService {
      * @return 成功时返回站内路径与识别结果；校验不过时返回对应错误码
      */
     public BizResult<ProofImageVo> upload(MultipartFile file) {
-        String baseName = UUID.randomUUID().toString().replace("-", "");
+        return store(imageStorage.store(KIND_PROOF, newBaseName(), file));
+    }
 
-        BizResult<StoredImage> stored = imageStorage.store(KIND_PROOF, baseName, file);
+    /**
+     * 用字节数组上传一张付款截图 —— 图不是来自网页表单时走这里。
+     *
+     * <p>目前唯一的调用方是<b>群里的付款截图</b>（模块 11）：用户在群里发的图
+     * 是一串字节（从 NapCat 给的地址下回来的），没有 {@code MultipartFile}
+     * 这层载体。识别与落盘逻辑与网页那版<b>完全共用</b>，两条路不会分岔。
+     *
+     * @param bytes 图片字节
+     * @return 同 {@link #upload(MultipartFile)}
+     */
+    public BizResult<ProofImageVo> upload(byte[] bytes) {
+        return store(imageStorage.store(KIND_PROOF, newBaseName(), bytes));
+    }
+
+    /** @return 一个随机文件名主干（不带扩展名，扩展名由文件头决定） */
+    private static String newBaseName() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    /**
+     * 落盘结果 → 返回体（两个上传入口共用的收尾）。
+     *
+     * @param stored 落盘结果
+     * @return 成功时带上站内路径与识别结果；失败时把错误码与附加文案一起透传
+     */
+    private BizResult<ProofImageVo> store(BizResult<StoredImage> stored) {
         if (!stored.isSuccess()) {
             // 连附加文案一起透传（「请选择要上传的图片」那句提示要靠它才留得住）
             return BizResult.fail(stored.getError(), stored.getMessage());
