@@ -86,6 +86,16 @@ public record QqCommand(Kind kind, String argument, Integer quantity) {
         PRICE,
 
         /**
+         * 查月卡说明（{@code /月卡}、{@code /pass}）。
+         *
+         * <p>它是 {@link #PRICE} 的<b>补充而不是重复</b>：{@code /价格} 讲的是
+         * 「按时长怎么算钱」，月卡是另一种买法（包月），两者并列、各自才说得清。
+         * 在此之前群里问「月卡多少钱」机器人完全答不上来 —— 而月卡是店里
+         * 客单价最高的一项。
+         */
+        CARD_TYPES,
+
+        /**
          * 查网页端地址（{@code /web}）。
          *
          * <p>群里新来的人第一句常问「在哪儿下单」，而答案永远是一个网址 ——
@@ -217,6 +227,15 @@ public record QqCommand(Kind kind, String argument, Integer quantity) {
      */
     public static QqCommand price() {
         return new QqCommand(Kind.PRICE, null);
+    }
+
+    /**
+     * 构造「查月卡说明」指令。
+     *
+     * @return 指令
+     */
+    public static QqCommand cardTypes() {
+        return new QqCommand(Kind.CARD_TYPES, null);
     }
 
     /**

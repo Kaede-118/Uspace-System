@@ -9,15 +9,20 @@ import java.util.Arrays;
  * 做成枚举而不是散落的字符串常量，是为了让「合法取值有哪些」
  * 在代码里有一处权威定义 —— 校验非法状态时不必再维护第二份清单。
  *
- * <p><b>状态流转只有两跳</b>：
+ * <p><b>状态流转</b>：
  * <pre>
  *   （点击开门 → 创建订单即进入）IN_USE 使用中
  *          │
  *       结束使用
  *          ↓
  *    PENDING_PAYMENT 待支付 ──支付成功──> PAID 已支付
- *          │                                  ↑
- *          └────── 结算为 0 元时直通 ──────────┘
+ *          │                                  │  ↑
+ *          └─── 结算为 0 元时直通 ────────────┘  │
+ *                                             │  │
+ *              管理员驳回付款凭证 ─────────────┘  │
+ *                          ↓                     │
+ *                REJECTED 凭证未通过 ────────────┘
+ *                     （用户重传 + 管理员复核通过）
  * </pre>
  *
  * <p><b>为什么没有 CREATED</b>：点一次「开门」就同时完成
@@ -42,7 +47,28 @@ public enum OrderStatus {
     PENDING_PAYMENT("待支付"),
 
     /** 已支付。支付成功或结算为 0 元自动结清 */
-    PAID("已支付");
+    PAID("已支付"),
+
+    /**
+     * 付款凭证被管理员驳回，等待用户重新提交。
+     *
+     * <p><b>为什么不复用 {@link #PENDING_PAYMENT}</b>：那会让一个状态承载两件
+     * 处置方式完全不同的事 ——「他还没付钱」该提示「去支付」，而「他付过了、
+     * 只是凭证没通过」该提示「重新上传一张截图」。合并的话，用户看到
+     * 「待支付 ¥8.00」极可能再扫一次码，<b>真的付第二遍</b>。
+     *
+     * <p><b>系统对它的处置是：只允许重新提交凭证，不允许再发起支付</b> ——
+     * {@code PaymentTargetHandler#loadForPay} 不认这个状态。重复付款从机制上
+     * 被堵死，而不是靠一句「请勿重复支付」的提示去拦。
+     *
+     * <p>进入这个状态的唯一途径是管理员驳回付款凭证
+     *（见 {@code PaymentTargetHandler#revertDelivery}）。用户重传之后，
+     * 提交流程把它当成一次正常的落账，直接转 {@link #PAID}。
+     *
+     * <p>它算「未了结」：{@link #isUnpaid} 认它，所以那笔账没处理完之前
+     * 他开不了新单 —— 有被驳回的账挂在身上的人，是潜在的欠费者。
+     */
+    REJECTED("凭证未通过");
 
     /** 面向用户的中文说明，供前端展示 */
     private final String label;
@@ -74,12 +100,16 @@ public enum OrderStatus {
     }
 
     /**
-     * 判断某个状态是否属于「尚未付款」。
+     * 判断某个状态是否属于「还没了结」。
      *
-     * <p>即 {@link #IN_USE} 与 {@link #PENDING_PAYMENT}。
+     * <p>即 {@link #IN_USE}、{@link #PENDING_PAYMENT} 与 {@link #REJECTED}。
      * 供下单前的「上一单还没了结」校验与管理员人工调整时长时判定可否操作 ——
-     * 这两种状态改动金额没有退款问题，而 {@link #PAID} 已经入账，
+     * 这三种状态改动金额没有退款问题，而 {@link #PAID} 已经入账，
      * 调整要走人工退款流程。
+     *
+     * <p>⚠️ <b>{@code REJECTED} 必须算在里面</b>：有被驳回的账挂着的人
+     * 是潜在的欠费者，得先把那笔处理掉才能再开单。漏掉它的表现是
+     * 「凭证被驳回之后他照样能进店玩」，而那笔钱永远悬着。
      *
      * <p><b>刻意不写成 {@code Set.of(...).contains(name)}</b>：JDK 的不可变集合
      * 对 {@code null} 查询会抛 {@link NullPointerException}（它们用
@@ -91,10 +121,12 @@ public enum OrderStatus {
      * <p>与 {@code DeviceStatus.isUsable} 是同一套写法，改动时两处一起改。
      *
      * @param name 状态名，可为 null
-     * @return 未付款返回 true；null 或已支付返回 false
+     * @return 未了结返回 true；null 或已支付返回 false
      */
     public static boolean isUnpaid(String name) {
-        return IN_USE.name().equals(name) || PENDING_PAYMENT.name().equals(name);
+        return IN_USE.name().equals(name)
+                || PENDING_PAYMENT.name().equals(name)
+                || REJECTED.name().equals(name);
     }
 
     /**

@@ -107,6 +107,28 @@ public class ReconcileBatch {
      */
     private Integer billSkippedCount;
 
+    /**
+     * 账单侧<b>未被任何有效凭证认领</b>的笔数 —— 口径是
+     * {@code BILL_ONLY}（系统里一条凭证都没有）＋ {@code REJECTED_IN_BILL}
+     * （有凭证指着它，但那条被驳回了）。
+     *
+     * <p><b>它为 0 就是「账对平了」</b>，总账块据此给出结论。
+     * 金额见 {@link #billUnclaimedAmount}，口径说明见那里。
+     */
+    private Integer billUnclaimedCount;
+
+    /**
+     * 账单侧未被认领的金额合计（元）—— 总账上「少没少钱」看的就是这个数。
+     *
+     * <p>⚠️ <b>不能用 {@code billAmount − matchedAmount} 现算</b>：那个差里混着
+     * 「已被之前的批次认领」的部分（重传同一份账单、或月中月底各查一次时会发生），
+     * 会让差额虚高 —— 明明全对上了却报「差额 6.09 元」。所以它必须在匹配时算准、存下来。
+     *
+     * <p>与之并列的口径决定见 {@code ReconcilePlan} 的类注释：金额不符与重复认领
+     * <b>不算</b>未认领（钱确实到了），它们只进差异列表。
+     */
+    private BigDecimal billUnclaimedAmount;
+
     /** 系统侧参与比对的凭证数（落在窗口内、未被认领、未被驳回） */
     private Integer proofCount;
 

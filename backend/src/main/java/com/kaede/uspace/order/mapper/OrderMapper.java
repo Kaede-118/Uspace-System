@@ -90,9 +90,14 @@ public interface OrderMapper extends BaseMapper<Order> {
      * 调用方（{@code OrderService#createOrder}）按返回订单的状态分辨是哪种情形，
      * 给出各自的错误码与提示 —— 一个引导去「结束使用」，一个引导去「去支付」。
      *
-     * <p><b>只认这两种状态</b>：{@code PAID} 是已经了结的，不拦；
-     * 库表注释里那两个保留值（{@code CREATED} / {@code CANCELLED}）当前流程不产生，
-     * 真出现了也不该拦着用户不让玩。
+     * <p><b>三种状态都算「未了结」</b>：{@code IN_USE}（还在玩）、
+     * {@code PENDING_PAYMENT}（玩完没付）、{@code REJECTED}（付了但凭证被驳回）。
+     * {@code PAID} 已经了结，不拦；库表注释里那两个保留值
+     *（{@code CREATED} / {@code CANCELLED}）当前流程不产生，真出现了也不该拦着他。
+     *
+     * <p>⚠️ <b>{@code REJECTED} 漏不得</b>：有被驳回的账挂着的人是潜在的欠费者，
+     * 得先把那笔处理掉才能再开单。漏掉它的表现是「凭证被驳回之后他照样进店玩」，
+     * 而那笔钱永远悬着 —— 且不会有任何报错。
      *
      * <p>取 {@code ORDER BY id DESC LIMIT 1} 而不是要求至多一条：
      * 历史上可能同时存在一笔使用中与一笔待支付的（正是本次修复前的漏洞造成的），
@@ -106,7 +111,7 @@ public interface OrderMapper extends BaseMapper<Order> {
               FROM biz_order
              WHERE deleted = 0
                AND user_id = #{userId}
-               AND status IN ('IN_USE', 'PENDING_PAYMENT')
+               AND status IN ('IN_USE', 'PENDING_PAYMENT', 'REJECTED')
              ORDER BY id DESC
              LIMIT 1
             """)
@@ -509,7 +514,8 @@ public interface OrderMapper extends BaseMapper<Order> {
      * @param paymentNo     支付平台交易号，人工核销时可空
      * @param paidAt        支付完成时刻
      * @param confirmedBy   核销管理员 ID，系统自动确认时传 null
-     * @return 受影响行数；0 表示订单不是待支付状态，或记录不存在
+     * @return 受影响行数；0 表示订单不在可落账的状态上（既不是待支付、
+     *         也不是「凭证未通过」），或记录不存在
      */
     @Update("""
             UPDATE biz_order
@@ -520,7 +526,7 @@ public interface OrderMapper extends BaseMapper<Order> {
                    confirmed_by   = #{confirmedBy},
                    updated_at     = NOW()
              WHERE id = #{id}
-               AND status = 'PENDING_PAYMENT'
+               AND status IN ('PENDING_PAYMENT', 'REJECTED')
                AND deleted = 0
             """)
     int markPaid(@Param("id") Long id,
@@ -528,4 +534,39 @@ public interface OrderMapper extends BaseMapper<Order> {
                  @Param("paymentNo") String paymentNo,
                  @Param("paidAt") LocalDateTime paidAt,
                  @Param("confirmedBy") Long confirmedBy);
+
+    /**
+     * 把一笔已支付的订单标记为「凭证未通过」（管理员驳回付款凭证）。
+     *
+     * <p><b>目标状态是 {@code REJECTED} 而不是 {@code PENDING_PAYMENT}</b>：
+     * 那会让一个状态承载两件处置方式完全不同的事 ——「他还付没付钱」与
+     * 「他付过了但凭证没通过」。前者的处置是「去支付」，后者是「重新上传一张截图」。
+     * 合并的话，用户看到「待支付 ¥8.00」很可能再付一次钱。
+     *
+     * <p><b>支付四列一并清空</b>：一份「凭证未通过」却挂着 {@code paid_at}
+     * 的单子自相矛盾，而且它已经把状态让给了「被驳回」这件事 ——
+     * 留着那些字段只会让查询结果说不清。付款时的流水号并不丢，
+     * 它在凭证表（{@code biz_payment_proof.payment_no}）里还留着，
+     * 那才是可追溯的凭据。
+     *
+     * <p><b>状态守卫是这个方法的全部要害</b>（{@code AND status = 'PAID'}）：
+     * 两个管理员同时点驳回时只有一个能改成功，另一个拿到 0 行，
+     * 调用方据此跳过「减累计消费」那一步。少了它，同一笔钱会被减两次。
+     *
+     * @param id 订单 ID
+     * @return 受影响行数；0 表示订单不是已支付状态，或记录不存在
+     */
+    @Update("""
+            UPDATE biz_order
+               SET status         = 'REJECTED',
+                   payment_method = NULL,
+                   payment_no     = NULL,
+                   paid_at        = NULL,
+                   confirmed_by   = NULL,
+                   updated_at     = NOW()
+             WHERE id = #{id}
+               AND status = 'PAID'
+               AND deleted = 0
+            """)
+    int markRejected(@Param("id") Long id);
 }

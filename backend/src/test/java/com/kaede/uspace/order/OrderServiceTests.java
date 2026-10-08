@@ -116,7 +116,7 @@ class OrderServiceTests {
     /** 免费活动。默认一场都没有 —— 即绝大多数既有用例的场景 */
     private final FakeFreePeriodMapper freePeriodMapper = new FakeFreePeriodMapper();
     private final FreePeriodService freePeriodService =
-            new FreePeriodService(freePeriodMapper.asMapper());
+            new FreePeriodService(freePeriodMapper.asMapper(), event -> { });
 
     private final OrderProperties orderProperties = new OrderProperties();
     private final LockProperties lockProperties = new LockProperties();
@@ -159,8 +159,8 @@ class OrderServiceTests {
      */
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(),
-            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
-            userMapper.asMapper(), participantMapper.asMapper());
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { }),
+            userMapper.asMapper(), participantMapper.asMapper(), event -> { });
 
     /** 邀请令牌服务。同样无状态，供包场付款与准入判定使用 */
     private final InviteTokenService inviteTokenService =
@@ -532,7 +532,7 @@ class OrderServiceTests {
         OrderService empty = new OrderService(orderMapper.asMapper(),
                 new FakeStoreMapper().asMapper(), lockMapper.asMapper(),
                 bookingMapper.asMapper(),
-                new ClosureService(closureMapper.asMapper(), new FakeStoreMapper().asMapper()),
+                new ClosureService(closureMapper.asMapper(), new FakeStoreMapper().asMapper(), event -> { }),
                 bookingService,
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,
@@ -549,7 +549,7 @@ class OrderServiceTests {
         OrderService noLock = new OrderService(orderMapper.asMapper(), storeMapper.asMapper(),
                 new FakeLockMapper().withoutLock().asMapper(),
                 bookingMapper.asMapper(),
-                new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
+                new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { }),
                 bookingService,
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,
@@ -1820,7 +1820,7 @@ class OrderServiceTests {
         lockProperties.setProvider(provider);
         return new OrderService(orderMapper.asMapper(), storeMapper.asMapper(), lockMapper.asMapper(),
                 bookingMapper.asMapper(),
-                new ClosureService(closureMapper.asMapper(), storeMapper.asMapper()),
+                new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { }),
                 bookingService,
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,

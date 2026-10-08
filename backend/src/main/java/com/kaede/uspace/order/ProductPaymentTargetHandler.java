@@ -3,11 +3,14 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
+import com.kaede.uspace.order.event.ProductPurchasedEvent;
 import com.kaede.uspace.product.ProductOrderStatus;
 import com.kaede.uspace.product.entity.ProductOrder;
 import com.kaede.uspace.product.mapper.ProductMapper;
 import com.kaede.uspace.product.mapper.ProductOrderMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -25,8 +28,9 @@ import java.time.LocalDateTime;
  * <pre>
  *   ① 购买单 PENDING_PAYMENT → PAID（带状态守卫，幂等第一道）
  *   ② 条件 UPDATE 扣减库存（{@code WHERE stock >= 数量}）
+ *   ③ 发布「商品购买完成」事件（{@code qqbot} 监听后播报到群）
  * </pre>
- * 两步都在 {@code PaymentService#applyNotify} 的同一个事务里。
+ * 三步都在 {@code PaymentService#applyNotify} 的同一个事务里。
  *
  * <p><b>为什么扣库存放在这里、而不是由 Service 事后补</b>：
  * 支付回调是唯一知道「这笔钱确实收到了」的地方。
@@ -43,10 +47,17 @@ public class ProductPaymentTargetHandler implements PaymentTargetHandler {
     private final ProductOrderMapper orderMapper;
     private final ProductMapper productMapper;
 
+    /**
+     * 发布「商品购买完成」事件，由 {@code qqbot} 监听后播报到群。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
     public ProductPaymentTargetHandler(ProductOrderMapper orderMapper,
-                                       ProductMapper productMapper) {
+                                       ProductMapper productMapper,
+                                       ApplicationEventPublisher eventPublisher) {
         this.orderMapper = orderMapper;
         this.productMapper = productMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -75,6 +86,43 @@ public class ProductPaymentTargetHandler implements PaymentTargetHandler {
      */
     @Override
     public boolean deliverOnSubmit() {
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>⚠️ <b>只退状态，不退库存 —— 这一条是刻意的，而且很容易想反。</b>
+     *
+     * <p>「钱没收到就该把货收回来」听着顺，但漏了一个事实：无人值守店里没有店员，
+     * <b>付了钱自己取</b> —— 用户提交完凭证、单子转成已支付的那一刻，
+     * 货很可能已经从他手上拿走了。而管理员复核往往是<b>一两天后</b>的事
+     *（他不会守着凭证看）。这时候把库存加回去，系统里显示「货还在货架上」，
+     * 而实际上货早就没了 —— <b>账实不符</b>，比「少记一件」难查得多。
+     *
+     * <p>所以订单与商品退的都<b>不是交付物，而是状态</b>：订单买的是一段
+     * 已经发生过的服务，商品买的是可能已被取走的实物，两者都收不回来。
+     * 退状态是为了让用户重新有路可走（重传凭证或重新付款），
+     * 不是为了回滚交付 —— 回滚只在「东西还没出去」时才成立，
+     * 而那正是包场与月卡的情形，它们压根不需要退。
+     *
+     * <p>货与账对不上的部分，是运营离线处理的：管理员知道谁拿的、也找得到人。
+     * 系统该做的是别记一笔假账。
+     *
+     * <p>累计消费的冲减<b>不在这里</b>，在 {@code PaymentService#revertByProof} ——
+     * 记账口径由那个类说了算，两处各减一次会减成两倍。
+     */
+    @Override
+    public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
+        if (orderMapper.markRejected(target.getId()) == 0) {
+            // 状态守卫没放行：另一个管理员已经驳回过，或这单又被别处改过。
+            // 返回 false，调用方据此跳过冲减累计消费那一步
+            log.info("[支付] 商品购买单标记为凭证未通过未生效，视为已处理 orderNo={}",
+                    target.getOutTradeNo());
+            return false;
+        }
+        log.info("[支付] 商品购买单已标记为凭证未通过（库存不还，货可能已被取走）orderNo={}",
+                target.getOutTradeNo());
         return true;
     }
 
@@ -158,8 +206,33 @@ public class ProductPaymentTargetHandler implements PaymentTargetHandler {
             log.info("[支付] 商品付款成功并已扣库存 orderNo={} 商品={} ×{} 金额={} 通道={}",
                     target.getOutTradeNo(), order.getProductName(), order.getQuantity(),
                     target.getAmount(), channel);
+            // 扣减成功才播报：扣减失败时剩余量是错的（库存没减，甚至商品已被删），
+            // 而那一笔已由上面的 error 日志转入人工处理
+            publishPurchased(order);
         }
         return true;
+    }
+
+    /**
+     * 发布「商品购买完成」事件（{@code qqbot} 监听后播报到群）。
+     *
+     * <p><b>只在库存扣减成功之后发布</b>：扣减失败意味着「钱收了但没货」，
+     * 那一笔已经由上面的 error 日志转入人工处理，播报它只会给出一个
+     * 没减过的库存数（商品被删时更是压根查不到）。
+     *
+     * <p><b>异常自己吞掉。</b>播报是次要功能，一次发布失败不该让整笔付款
+     * 抛异常回滚 —— 走凭证那条路时，表现就是「提交付款截图却报了个错」。
+     *
+     * @param order 购买单实体（重查过的那一份，含商品名与数量的快照）
+     */
+    private void publishPurchased(ProductOrder order) {
+        try {
+            eventPublisher.publishEvent(new ProductPurchasedEvent(
+                    order.getId(), order.getUserId(), order.getOrderNo(),
+                    order.getProductId(), order.getProductName(), order.getQuantity()));
+        } catch (RuntimeException e) {
+            log.warn("[支付] 发布商品购买事件失败，跳过群播报 orderNo={}", order.getOrderNo(), e);
+        }
     }
 
     /**

@@ -226,6 +226,8 @@ public class ReconcileService {
         batch.setBillAmount(parsed.totalAmount());
         batch.setBillExcludedCount(parsed.excludedCount());
         batch.setBillSkippedCount(plan.billSkipped());
+        batch.setBillUnclaimedCount(plan.billUnclaimedCount());
+        batch.setBillUnclaimedAmount(plan.billUnclaimedAmount());
         batch.setProofCount(plan.activeCount());
         batch.setProofAmount(plan.activeAmount());
         batch.setProofSkippedCount(plan.proofSkipped());

@@ -5,11 +5,14 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.billing.dto.FreePeriodRequest;
 import com.kaede.uspace.billing.dto.FreePeriodVo;
 import com.kaede.uspace.billing.entity.FreePeriod;
+import com.kaede.uspace.billing.event.FreePeriodChangeAction;
+import com.kaede.uspace.billing.event.FreePeriodChangedEvent;
 import com.kaede.uspace.billing.mapper.FreePeriodMapper;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -46,8 +49,18 @@ public class FreePeriodService {
 
     private final FreePeriodMapper freePeriodMapper;
 
-    public FreePeriodService(FreePeriodMapper freePeriodMapper) {
+    /**
+     * 发布「免费活动变更」事件，由 {@code qqbot} 监听后播报到群。
+     *
+     * <p>新增与撤销<b>都播</b>：「今晚 20:00–次日 02:00 免费」进了群之后，
+     * 总会有人为它跑一趟；撤销若不播，这些人到了才发现不免费。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
+    public FreePeriodService(FreePeriodMapper freePeriodMapper,
+                             ApplicationEventPublisher eventPublisher) {
         this.freePeriodMapper = freePeriodMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     // ==================================================================
@@ -162,6 +175,7 @@ public class FreePeriodService {
         log.info("[免费活动] 新增 id={}，{} ~ {}，原因={}（登记人 {}）",
                 period.getId(), period.getStartAt(), period.getEndAt(),
                 period.getReason(), adminId);
+        publishChanged(period, FreePeriodChangeAction.CREATED);
         return BizResult.ok(FreePeriodVo.from(period));
     }
 
@@ -212,12 +226,35 @@ public class FreePeriodService {
      */
     @Transactional
     public BizResult<Void> deletePeriod(Long storeId, Long id) {
-        if (findOwned(storeId, id) == null) {
+        // 先取出来再删：撤销的播报要说清「撤的是哪一段」，而删完就查不到了
+        FreePeriod existing = findOwned(storeId, id);
+        if (existing == null) {
             return BizResult.fail(ErrorCode.FREE_PERIOD_NOT_FOUND);
         }
         freePeriodMapper.deleteById(id);
         log.info("[免费活动] 删除 id={}", id);
+        publishChanged(existing, FreePeriodChangeAction.DELETED);
         return BizResult.ok(null);
+    }
+
+    /**
+     * 发布「免费活动变更」事件（{@code qqbot} 监听后播报到群）。
+     *
+     * <p><b>异常自己吞掉。</b>播报是次要功能，一次发布失败不该让活动
+     * 保存不了 —— 管理员排的是「这个时段免费」这件事本身。
+     *
+     * @param period 活动记录；撤销时传的是删除前查到的那一份
+     * @param action 新增还是撤销
+     */
+    private void publishChanged(FreePeriod period, FreePeriodChangeAction action) {
+        try {
+            eventPublisher.publishEvent(new FreePeriodChangedEvent(
+                    period.getId(), period.getStartAt(), period.getEndAt(),
+                    period.getReason(), action));
+        } catch (RuntimeException e) {
+            log.warn("[免费活动] 发布活动变更事件失败，跳过群播报 periodId={} action={}",
+                    period.getId(), action, e);
+        }
     }
 
     // ==================================================================

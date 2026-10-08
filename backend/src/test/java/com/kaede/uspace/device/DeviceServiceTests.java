@@ -76,7 +76,7 @@ class DeviceServiceTests {
     /** 被测服务 */
     private final DeviceService deviceService = new DeviceService(
             deviceMapper.asMapper(), typeMapper.asMapper(), storeMapper.asMapper(),
-            new NoticeService(noticeMapper.asMapper()));
+            new NoticeService(noticeMapper.asMapper(), event -> { }));
 
     /** 每个用例前预置门店与两条类型字典 */
     @BeforeEach
@@ -211,7 +211,7 @@ class DeviceServiceTests {
         FakeStoreMapper empty = new FakeStoreMapper();
         DeviceService service = new DeviceService(
                 deviceMapper.asMapper(), typeMapper.asMapper(), empty.asMapper(),
-                new NoticeService(noticeMapper.asMapper()));
+                new NoticeService(noticeMapper.asMapper(), event -> { }));
 
         BizResult<List<DeviceGroupVo>> result = service.listForDisplay();
 
@@ -347,7 +347,7 @@ class DeviceServiceTests {
     void createDevice_storeMissing() {
         DeviceService service = new DeviceService(
                 deviceMapper.asMapper(), typeMapper.asMapper(), new FakeStoreMapper().asMapper(),
-                new NoticeService(noticeMapper.asMapper()));
+                new NoticeService(noticeMapper.asMapper(), event -> { }));
 
         BizResult<DeviceVo> result = service.createDevice(request("拍拍机 1 号", PAIPAI_ID));
 
@@ -808,6 +808,6 @@ class DeviceServiceTests {
 
     /** 便于断言「用户端看到什么」 */
     private NoticeService noticeServiceOf() {
-        return new NoticeService(noticeMapper.asMapper());
+        return new NoticeService(noticeMapper.asMapper(), event -> { });
     }
 }

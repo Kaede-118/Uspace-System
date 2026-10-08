@@ -28,6 +28,7 @@ import com.kaede.uspace.space.FakeBookingParticipantMapper;
 import com.kaede.uspace.space.FakeClosureMapper;
 import com.kaede.uspace.space.FakeStoreMapper;
 import com.kaede.uspace.space.entity.Booking;
+import com.kaede.uspace.space.event.BookingActivatedEvent;
 import com.kaede.uspace.user.FakeSysUserMapper;
 import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +38,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -94,10 +96,18 @@ class PaymentServiceTests {
      */
     private final FakeStoreMapper storeMapper = new FakeStoreMapper();
     private final ClosureService closureService =
-            new ClosureService(new FakeClosureMapper().asMapper(), storeMapper.asMapper());
+            new ClosureService(new FakeClosureMapper().asMapper(), storeMapper.asMapper(), event -> { });
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
-            userMapper.asMapper(), participantMapper.asMapper());
+            userMapper.asMapper(), participantMapper.asMapper(), event -> { });
+
+    /**
+     * 「包场付款生效」事件的发布记录。
+     *
+     * <p>用它钉住「付款成功播一次、重复回调不再播」—— 播报的重复与缺席
+     * 都不报任何错，只有这里能发现。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
 
     private final InviteTokenService inviteTokenService = new InviteTokenService(
             bookingMapper.asMapper(), bookingService, new WebProperties());
@@ -122,10 +132,12 @@ class PaymentServiceTests {
 
     @BeforeEach
     void setUp() {
+        publishedEvents.clear();
         service = new PaymentService(gateway, paymentProperties,
                 List.of(new OrderPaymentTargetHandler(orderMapper.asMapper()),
                         new BookingPaymentTargetHandler(bookingMapper.asMapper(),
-                                inviteTokenService, participantMapper.asMapper()),
+                                inviteTokenService, participantMapper.asMapper(),
+                                publishedEvents::add),
                         new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
                                 cardMapper.asMapper(), promotionProperties)),
                 userMapper.asMapper());
@@ -482,6 +494,12 @@ class PaymentServiceTests {
         assertEquals(1, participantMapper.size(),
                 "付款那一刻要把包场人写进参与者表 —— 少了这一行，"
                         + "「我参与的」列表与邀请页的名单里都不会出现发起人");
+
+        assertEquals(1, publishedEvents.size(),
+                "包场此刻才真正生效，应当发布一条「包场生效」事件（qqbot 据此播报到群）");
+        BookingActivatedEvent event = (BookingActivatedEvent) publishedEvents.get(0);
+        assertEquals(booking.getId(), event.bookingId());
+        assertNotNull(event.startAt(), "事件带着时段，播报文案直接用它，不必监听方再查库");
     }
 
     @Test
@@ -499,6 +517,8 @@ class PaymentServiceTests {
         assertEquals(1, participantMapper.size(),
                 "回调会重推，参与者行不能跟着多插一行 —— 第一道防线是"
                         + "「状态没被本次回调改动就直接返回」，第二道是唯一键");
+        assertEquals(1, publishedEvents.size(),
+                "重推也不该再播一次 —— 同一场包场在群里说两遍就是假消息");
     }
 
     @Test

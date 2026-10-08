@@ -19,7 +19,14 @@ defineProps({
   /** 收款目标类型：PRODUCT / MONTHLY_CARD */
   targetType: { type: String, required: true },
   /** 目标 ID */
-  targetId: { type: [Number, String], default: null }
+  targetId: { type: [Number, String], default: null },
+  /**
+   * 只走「上传付款凭证」那条路（凭证被驳回时用）。
+   * 原样透传给 {@code PaymentPanel}，理由见那里的说明。
+   */
+  proofOnly: { type: Boolean, default: false },
+  /** 主按钮文案，透传给 {@code PaymentPanel} */
+  payText: { type: String, default: '去支付' }
 })
 
 const emit = defineEmits(['update:visible', 'paid'])
@@ -36,6 +43,8 @@ const emit = defineEmits(['update:visible', 'paid'])
         :target-type="targetType"
         :target-id="targetId"
         :amount="amount"
+        :proof-only="proofOnly"
+        :pay-text="payText"
         @paid="emit('paid')"
       />
 

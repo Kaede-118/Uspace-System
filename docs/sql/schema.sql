@@ -545,8 +545,16 @@ CREATE TABLE `biz_order` (
   -- 默认值刻意保留 'CREATED' 而不是改成 'IN_USE'：正常业务里这一列总是被显式赋值，
   -- 默认值只在「有人手工 INSERT 却忘了给 status」时兜底。此时落成 CREATED
   -- 反而是一眼能认出的异常数据，而落成 IN_USE 会伪装成一条「永远在使用中」的订单。
+  --
+  -- 【REJECTED 为什么单独一个状态，不退回 PENDING_PAYMENT】
+  --   管理员驳回付款凭证时，那笔单子从 PAID 转到这里。复用 PENDING_PAYMENT 的话，
+  --   一个状态就承载了两件处置方式完全不同的事：「他还没付钱」（该去支付）与
+  --   「他付过了、只是凭证没通过」（该重新上传一张截图）。用户看到「待支付 ¥8.00」
+  --   极可能再扫一次码 —— 真的付第二遍。
+  --   它算「未了结」（见 OrderStatus.isUnpaid 与 OrderMapper.selectUnsettledByUser）：
+  --   有被驳回的账挂着的人开不了新单，得先处理掉。
   `status`          VARCHAR(20)   NOT NULL DEFAULT 'CREATED'
-                    COMMENT '状态：IN_USE 使用中 / PENDING_PAYMENT 待支付 / PAID 已支付。CREATED 与 CANCELLED 为保留值，当前流程不产生',
+                    COMMENT '状态：IN_USE 使用中 / PENDING_PAYMENT 待支付 / PAID 已支付 / REJECTED 付款凭证未通过（等待用户重新提交）。CREATED 与 CANCELLED 为保留值，当前流程不产生',
 
   -- 支付（信任制：离场后才付款）
   --   通道按用户浏览器环境自动分流，商户订单号 out_trade_no 由本表 order_no 充当
@@ -825,7 +833,7 @@ CREATE TABLE `biz_product_order` (
   `quantity`       INT           NOT NULL DEFAULT 1      COMMENT '数量',
   `amount`         DECIMAL(10,2) NOT NULL                COMMENT '应付金额（元）= unit_price × quantity，下单时算好存下',
   `status`         VARCHAR(20)   NOT NULL DEFAULT 'PENDING_PAYMENT'
-                   COMMENT '状态：PENDING_PAYMENT 待支付 / PAID 已支付（到店自取，无核销流程）/ CLOSED 已关闭',
+                   COMMENT '状态：PENDING_PAYMENT 待支付 / PAID 已支付（到店自取，无核销流程）/ CLOSED 已关闭 / REJECTED 付款凭证未通过（等待用户重新提交，与订单同义）',
   `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
   `payment_no`     VARCHAR(64)   DEFAULT NULL            COMMENT '支付平台交易号：微信 transaction_id / 支付宝 trade_no',
   `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付完成时刻',
@@ -1016,6 +1024,29 @@ CREATE TABLE `biz_reconcile_batch` (
   `bill_amount`         DECIMAL(12,2) NOT NULL DEFAULT 0.00   COMMENT '账单侧收入合计（元）',
   `bill_excluded_count` INT           NOT NULL DEFAULT 0      COMMENT '账单里未参与对账的笔数：收支方向不是「收入」的，以及交易类型不在白名单里的（个人收款账单里的转账、红包、别处买东西的退款）。只计数不参与匹配 —— 它们每一笔都找不到对应凭证。与 bill_count 并列显示：一份账单上写着收了多少、系统只认了多少，差额全在这里',
   `bill_skipped_count`  INT           NOT NULL DEFAULT 0      COMMENT '账单侧因「单号已被之前的批次认领过」而跳过的笔数。重传同一份文件时它等于 bill_count，是回答「为什么这次匹配 0 笔」的唯一依据',
+  -- 下面两列是「总账对平」的依据：账单里的钱，有多少没被任何有效凭证认领。
+  --
+  -- 【口径】未认领 = BILL_ONLY（系统里一条凭证都没有）+ REJECTED_IN_BILL
+  --   （有凭证指着它，但那条凭证被驳回了 —— 不算数）。
+  --   ⚠️ AMOUNT_MISMATCH 与 DUPLICATE_CLAIM **不算**未认领：那两类钱确实到了、
+  --   也有凭证指着它，只是有疑点。它们只进差异列表，不拉低总账 ——
+  --   否则「金额差 2 元」会被记成「有 8 元没收到」，把结论说重了。
+  --
+  -- 【为什么不从差异表反推】差异在写入前会去重（同一处不一致只报一次，
+  --   见 ReconcileService#dropDuplicatedDiffs），所以差异条数 ≠ 实际笔数。
+  --   拿差异表算差额会**少算**，而少算的那部分恰恰是「上次报过、还没处理」的。
+  --
+  -- 【为什么不能靠 bill_amount − matched_amount 现算】matched_amount 只是
+  --   **本批次**认领的，而 bill_amount 是账单侧**全部**的。重传同一份账单、
+  --   或月中月底各查一次（区间重叠）时，被 bill_skipped 跳过的那部分已经在上一个
+  --   批次认领过了，现算会让差额虚高 —— 明明全对上了，页面却报「差额 6.09 元」。
+  --
+  -- ⚠️ 【两列可空，而且必须可空】NULL 表示「这个批次建于总账功能之前，没统计过」，
+  --   与「统计过、结果是 0」是两回事。用 NOT NULL DEFAULT 0 的话，本次升级之前
+  --   建的批次全部会读成 0，页面上显示成「账已对平」—— 那是个没有依据的结论，
+  --   而管理员会据此直接走人。前端按 `!= null` 判断，取不到就整块不显示。
+  `bill_unclaimed_count` INT                     DEFAULT NULL   COMMENT '账单侧未被任何有效凭证认领的笔数 = BILL_ONLY + REJECTED_IN_BILL。为 0 即「账对平了」；NULL 表示该批次建于本功能之前',
+  `bill_unclaimed_amount` DECIMAL(12,2)          DEFAULT NULL   COMMENT '账单侧未被认领的金额合计（元）。总账「少没少钱」看这个数，它不受重传影响；NULL 含义同上',
   `proof_count`         INT           NOT NULL DEFAULT 0      COMMENT '系统侧参与比对的凭证数（落在窗口内、未被认领、未被驳回）',
   `proof_amount`        DECIMAL(12,2) NOT NULL DEFAULT 0.00   COMMENT '系统侧参与比对的凭证金额合计（元）',
   `proof_skipped_count` INT           NOT NULL DEFAULT 0      COMMENT '落在窗口内但已被之前批次认领、本次跳过的凭证数',

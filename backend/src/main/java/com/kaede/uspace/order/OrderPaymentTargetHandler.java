@@ -4,6 +4,7 @@ import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.order.entity.PaymentProof;
 import com.kaede.uspace.order.mapper.OrderMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -59,6 +60,36 @@ public class OrderPaymentTargetHandler implements PaymentTargetHandler {
      */
     @Override
     public boolean deliverOnSubmit() {
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>订单买的是一段<b>已经发生过</b>的服务，交付物在提交凭证之前就被消耗掉了，
+     * 所以「退回去」退的不是货而是<b>状态</b>：把这笔单子标成
+     * {@link OrderStatus#REJECTED 凭证未通过}。
+     *
+     * <p>⚠️ <b>刻意不退成 {@code PENDING_PAYMENT}</b>：那个状态的处置动作是
+     * 「去支付」，而这里要用户做的是「重新上传一张截图」。合并成一个状态的话，
+     * 用户看到「待支付 ¥8.00」很可能再付一次钱，而两个动作在页面上的入口
+     * 长得一模一样。<b>状态分开，提示才能分开。</b>
+     *
+     * <p>⚠️ <b>累计消费的冲减不在这里</b>，在 {@code PaymentService#revertByProof}：
+     * 记账口径（{@code paidCategory}）是那个类说了算的，两处各减一次就会减成两倍，
+     * 而表现只是「用户的累计消费比实际少了一笔」，不会有任何报错。
+     */
+    @Override
+    public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
+        if (orderMapper.markRejected(target.getId()) == 0) {
+            // 状态守卫没放行：另一个管理员已经驳回过，或这单又被别处改过。
+            // 返回 false，调用方据此跳过减累计消费那一步
+            log.info("[支付] 订单标记为凭证未通过未生效，视为已处理 orderNo={}",
+                    target.getOutTradeNo());
+            return false;
+        }
+        log.info("[支付] 订单已标记为凭证未通过 orderNo={} 用户={} 金额={}",
+                target.getOutTradeNo(), proof.getUserId(), proof.getAmount());
         return true;
     }
 

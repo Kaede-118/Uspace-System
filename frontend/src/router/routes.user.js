@@ -94,13 +94,16 @@ export default [
     path: '/cards',
     name: 'cards',
     component: () => import('@/views/user/CardWalletView.vue'),
-    meta: { title: '我的月卡' }
+    meta: { title: '月卡' }
   },
   {
+    // 与 /orders 是**同一个组件**，只是靠 meta.tab 直接落在商品那一栏。
+    // 合并成一页之后这条路留着，是为了不改散在各处的跳转链接
+    //（首页那条驳回提醒、QQ 机器人给的地址）
     path: '/product-orders',
     name: 'product-orders',
-    component: () => import('@/views/user/ProductOrderView.vue'),
-    meta: { title: '我的商品订单' }
+    component: () => import('@/views/user/OrderListView.vue'),
+    meta: { title: '订单', tab: 'product' }
   },
 
   /* ---- 包场 ---- */

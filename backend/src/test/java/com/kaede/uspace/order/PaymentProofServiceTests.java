@@ -11,10 +11,12 @@ import com.kaede.uspace.order.dto.ProofSubmitVo;
 import com.kaede.uspace.order.entity.Order;
 import com.kaede.uspace.order.entity.PayQr;
 import com.kaede.uspace.order.entity.PaymentProof;
+import com.kaede.uspace.order.event.PaymentProofRejectedEvent;
 import com.kaede.uspace.order.ocr.OcrTextParser;
 import com.kaede.uspace.product.FakeProductMapper;
 import com.kaede.uspace.product.FakeProductOrderMapper;
 import com.kaede.uspace.product.ProductOrderStatus;
+import com.kaede.uspace.product.entity.Product;
 import com.kaede.uspace.product.entity.ProductOrder;
 import com.kaede.uspace.promotion.CardOrderStatus;
 import com.kaede.uspace.promotion.FakeMonthlyCardMapper;
@@ -39,6 +41,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -109,10 +112,10 @@ class PaymentProofServiceTests {
             new FakeBookingParticipantMapper(bookingMapper);
     private final FakeStoreMapper storeMapper = new FakeStoreMapper();
     private final ClosureService closureService =
-            new ClosureService(new FakeClosureMapper().asMapper(), storeMapper.asMapper());
+            new ClosureService(new FakeClosureMapper().asMapper(), storeMapper.asMapper(), event -> { });
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
-            userMapper.asMapper(), participantMapper.asMapper());
+            userMapper.asMapper(), participantMapper.asMapper(), event -> { });
     private final InviteTokenService inviteTokenService = new InviteTokenService(
             bookingMapper.asMapper(), bookingService, new WebProperties());
 
@@ -120,21 +123,32 @@ class PaymentProofServiceTests {
     private final List<PaymentTargetHandler> handlers = List.of(
             new OrderPaymentTargetHandler(orderMapper.asMapper()),
             new BookingPaymentTargetHandler(bookingMapper.asMapper(),
-                    inviteTokenService, participantMapper.asMapper()),
+                    inviteTokenService, participantMapper.asMapper(), event -> { }),
             new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
                     cardMapper.asMapper(), promotionProperties),
             new ProductPaymentTargetHandler(productOrderMapper.asMapper(),
-                    productMapper.asMapper()));
+                    productMapper.asMapper(), event -> { }));
 
     private PaymentService paymentService;
     private PaymentProofService service;
 
+    /**
+     * 收集被测代码发布的事件。
+     *
+     * <p>用一个真的收集器而不是 mock：本类要断言的是「驳回之后<b>发了</b>
+     * 一条通知」—— 那正是「先交付后复核」那道缺口唯一的补法。漏掉它不会有
+     * 任何编译错误，只表现为用户永远收不到提醒。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     @BeforeEach
     void setUp() {
+        publishedEvents.clear();
         paymentService = new PaymentService(gateway, paymentProperties,
                 handlers, userMapper.asMapper());
         service = new PaymentProofService(proofMapper.asMapper(), payQrMapper.asMapper(),
-                userMapper.asMapper(), uploadProperties, handlers, paymentService);
+                userMapper.asMapper(), uploadProperties, handlers, paymentService,
+                publishedEvents::add);
     }
 
     // ==================================================================
@@ -219,20 +233,33 @@ class PaymentProofServiceTests {
     }
 
     @Test
-    @DisplayName("提交：目标已支付且凭证未通过 → 拒绝，并带上驳回原因")
-    void submit_rejectedIsRefused() {
+    @DisplayName("提交：已支付且凭证曾被驳回（回退机制上线前的历史数据）→ 放行重交")
+    void submit_rejectedOnPaidTargetIsAllowed() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
         service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         proofMapper.reject(proof.getId(), ADMIN_ID, "金额对不上");
+        /*
+         * 把订单按回「已支付」—— 这里模拟的正是「交付回退机制上线之前被驳回的
+         * 那批数据」：凭证是 REJECTED，而订单还停在已支付上。
+         *
+         * 走 reject() 的话订单会被退成 REJECTED，那走的就是正常的待支付路径，
+         * 这条分支根本到不了。
+         */
+        orderMapper.get(order.getId()).setStatus(OrderStatus.PAID.name());
 
         BizResult<ProofSubmitVo> result = service.submit(USER_ID,
                 request(PaymentTargetType.ORDER, order.getId()));
 
-        assertEquals(ErrorCode.PAYMENT_PROOF_REJECTED, result.getError(),
-                "被驳回后重交不能自动翻案，否则驳回这个动作就没有意义了");
-        assertEquals("金额对不上", result.getMessage(), "要把原因带给用户，他才知道哪里不对");
+        assertTrue(result.isSuccess(),
+                "老数据的死结要解开：那笔单子既不能再付（系统认为不需要）、"
+                        + "又不能重交（这里拦着）的话，用户在页面上点什么都没用，"
+                        + "而管理员那边也没有重开复核的入口");
+        assertEquals(PaymentProofStatus.SUBMITTED.name(),
+                proofMapper.get(proof.getId()).getVerifyStatus(),
+                "重交之后凭证翻回待复核，等管理员再看一次 —— "
+                        + "订单则停在已支付上，那正是「提交即交付 + 等复核」的正常组合");
     }
 
     @Test
@@ -592,6 +619,108 @@ class PaymentProofServiceTests {
         assertEquals(BookingStatus.PENDING_PAYMENT.name(),
                 bookingMapper.get(booking.getId()).getStatus(),
                 "驳回不改变目标状态 —— 系统不会替人做「这笔不认了」之后的处置");
+    }
+
+    @Test
+    @DisplayName("驳回 → 发一条通知事件，用户才可能知道自己的凭证没过")
+    void reject_publishesNotification() {
+        Booking booking = seedPendingBooking(USER_ID);
+        service.submit(USER_ID, request(PaymentTargetType.BOOKING, booking.getId()));
+        PaymentProof proof = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
+        // 提交本身不发事件，这里清一次是防御性的：将来提交若也要播报，
+        // 本用例不该跟着变红
+        publishedEvents.clear();
+
+        service.reject(proof.getId(), ADMIN_ID, "看不清金额");
+
+        assertEquals(1, publishedEvents.size(),
+                "驳回必须发声 —— 订单与商品是「先交付后复核」，驳回不回退订单状态，"
+                        + "用户端看到的仍是「已支付」。少了这条事件，"
+                        + "「管理员不认这笔钱」这个结论永远到不了当事人那里，复核等于白设");
+        PaymentProofRejectedEvent event = (PaymentProofRejectedEvent) publishedEvents.get(0);
+        assertEquals(USER_ID, event.userId(), "要能定位到人 —— qqbot 靠它查 QQ 号来 @");
+        assertEquals("看不清金额", event.reason(), "原因要带给用户，否则他不知道该改什么");
+        assertEquals(PaymentTargetType.BOOKING.name(), event.targetType(),
+                "带上类型是为了日志里分得清是哪一类收款");
+    }
+
+    @Test
+    @DisplayName("驳回：订单退回待支付、支付字段清空、累计消费冲减")
+    void reject_revertsOrderDelivery() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+
+        assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "订单是「提交即交付」，提交完就该是已支付");
+        assertTrue(userMapper.get(USER_ID).getTotalPaid().compareTo(BigDecimal.ZERO) > 0,
+                "提交即交付，累计消费当场就记上了");
+
+        PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
+        service.reject(proof.getId(), ADMIN_ID, "金额对不上");
+
+        Order reverted = orderMapper.get(order.getId());
+        assertEquals(OrderStatus.REJECTED.name(), reverted.getStatus(),
+                "驳回要把已交付的那一步退回去，而且退成 **REJECTED 而不是 PENDING_PAYMENT** —— "
+                        + "后者的处置是「去支付」，用户看到它会再付一次钱。"
+                        + "**这一条同时就是「禁用开门」的实现**：下单前的欠费校验"
+                        + "（selectUnsettledByUser）把 REJECTED 也算作未了结，"
+                        + "他开不了新单，必须先处理这一笔");
+        assertNull(reverted.getPaidAt(), "支付字段要一并清掉：一份「待支付」挂着支付时间自相矛盾");
+        assertNull(reverted.getPaymentNo(), "流水号并不丢，它在凭证表里留着");
+        assertEquals(0, userMapper.get(USER_ID).getTotalPaid().compareTo(BigDecimal.ZERO),
+                "累计消费要冲减回去 —— 这笔钱系统不再认了，留着会把月度优惠门槛算高");
+    }
+
+    @Test
+    @DisplayName("驳回后重交：走得通（订单已经不在已支付上了）")
+    void resubmitAfterRejectForOrder() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
+        service.reject(proof.getId(), ADMIN_ID, "截图看不清");
+
+        ProofSubmitRequest again = request(PaymentTargetType.ORDER, order.getId());
+        again.setProofUrl("/uploads/proof/clearer.jpg");
+        BizResult<ProofSubmitVo> result = service.submit(USER_ID, again);
+
+        assertTrue(result.isSuccess(),
+                "订单被退回待支付之后，重交走的是正常的待支付路径 —— "
+                        + "submit 里那道「已支付 + 已驳回 → 拒绝重交」自然走不到了。"
+                        + "这正是「退状态」比「单独开一条重交通道」省事的地方");
+        assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "重交之后当场又转已支付（提交即交付）");
+    }
+
+    @Test
+    @DisplayName("驳回商品：只退状态，不还库存 —— 货多半已被取走")
+    void reject_revertsProductWithoutRestoringStock() {
+        // 先往商品表里放一件货：seedPendingProductOrder 只指定 productId=1，
+        // 而「扣库存」那一步要真的找得到商品
+        Product product = new Product();
+        product.setId(1L);
+        product.setName("可乐");
+        product.setStock(10);
+        productMapper.seed(product);
+
+        ProductOrder productOrder = seedPendingProductOrder();
+        seedUser(USER_ID);
+        service.submit(USER_ID, request(PaymentTargetType.PRODUCT, productOrder.getId()));
+        int stockAfterPay = productMapper.get(1L).getStock();
+
+        PaymentProof proof = proofMapper.find(PaymentTargetType.PRODUCT.name(), productOrder.getId());
+        service.reject(proof.getId(), ADMIN_ID, "金额对不上");
+
+        assertEquals(ProductOrderStatus.REJECTED.name(),
+                productOrderMapper.get(productOrder.getId()).getStatus(),
+                "购买单标成「凭证未通过」，用户能重新上传 —— "
+                        + "与订单同一条理由：不能退成「待支付」，"
+                        + "那会让用户以为要再下一次单");
+        assertEquals(stockAfterPay, productMapper.get(1L).getStock(),
+                "**库存不还** —— 无人值守店里付了钱自己取，而驳回发生在管理员有空复核时，"
+                        + "那时货多半已经不在货架上了。还回去等于记一笔假账，"
+                        + "而账实不符比少记一件更难查");
     }
 
     @Test

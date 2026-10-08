@@ -84,6 +84,8 @@ class QqCommandParserTests {
         assertEquals(QqCommand.Kind.INSTORE, QqCommandParser.parse("/在店").kind());
         assertEquals(QqCommand.Kind.INSTORE, QqCommandParser.parse("/看看里面").kind(),
                 "口语化的那个别名 —— 群里问「里面有人吗」比「在店」自然");
+        assertEquals(QqCommand.Kind.INSTORE, QqCommandParser.parse("fwkklm").kind(),
+                "「看看里面」的拼音首字母：全在英文键盘上，不用切中文输入法就能发");
     }
 
     @Test
@@ -101,6 +103,20 @@ class QqCommandParserTests {
         assertEquals(QqCommand.Kind.PRODUCT_MENU, QqCommandParser.parse("fw菜单").kind());
         assertEquals(QqCommand.Kind.PRODUCT_MENU, QqCommandParser.parse("fwmenu").kind(),
                 "「菜单」的英文别名 —— 群里打 fwmenu 比打中文还顺手");
+    }
+
+    @Test
+    @DisplayName("解析：/月卡 与 /pass、/card 都识别为月卡说明")
+    void parse_recognizesCardAliases() {
+        assertEquals(QqCommand.Kind.CARD_TYPES, QqCommandParser.parse("/月卡").kind());
+        assertEquals(QqCommand.Kind.CARD_TYPES, QqCommandParser.parse("fw月卡").kind(),
+                "fw 前缀与斜杠等价");
+        assertEquals(QqCommand.Kind.CARD_TYPES, QqCommandParser.parse("/pass").kind(),
+                "月卡在英文里就是 monthly pass");
+        assertEquals(QqCommand.Kind.CARD_TYPES, QqCommandParser.parse("/Card").kind(),
+                "英文别名大小写不敏感");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("我先 pass 这局").kind(),
+                "⚠️ 没有前缀的一律静默 —— 群里「pass 一下」是句闲聊，不能触发指令");
     }
 
     @Test

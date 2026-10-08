@@ -38,14 +38,37 @@ const timeText = computed(() => {
   return formatDateTime(props.order.endTime || props.order.startTime)
 })
 
-/** 时长：优先用在店时长；老订单没有这个值就退回计费时长。 */
+/**
+ * 这一单跨了哪些时段：{@code 日} / {@code 夜} / {@code 日·夜}。
+ *
+ * <p>判据是两段的<b>计费时长</b>（{@code dayMinutes} / {@code nightMinutes}），
+ * 它们是结算时算好存下的 —— 所以<b>进行中的订单两个都是 null，这里返回空串</b>，
+ * 卡片上就不显示。刻意不在前端按当前时刻实时算：列表不轮询，
+ * 算出来的值会一直停在打开页面那一刻，看着像卡住了。
+ *
+ * <p>写成「日·夜」而不是「全天」：跨 22:00 的订单往往只有一小段落进夜场，
+ * 说「全天」会让用户以为玩了一整天 —— 而这两者的价格差得很远。
+ */
+const periodText = computed(() => {
+  const o = props.order
+  const day = (o.dayMinutes || 0) > 0
+  const night = (o.nightMinutes || 0) > 0
+  if (day && night) return '日·夜'
+  if (day) return '日'
+  if (night) return '夜'
+  return ''
+})
+
+/** 时长行：如「2 小时 15 分 · 日·夜」。时段认不出时只给时长。 */
 const durationText = computed(() => {
   const o = props.order
   const minutes =
     o.stayMinutes !== null && o.stayMinutes !== undefined
       ? o.stayMinutes
       : (o.dayMinutes || 0) + (o.nightMinutes || 0)
-  return minutes > 0 ? formatDuration(minutes) : ''
+  if (minutes <= 0) return ''
+  const text = formatDuration(minutes)
+  return periodText.value ? `${text} · ${periodText.value}` : text
 })
 </script>
 

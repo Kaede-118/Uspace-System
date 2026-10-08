@@ -101,6 +101,8 @@ public final class ReconcileMatcher {
         List<ReconcilePlan.MatchedPair> matched = new ArrayList<>();
         List<ReconcilePlan.DiffDraft> diffs = new ArrayList<>();
         int billSkipped = 0;
+        int billUnclaimedCount = 0;
+        BigDecimal billUnclaimedAmount = BigDecimal.ZERO;
 
         for (BillRecord bill : bills) {
             String no = bill.paymentNo();
@@ -112,11 +114,25 @@ public final class ReconcileMatcher {
                     // 之前的批次已经把这笔对走了 —— 本次什么都不做，也**不记差异**。
                     // 重传同一份账单时走的就是这一支：它不是错误，是幂等
                     billSkipped++;
-                } else if (rejectedByNo.containsKey(no)) {
-                    PaymentProof rejected = rejectedByNo.get(no).get(0);
-                    diffs.add(draft(ReconcileDiffType.REJECTED_IN_BILL, rejected, bill, no));
                 } else {
-                    diffs.add(draft(ReconcileDiffType.BILL_ONLY, null, bill, no));
+                    /*
+                     * 走到这里说明：这笔钱在系统里【没有任何有效凭证】认领它。
+                     * 两支都算「未认领」，这是总账口径的实现处（见 ReconcilePlan 类注释）：
+                     *   · REJECTED_IN_BILL —— 有凭证指着它，但那条被管理员驳回了，不算数
+                     *   · BILL_ONLY        —— 一条凭证都没有
+                     * 两者对「这笔钱收到了没有」是同一件事，所以累加放在分支之外 ——
+                     * 放进某一支里，另一支就会漏计，而漏计会让总账报「对平了」，
+                     * 比误报更危险。
+                     */
+                    billUnclaimedCount++;
+                    billUnclaimedAmount = billUnclaimedAmount.add(bill.amount());
+
+                    if (rejectedByNo.containsKey(no)) {
+                        PaymentProof rejected = rejectedByNo.get(no).get(0);
+                        diffs.add(draft(ReconcileDiffType.REJECTED_IN_BILL, rejected, bill, no));
+                    } else {
+                        diffs.add(draft(ReconcileDiffType.BILL_ONLY, null, bill, no));
+                    }
                 }
                 continue;
             }
@@ -161,8 +177,9 @@ public final class ReconcileMatcher {
                 .map(pair -> pair.bill().amount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        return new ReconcilePlan(matched, diffs, billSkipped, proofSkipped,
-                activeCount, activeAmount, matchedAmount);
+        return new ReconcilePlan(matched, diffs, billSkipped,
+                billUnclaimedCount, billUnclaimedAmount,
+                proofSkipped, activeCount, activeAmount, matchedAmount);
     }
 
     /**

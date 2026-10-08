@@ -11,12 +11,14 @@ import com.kaede.uspace.order.dto.PaymentNotifyResult;
 import com.kaede.uspace.order.dto.PaymentQueryResult;
 import com.kaede.uspace.order.dto.PaymentStatusVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -360,9 +362,25 @@ public class PaymentService {
      * @param target  支付目标
      */
     private void accumulatePaid(PaymentTargetHandler handler, PaymentTarget target) {
+        accumulatePaid(handler, target.getUserId(), target.getAmount());
+    }
+
+    /**
+     * 按处理器声明的品类调整用户的累计消费（收金额的重载）。
+     *
+     * <p><b>冲减走的是同一个方法、传负数</b>：复核未通过时要把已经记上的
+     * 那笔消费减回去，用相对更新（{@code xxx_paid = xxx_paid + (-8.00)}）
+     * 与累加天然对称。另写一个「减法」方法的话，两边的口径迟早对不上，
+     * 而表现只是「累计消费比实际多算了一笔」，不会有任何报错。
+     *
+     * @param handler 处理本次收款的处理器
+     * @param userId  用户 ID
+     * @param amount  金额（元），冲减时传负数
+     */
+    private void accumulatePaid(PaymentTargetHandler handler, Long userId, BigDecimal amount) {
         switch (handler.paidCategory()) {
-            case CARD -> userMapper.addCardPaidAmount(target.getUserId(), target.getAmount());
-            case ORDER -> userMapper.addOrderPaidAmount(target.getUserId(), target.getAmount());
+            case CARD -> userMapper.addCardPaidAmount(userId, amount);
+            case ORDER -> userMapper.addOrderPaidAmount(userId, amount);
         }
     }
 
@@ -435,6 +453,53 @@ public class PaymentService {
                 target.getOutTradeNo(), channel, target.getType(), target.getAmount(),
                 handler.paidCategory().getLabel(),
                 confirmedBy == null ? "系统自动" : confirmedBy);
+    }
+
+    /**
+     * 复核未通过后的冲销 —— 与 {@link #settleByProof} 严格对称。
+     *
+     * <p>管理员驳回付款凭证意味着「这笔钱我不认」，而订单与商品在
+     * <b>提交凭证那一刻</b>就已经落账了（订单转已支付、商品扣库存）。
+     * 不冲销的话，那笔单子会永远停在已支付上：<b>用户既不能再付、也不能重交凭证</b>，
+     * 管理员那边也没有重开复核的入口。本方法把交付退回去，让用户重新有路可走。
+     *
+     * <p><b>顺序是「先退目标、再减累计消费」，不能反</b>：
+     * 退目标那一步带状态守卫，被并发挡住时会返回 false，此时累计消费<b>绝不能</b>减 ——
+     * 反过来的话，一笔其实还收着的钱会让用户的累计消费凭空少一笔，
+     * 而累计消费是月度优惠门槛的依据，少了它不会有任何报错。
+     *
+     * <p><b>传播行为与 {@code settleByProof} 一样取 MANDATORY</b>：
+     * 它必须跑在复核的事务里。否则会出现「凭证已改成驳回、订单却还停在已支付」
+     * 这种半成品 —— 而那正是本次要消灭的那个状态。
+     *
+     * @param target 支付目标（由调用方按凭证上的单号载入）
+     * @param proof  被驳回的凭证，用户 ID 与金额都取自它
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void revertByProof(PaymentTarget target, PaymentProof proof) {
+        PaymentTargetHandler handler = handlerOf(target.getType());
+        if (handler == null) {
+            // 到不了这里：target 是由某个处理器造出来的。真出现说明有人改了
+            // 处理器的注册方式，必须让人看见而不是静默不冲销
+            log.error("[支付] 冲销时收款类型认不出，未冲销 target={} 单号={}",
+                    target.getType(), target.getOutTradeNo());
+            return;
+        }
+
+        if (!handler.revertDelivery(target, proof)) {
+            // 状态守卫没放行：另一个管理员已经驳回过，或这单又被别处改过。
+            // 视为幂等成功，且**绝不能再减一次累计消费**
+            log.info("[支付] 冲销未改动任何记录，视为已被并发处理 outTradeNo={}",
+                    target.getOutTradeNo());
+            return;
+        }
+
+        // 用凭证上的金额而不是 target 上的：当初累加的就是它。两者在正常流程下恒等，
+        // 但人工调整时长之后 target 的金额会变，拿它去冲减就会减错数
+        accumulatePaid(handler, proof.getUserId(), proof.getAmount().negate());
+        log.info("[支付] 凭证被驳回，交付已退回 outTradeNo={} 类型={} 冲减{}= {}",
+                target.getOutTradeNo(), target.getType(),
+                handler.paidCategory().getLabel(), proof.getAmount());
     }
 
     // ==================================================================

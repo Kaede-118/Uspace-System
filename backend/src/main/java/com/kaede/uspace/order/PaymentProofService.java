@@ -10,14 +10,17 @@ import com.kaede.uspace.order.dto.AdminProofVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
+import com.kaede.uspace.order.dto.RejectedProofVo;
 import com.kaede.uspace.order.entity.PayQr;
 import com.kaede.uspace.order.entity.PaymentProof;
+import com.kaede.uspace.order.event.PaymentProofRejectedEvent;
 import com.kaede.uspace.order.mapper.PayQrMapper;
 import com.kaede.uspace.order.mapper.PaymentProofMapper;
 import com.kaede.uspace.order.ocr.OcrTextParser;
 import com.kaede.uspace.user.entity.SysUser;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -93,6 +96,16 @@ public class PaymentProofService {
     private final PaymentService paymentService;
 
     /**
+     * 事件发布器。
+     *
+     * <p>驳回之后要<b>把结论送回用户那里</b>：订单与商品是「先交付后复核」，
+     * 驳回不回退订单状态，于是用户看到的仍是「已支付」—— 少了这条通路，
+     * 复核环节等于白设。发布走 Spring 事件（{@code qqbot} 监听后在群里 @ 本人），
+     * 与到店 / 离店播报同一套机制。
+     */
+    private final ApplicationEventPublisher events;
+
+    /**
      * 构造器注入。
      *
      * @param proofMapper      凭证数据访问
@@ -101,19 +114,22 @@ public class PaymentProofService {
      * @param uploadProperties 上传配置，用于校验截图路径前缀
      * @param handlers         全部支付目标处理器，按类型找对应的那一个
      * @param paymentService   支付服务，落账走它的 {@code settleByProof}
+     * @param events           事件发布器，驳回之后通知本人
      */
     public PaymentProofService(PaymentProofMapper proofMapper,
                                PayQrMapper payQrMapper,
                                SysUserMapper userMapper,
                                UploadProperties uploadProperties,
                                List<PaymentTargetHandler> handlers,
-                               PaymentService paymentService) {
+                               PaymentService paymentService,
+                               ApplicationEventPublisher events) {
         this.proofMapper = proofMapper;
         this.payQrMapper = payQrMapper;
         this.userMapper = userMapper;
         this.uploadProperties = uploadProperties;
         this.handlers = handlers;
         this.paymentService = paymentService;
+        this.events = events;
     }
 
     // ==================================================================
@@ -174,15 +190,26 @@ public class PaymentProofService {
                 return BizResult.ok(ProofSubmitVo.of(target.getType().name(), target.getId(),
                         PaymentProofStatus.CONFIRMED, true));
             }
-            // ③ 已驳回：拒绝重交。驳回意味着「这笔钱不认」，让用户自己重传就能翻案的话，
-            //    驳回这个动作就没有意义了 —— 该走的是人工处置
+            /*
+             * ③ 已支付 + 已驳回：**放行重交**，与下面「已支付 + 待复核」同路。
+             *
+             * 这个组合是**历史遗留** —— 交付回退机制（revertDelivery）上线之前，
+             * 驳回只改凭证结论、不碰订单状态，于是订单停在已支付上。
+             * 新流程根本不会产生它（驳回时状态就被退成 REJECTED 了）。
+             *
+             * ⚠️ **放行而不是继续拒绝**：继续拒绝的话，那几笔老单子是个死结 ——
+             * 用户既不能再付（系统认为不需要）、也不能重交凭证（这里拒绝），
+             * 而管理员那边同样没有重开复核的入口。重交之后凭证翻回待复核，
+             * 订单停在已支付上 —— 那正是「提交即交付 + 等复核」的正常组合，
+             * 状态自洽，管理员复核通过这事就了了。
+             */
             if (PaymentProofStatus.REJECTED.name().equals(existing.getVerifyStatus())) {
-                log.info("[凭证] 拒绝重交：该笔凭证已被驳回 target={}#{}",
-                        target.getType(), target.getId());
-                return BizResult.fail(ErrorCode.PAYMENT_PROOF_REJECTED, existing.getRejectReason());
+                log.info("[凭证] 该笔已支付且凭证曾被驳回（回退机制上线前的历史数据），放行重交 "
+                                + "target={}#{}", target.getType(), target.getId());
+                // 刻意不 return，落到下面的 upsert
             }
             // ④ 待复核（或认不出的取值）：只更新凭证，不重复落账 —— 落到下面的 upsert
-        } else if (!target.isPendingPayment()) {
+        } else if (!target.isPendingPayment() && !target.isRejected()) {
             // ⑤ 既没付款、又不处于待支付（如包场已取消）—— 没有可付的款
             return BizResult.fail(ErrorCode.PAYMENT_PROOF_TARGET_INVALID,
                     "该笔当前状态不支持上传付款凭证，请刷新页面查看最新状态");
@@ -297,11 +324,24 @@ public class PaymentProofService {
     /**
      * 复核不通过。
      *
-     * <p><b>驳回不会回退已经发生的交付</b>：订单与商品在提交那刻就落账了，
-     * 系统<b>不做自动回退</b> —— 那涉及改状态、退库存、减累计消费三件事，
-     * 每一件都需要人来判断（货是不是已经拿走了？钱是不是其实收到了只是用户传错图？）。
-     * 这里能做的是把事实喊出来：日志里记 warn，VO 里带 {@code delivered} 标记，
-     * 由后台显著提示。
+     * <p><b>驳回会把已经发生的交付退回去</b>：订单与商品在提交那刻就落账了
+     * （订单转已支付、商品扣库存），而驳回意味着「这笔钱我不认」——
+     * 目标却还停在已支付上，那笔单子于是成了死结：用户既不能再付、
+     * 也不能重交凭证（{@link #submit} 对「已支付 + 已驳回」明确拒绝），
+     * 管理员那边也没有重开复核的入口。
+     *
+     * <p>所以这里退三步：
+     * <ol>
+     *   <li>目标的交付 —— {@code PaymentTargetHandler#revertDelivery}
+     *       （订单退回待支付并清支付字段、商品退回并还库存）</li>
+     *   <li>已经累加的累计消费 —— {@code PaymentService#revertByProof}</li>
+     *   <li>把结论送回当事人 —— 发 {@code PaymentProofRejectedEvent}，
+     *       {@code qqbot} 监听后在群里 @ 本人</li>
+     * </ol>
+     * 退完之后目标回到<b>待支付</b>，用户既能重新上传截图、也能换一条通道付款。
+     *
+     * <p><b>包场与月卡什么都不用退</b>：它们 {@code deliverOnSubmit} 返回 false，
+     * 提交凭证那一刻并没有交付任何东西，目标本来就停在待支付上。
      *
      * @param proofId 凭证 ID
      * @param adminId 操作的管理员 ID
@@ -321,15 +361,59 @@ public class PaymentProofService {
 
         boolean delivered = isDeliverOnSubmit(proof.getTargetType());
         if (delivered) {
-            log.warn("[凭证] ⚠️ 复核未通过，但该笔已交付，需人工回退 proofId={} 类型={} 单号={} "
+            log.warn("[凭证] 复核未通过，该笔已交付，正在退回 proofId={} 类型={} 单号={} "
                             + "金额={} 用户={} 原因={}",
                     proofId, proof.getTargetType(), proof.getOrderNo(),
                     proof.getAmount(), proof.getUserId(), reason);
+            revertDelivery(proof);
         } else {
             log.info("[凭证] 复核未通过 proofId={} 类型={} 单号={} 原因={}",
                     proofId, proof.getTargetType(), proof.getOrderNo(), reason);
         }
+
+        /*
+         * 把结论送回用户那里 —— 这一步不能省。
+         *
+         * 订单与商品是「先交付后复核」，驳回**不回退订单状态**，所以用户端
+         * 看到的仍然是「已支付」。没有这条提醒，他会一直以为这笔账结了，
+         * 而管理员那边已经判它不成立 —— 复核环节等于白设。
+         *
+         * 发布在本方法的事务里，监听器取 AFTER_COMMIT 相位
+         *（与到店 / 离店播报同一套，理由见 QqBroadcastListener 的类注释）。
+         * 用的是 reject 里已经 trim 过的那份原因：落库与播报必须是同一句话。
+         */
+        events.publishEvent(new PaymentProofRejectedEvent(
+                proofId, proof.getUserId(), proof.getOrderNo(),
+                proof.getTargetType(), reason.trim()));
+
         return BizResult.ok(null);
+    }
+
+    // ==================================================================
+    // 用户端：查被驳回的凭证
+    // ==================================================================
+
+    /**
+     * 查当前用户被驳回、尚未重交的凭证。
+     *
+     * <p><b>这是「先交付后复核」那道缺口在用户端的补法</b>：订单与商品提交即落账，
+     * 管理员事后驳回只改凭证结论、<b>不回退订单状态</b>，所以用户端看到的仍是
+     * 「已支付」。没有这个查询，那个结论就永远到不了当事人那里 ——
+     * 而首页的提醒条与订单详情的标记都读它。
+     *
+     * <p>「尚未重交」不需要额外判断：重交会把状态翻回待复核并清掉原因
+     *（见 {@code PaymentProofMapper#upsert}），所以 {@code REJECTED} 本身就
+     * 意味着「还等着他处理」。
+     *
+     * @param userId 当前登录用户 ID
+     * @return 被驳回的凭证，按驳回时刻倒序；一条都没有时返回空列表（不是失败）
+     */
+    public BizResult<List<RejectedProofVo>> listRejected(Long userId) {
+        List<RejectedProofVo> rejected = proofMapper.selectRejectedByUser(userId)
+                .stream()
+                .map(RejectedProofVo::from)
+                .toList();
+        return BizResult.ok(rejected);
     }
 
     // ==================================================================
@@ -350,6 +434,37 @@ public class PaymentProofService {
      * @param proof   凭证
      * @param adminId 复核管理员 ID
      */
+    /**
+     * 把「提交即交付」的那一步退回去。
+     *
+     * <p>订单与商品在用户提交凭证那一刻就落账了（订单转已支付、商品扣库存），
+     * 而管理员驳回意味着「这笔钱我不认」。不回退的话，那笔单子会永远停在
+     * 已支付上 —— <b>用户既不能再付、也不能重交凭证</b>，管理员那边也没有
+     * 重开复核的入口，一个谁都动不了的死结。
+     *
+     * <p>目标找不到（单号认不出、记录已被删）时<b>只记 error 不抛异常</b>：
+     * 凭证的复核结论已经写进库了，把它回滚掉只会让管理员白点一次；
+     * 而这件事必须让人看见，所以是一条 error 日志。与 {@link #settleIfNeeded}
+     * 同一套处置。
+     *
+     * @param proof 被驳回的凭证
+     */
+    private void revertDelivery(PaymentProof proof) {
+        PaymentTargetHandler handler = handlerOfName(proof.getTargetType());
+        if (handler == null) {
+            log.error("[凭证] 复核未通过但收款类型认不出，未能冲销 proofId={} targetType={}",
+                    proof.getId(), proof.getTargetType());
+            return;
+        }
+        PaymentTarget target = handler.loadByOutTradeNo(proof.getOrderNo());
+        if (target == null) {
+            log.error("[凭证] 复核未通过但按单号找不到目标，未能冲销 proofId={} orderNo={} 类型={}",
+                    proof.getId(), proof.getOrderNo(), proof.getTargetType());
+            return;
+        }
+        paymentService.revertByProof(target, proof);
+    }
+
     private void settleIfNeeded(PaymentProof proof, Long adminId) {
         PaymentTargetHandler handler = handlerOfName(proof.getTargetType());
         if (handler == null) {

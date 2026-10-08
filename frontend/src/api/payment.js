@@ -188,6 +188,26 @@ export function submitProof({ targetType, targetId, proofUrl, paymentNo, payQrId
 }
 
 /**
+ * 查我被驳回的付款凭证。
+ *
+ * <p><b>补的是「先交付后复核」那道缺口</b>：订单与商品提交凭证即落账，
+ * 管理员事后驳回<b>不回退订单状态</b>，所以用户端看到的仍是「已支付」。
+ * 少了这个查询，「管理员不认这笔钱」这个结论就永远到不了当事人那里。
+ *
+ * <p>首页的提醒条与订单详情的标记都读它。用同一个接口而不是各查各的：
+ * 「哪些算被驳回」这条口径在后端定死了，前端只负责展示。
+ *
+ * <p>用户重交之后这条会自动消失 —— 重交会把状态翻回待复核，
+ * 所以<b>不需要前端做任何「已处理」的标记</b>。
+ *
+ * @returns {Promise<{data:Array<{proofId, targetType, targetTypeLabel, targetId,
+ *          orderNo, amount, reason, rejectedAt}>}>} 一条都没有时是空数组
+ */
+export function listRejectedProofs() {
+  return http.get('/api/payment-proofs/rejected')
+}
+
+/**
  * 模拟支付（仅 mock provider 下存在）。
  *
  * <p>这是「模拟用户在微信/支付宝里完成了支付」的那个动作。

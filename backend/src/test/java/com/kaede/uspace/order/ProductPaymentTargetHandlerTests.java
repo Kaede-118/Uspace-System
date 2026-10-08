@@ -3,6 +3,7 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.event.ProductPurchasedEvent;
 import com.kaede.uspace.product.FakeProductMapper;
 import com.kaede.uspace.product.FakeProductOrderMapper;
 import com.kaede.uspace.product.ProductNo;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,12 +50,17 @@ class ProductPaymentTargetHandlerTests {
     private final FakeProductMapper productMapper = new FakeProductMapper();
     private final FakeProductOrderMapper orderMapper = new FakeProductOrderMapper();
 
+    /** 捕获处理器发布的事件（缺省是「没人监听」，这里按需断言） */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     /** 被测处理器，每个用例前重建 */
     private ProductPaymentTargetHandler handler;
 
     @BeforeEach
     void setUp() {
-        handler = new ProductPaymentTargetHandler(orderMapper.asMapper(), productMapper.asMapper());
+        publishedEvents.clear();
+        handler = new ProductPaymentTargetHandler(orderMapper.asMapper(), productMapper.asMapper(),
+                publishedEvents::add);
     }
 
     // ==================================================================
@@ -189,6 +197,54 @@ class ProductPaymentTargetHandlerTests {
         assertEquals(paidAt, saved.getPaidAt());
 
         assertEquals(7, productMapper.get(product.getId()).getStock(), "10 件卖了 3 件，还剩 7 件");
+    }
+
+    @Test
+    @DisplayName("付款成功：发布「商品购买完成」事件，供 QQ 群播报")
+    void markPaid_publishesProductPurchasedEvent() {
+        Product product = seedProduct(10);
+        ProductOrder order = seedOrder(USER_ID, product, 3);
+        PaymentTarget target = loadTarget(order.getId(), USER_ID);
+
+        handler.markPaid(target, PaymentChannel.WXPAY_JSAPI, "4200001234",
+                LocalDateTime.now(), null);
+
+        assertEquals(1, publishedEvents.size(), "一笔付款只播一次");
+        ProductPurchasedEvent event = (ProductPurchasedEvent) publishedEvents.get(0);
+        assertEquals(order.getOrderNo(), event.orderNo());
+        assertEquals(USER_ID, event.userId());
+        assertEquals(product.getId(), event.productId());
+        assertEquals("矿泉水", event.productName(), "带的是购买单上的名字快照");
+        assertEquals(3, event.quantity());
+    }
+
+    @Test
+    @DisplayName("重复回调：不再发布购买事件 —— 不然群里同样的消息会刷两遍")
+    void markPaid_duplicateCallbackDoesNotRepublish() {
+        Product product = seedProduct(10);
+        ProductOrder order = seedOrder(USER_ID, product, 1);
+        PaymentTarget target = loadTarget(order.getId(), USER_ID);
+        LocalDateTime paidAt = LocalDateTime.now();
+
+        handler.markPaid(target, PaymentChannel.WXPAY_JSAPI, "4200001234", paidAt, null);
+        // 支付平台重推同一条通知
+        handler.markPaid(target, PaymentChannel.WXPAY_JSAPI, "4200001234", paidAt, null);
+
+        assertEquals(1, publishedEvents.size(), "平台重推不该让群里多出一条消息");
+    }
+
+    @Test
+    @DisplayName("库存扣不动时不播报 —— 剩余量是错的，那一笔由 error 日志转入人工处理")
+    void markPaid_stockShortageDoesNotPublish() {
+        Product product = seedProduct(2);
+        ProductOrder order = seedOrder(USER_ID, product, 3);
+        PaymentTarget target = loadTarget(order.getId(), USER_ID);
+
+        handler.markPaid(target, PaymentChannel.WXPAY_JSAPI, "4200001234",
+                LocalDateTime.now(), null);
+
+        assertTrue(publishedEvents.isEmpty(),
+                "库存没减成功时「还剩 X 件」是错的，宁可不播");
     }
 
     @Test

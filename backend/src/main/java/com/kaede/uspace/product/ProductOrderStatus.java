@@ -8,8 +8,12 @@ import java.util.Arrays;
  * <p>状态流转：
  * <pre>
  *   PENDING_PAYMENT 待支付 ──支付成功──> PAID 已支付（同时扣减库存）
- *          │
- *          └── 用户放弃付款 ──> CLOSED 已关闭
+ *          │                                    │  ↑
+ *          └── 用户放弃付款 ──> CLOSED          │  │
+ *                                   管理员驳回 ──┘  │
+ *                                        ↓          │
+ *                          REJECTED 凭证未通过 ─────┘
+ *                              （用户重传 + 复核通过）
  * </pre>
  *
  * <p><b>前两个状态名刻意与订单、包场、月卡购买单保持一致</b>
@@ -30,7 +34,25 @@ public enum ProductOrderStatus {
     PAID("已支付"),
 
     /** 已关闭。用户主动取消，或长时间未付款 */
-    CLOSED("已关闭");
+    CLOSED("已关闭"),
+
+    /**
+     * 付款凭证被管理员驳回，等待用户重新提交。
+     *
+     * <p><b>为什么不复用 {@link #PENDING_PAYMENT}</b>：与订单那边同一条理由 ——
+     * 一个状态承载两件处置方式不同的事：「他还没付钱」（去支付）与
+     * 「他付过了、只是凭证没通过」（重新上传一张截图）。合并的话，
+     * 用户看到「待支付」很可能再下一次单、再付一次钱。
+     *
+     * <p><b>库存不退</b>：无人值守店里付了钱自己取，而驳回发生在管理员有空
+     * 复核的时候（往往隔了一两天），那时货多半已经被取走了。
+     * 退回去等于记一笔假账 —— 见 {@code ProductPaymentTargetHandler#revertDelivery}。
+     *
+     * <p>它<b>不算「还占着货的未付款单」</b>：{@code countPendingByProduct}
+     * 只认 {@code PENDING_PAYMENT}。被驳回的单子货可能已经出去了，
+     * 再把它算进「未付款占用」会让可售量虚低 —— 而那个数量是给顾客看的。
+     */
+    REJECTED("凭证未通过");
 
     /** 面向用户的中文说明，供前端展示 */
     private final String label;

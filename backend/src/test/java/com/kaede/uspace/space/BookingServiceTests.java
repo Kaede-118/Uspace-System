@@ -10,6 +10,7 @@ import com.kaede.uspace.space.dto.JoinResultVo;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.Store;
+import com.kaede.uspace.space.event.BookingActivatedEvent;
 import com.kaede.uspace.user.FakeSysUserMapper;
 import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,12 +76,20 @@ class BookingServiceTests {
 
     /** 停业服务，供包场校验「不与停业时段撞车」 */
     private final ClosureService closureService =
-            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper());
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { });
+
+    /**
+     * 「包场生效」事件的发布记录。
+     *
+     * <p>用「记下来」而不是「丢掉」，因为事件的<b>缺席</b>同样是缺陷：
+     * 收费场次刚排期时不该播报（还没付款），0 元场次则必须播报。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
 
     /** 被测服务 */
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
-            userMapper.asMapper(), participantMapper.asMapper());
+            userMapper.asMapper(), participantMapper.asMapper(), publishedEvents::add);
 
     /**
      * 每个用例前预置门店与包场人 —— 两者缺一都会让 Service 提前返回错误，
@@ -87,6 +97,7 @@ class BookingServiceTests {
      */
     @BeforeEach
     void setUp() {
+        publishedEvents.clear();
         Store store = new Store();
         store.setId(STORE_ID);
         store.setName("测试门店");
@@ -129,6 +140,9 @@ class BookingServiceTests {
         assertTrue(stored.getBookingNo().startsWith("BK"),
                 "单号带 BK 前缀，便于在日志与对账文件里一眼认出是包场而非普通订单");
         assertEquals(20, stored.getBookingNo().length(), "BK + 14 位时间戳 + 4 位随机数");
+        assertTrue(publishedEvents.isEmpty(),
+                "收费场次还没付款，此刻不该播报到群 —— 提前说就成了空头安排；"
+                        + "它的发布点在付款成功那一刻（BookingPaymentTargetHandler#markPaid）");
     }
 
     @Test
@@ -149,6 +163,13 @@ class BookingServiceTests {
         assertNotNull(stored.getInviteToken(), "生效的同时就要有令牌，否则被邀请者进不来");
         assertNotNull(stored.getPaidAt(), "记一个结清时刻，列表上才不会显示成「尚未付款」");
         assertNull(stored.getPaymentNo(), "确实没有支付过，不该凭空有个流水号");
+
+        assertEquals(1, publishedEvents.size(),
+                "0 元场次落库即生效，应当发布一条「包场生效」事件（qqbot 据此播报到群）");
+        BookingActivatedEvent event = (BookingActivatedEvent) publishedEvents.get(0);
+        assertEquals(stored.getId(), event.bookingId());
+        assertEquals(start, event.startAt(), "事件带的是本场的时段，播报文案直接用这两个时刻");
+        assertEquals(end, event.endAt());
     }
 
     @Test
@@ -164,15 +185,20 @@ class BookingServiceTests {
     }
 
     @Test
-    @DisplayName("创建包场：开始时间早于此刻时拒绝")
-    void createBooking_rejectsPastStart() {
+    @DisplayName("创建包场：开始时间在过去也放行（提示交给前端，后端不再拦）")
+    void createBooking_allowsPastStart() {
         LocalDateTime past = LocalDateTime.now().minusHours(1);
 
         BizResult<BookingVo> result = bookingService.createBooking(
                 newRequest(past, past.plusHours(2), BigDecimal.TEN), ADMIN_ID);
 
-        assertEquals(ErrorCode.BOOKING_START_IN_PAST, result.getError(),
-                "包场是卖给用户的，排一个已经开始甚至过去的时段没有意义");
+        assertTrue(result.isSuccess(),
+                "2026-10-04 放开了这条校验：排一场已经开始（或过去）的包场，是做测试"
+                        + "（清场、准入窗口、群播报）与补录的唯一途径，而它本身不破坏任何数据。"
+                        + "提示改由运营后台在前端弹确认层（BookingManageView 的 pastWarning）");
+        Booking stored = bookingMapper.get(result.getData().getId());
+        assertEquals(past, stored.getStartAt(), "过去的时刻照原样落库");
+        assertTrue(publishedEvents.isEmpty(), "它还是待付款状态，不该播报");
     }
 
     @Test

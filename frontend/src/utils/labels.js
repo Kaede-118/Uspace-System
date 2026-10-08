@@ -155,6 +155,7 @@ export function cardTypeLabel(cardType) {
  */
 export const PRODUCT_ORDER_STATUS = [
   { value: 'PENDING_PAYMENT', label: '待支付', cls: 'tag tag-warning' },
+  { value: 'REJECTED', label: '凭证未通过', cls: 'tag tag-danger' },
   { value: 'PAID', label: '已支付', cls: 'tag tag-success' },
   { value: 'CLOSED', label: '已关闭', cls: 'tag' }
 ]

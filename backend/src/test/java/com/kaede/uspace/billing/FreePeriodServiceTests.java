@@ -3,6 +3,8 @@ package com.kaede.uspace.billing;
 import com.kaede.uspace.billing.dto.FreePeriodRequest;
 import com.kaede.uspace.billing.dto.FreePeriodVo;
 import com.kaede.uspace.billing.entity.FreePeriod;
+import com.kaede.uspace.billing.event.FreePeriodChangeAction;
+import com.kaede.uspace.billing.event.FreePeriodChangedEvent;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,9 +59,45 @@ class FreePeriodServiceTests {
     /** 内存版数据访问层 */
     private final FakeFreePeriodMapper periodMapper = new FakeFreePeriodMapper();
 
+    /**
+     * 捕获服务发布的事件，供断言使用。
+     *
+     * <p>⚠️ 必须声明在 {@link #freePeriodService} <b>之前</b> —— 字段按声明顺序初始化，
+     * 反过来时方法引用 {@code publishedEvents::add} 会对着 null 创建，当场 NPE。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     /** 被测服务 */
     private final FreePeriodService freePeriodService =
-            new FreePeriodService(periodMapper.asMapper());
+            new FreePeriodService(periodMapper.asMapper(), publishedEvents::add);
+
+    // ==================================================================
+    // 群播报（新增与撤销成对发事件）
+    // ==================================================================
+
+    @Test
+    @DisplayName("新增与撤销都发「免费活动变更」事件 —— 群里那条「今晚免费」才收得回来")
+    void createAndDelete_publishFreePeriodChangedEvents() {
+        // 本类没有 @BeforeEach，列表是共享的，先清一次免得受别的用例影响
+        publishedEvents.clear();
+
+        BizResult<FreePeriodVo> created = freePeriodService.createPeriod(
+                STORE_ID, request(at(20, 0), at(22, 0), "周年庆"), ADMIN_ID);
+
+        assertEquals(1, publishedEvents.size(), "新增要播 —— 「今晚免费」会有人为它跑一趟");
+        FreePeriodChangedEvent added = (FreePeriodChangedEvent) publishedEvents.get(0);
+        assertEquals(FreePeriodChangeAction.CREATED, added.action());
+        assertEquals("周年庆", added.reason());
+
+        freePeriodService.deletePeriod(STORE_ID, created.getData().getId());
+
+        assertEquals(2, publishedEvents.size(),
+                "撤销也要播 —— 撤销不播的话，跑过来的人到了才发现不免费，比从没说过更糟");
+        FreePeriodChangedEvent deleted = (FreePeriodChangedEvent) publishedEvents.get(1);
+        assertEquals(FreePeriodChangeAction.DELETED, deleted.action());
+        assertEquals(added.startAt(), deleted.startAt(),
+                "撤销播报要带上原时段（取自删除前的那一份），否则没人知道撤的是哪一场");
+    }
 
     /**
      * 构造一个固定日期的时间点。

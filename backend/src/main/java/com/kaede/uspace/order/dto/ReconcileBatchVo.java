@@ -72,6 +72,25 @@ public class ReconcileBatchVo {
     /** 账单侧因「已被之前的批次认领」而跳过的笔数 */
     private Integer billSkippedCount;
 
+    /**
+     * 账单侧<b>未被任何有效凭证认领</b>的笔数 —— 总账块据此给出「对平 / 没对平」的结论。
+     *
+     * <p>口径：系统里没有一条有效凭证指着这笔钱（一条都没有，或者唯一那条被驳回了）。
+     * ⚠️ 金额不符与重复认领<b>不算</b>在这里 —— 那两类钱确实到了，它们只进差异列表。
+     * 这条口径在 {@code ReconcileMatcher} 里实现，页面只是展示结果。
+     *
+     * <p><b>为 0 就是对平了</b>（金额那一侧见 {@link #billUnclaimedAmount}）。
+     */
+    private Integer billUnclaimedCount;
+
+    /**
+     * 账单侧未被认领的金额合计（元），口径见 {@link #billUnclaimedCount}。
+     *
+     * <p>这是「这个月到底少没少钱」的直接答案，而且它<b>不受重传影响</b> ——
+     * 重传时那些「已被之前批次认领」的笔算已认领，不计入这里。
+     */
+    private BigDecimal billUnclaimedAmount;
+
     /** 系统侧参与比对的凭证数 */
     private Integer proofCount;
 
@@ -149,6 +168,8 @@ public class ReconcileBatchVo {
         vo.setBillAmount(batch.getBillAmount());
         vo.setBillExcludedCount(batch.getBillExcludedCount());
         vo.setBillSkippedCount(batch.getBillSkippedCount());
+        vo.setBillUnclaimedCount(batch.getBillUnclaimedCount());
+        vo.setBillUnclaimedAmount(batch.getBillUnclaimedAmount());
         vo.setProofCount(batch.getProofCount());
         vo.setProofAmount(batch.getProofAmount());
         vo.setProofSkippedCount(batch.getProofSkippedCount());

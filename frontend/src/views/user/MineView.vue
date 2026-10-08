@@ -115,9 +115,9 @@ const discountText = computed(() => {
  */
 const menus = computed(() => {
   const list = [
-    { key: 'orders', icon: '📋', label: '我的订单' },
-    { key: 'productOrders', icon: '🛍', label: '我的商品订单' },
-    { key: 'cards', icon: '🎫', label: '我的月卡' },
+    // 房间时长与商品订单已经合成一页（页内用 tab 分），所以这里只剩一个入口
+    { key: 'orders', icon: '📋', label: '订单' },
+    { key: 'cards', icon: '🎫', label: '月卡' },
     { key: 'bookings', icon: '📅', label: '我发起的包场' },
     { key: 'joined', icon: '👥', label: '我参与的包场' },
     { key: 'profile', icon: '✏️', label: '修改个人资料' },
@@ -163,7 +163,6 @@ async function loadAll() {
 /** 菜单 key → 路由。还没做的页面不在这张表里，点了给提示。 */
 const MENU_ROUTES = {
   orders: '/orders',
-  productOrders: '/product-orders',
   cards: '/cards',
   bookings: '/bookings/host',
   joined: '/bookings/joined',

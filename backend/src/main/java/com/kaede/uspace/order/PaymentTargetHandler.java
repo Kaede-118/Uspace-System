@@ -2,6 +2,7 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 
 import java.time.LocalDateTime;
 
@@ -73,6 +74,37 @@ public interface PaymentTargetHandler {
      * @return 提交凭证即交付返回 true
      */
     boolean deliverOnSubmit();
+
+    /**
+     * 复核未通过时，把 {@link #deliverOnSubmit()} 那一步退回去。
+     *
+     * <p><b>为什么必须有它</b>：订单与商品是「提交即交付」—— 用户一提交凭证，
+     * 订单当场转 {@code PAID}、商品当场扣库存。而管理员事后驳回意味着
+     * 「这笔钱我不认」，目标却还停在已支付上，于是那笔单子成了一个死结：
+     * <b>用户既不能再付</b>（系统认为不需要支付）<b>也不能重交凭证</b>
+     *（{@code PaymentProofService#submit} 对「已支付 + 已驳回」明确拒绝），
+     * 而管理员那边也没有重开复核的入口。
+     *
+     * <p>所以驳回要把交付退回去，让目标回到<b>待支付</b>。状态与事实一致之后，
+     * 用户重交凭证会自然走「待支付」那条路径 —— 不必再为「已支付 + 已驳回」
+     * 单独开一条通道，{@code submit} 里那道拒绝留着当防御即可。
+     *
+     * <p><b>实现必须带状态守卫</b>（{@code WHERE status = 'PAID'}），
+     * 与 {@link #markPaid} 同一条纪律：两个管理员同时驳回时只有一个能退成功，
+     * 另一个拿到 false，调用方据此跳过「减累计消费」那一步 ——
+     * 少了这道守卫，同一笔钱会被减两次，而累计消费是优惠门槛的依据。
+     *
+     * <p><b>刻意声明成抽象方法</b>：漏实现会编译不过，而漏实现的后果是
+     * 一笔被驳回却永远停在已支付的账，没有任何报错、也没有任何人会发现。
+     * {@link #deliverOnSubmit()} 返回 {@code false} 的处理器（包场、月卡）
+     * 也要实现它，实现体是「什么都不做」—— 但注释要写清楚为什么不用做。
+     *
+     * @param target 目标
+     * @param proof  被驳回的凭证，金额与用户 ID 都取自它
+     * @return 本次是否真的退回去了；{@code false} 表示目标已不是已支付，
+     *         调用方应当视为幂等成功，<b>不能再减一次累计消费</b>
+     */
+    boolean revertDelivery(PaymentTarget target, PaymentProof proof);
 
     /**
      * 载入待支付的目标，并校验它属于该用户。

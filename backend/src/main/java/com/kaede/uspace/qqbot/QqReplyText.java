@@ -1,7 +1,9 @@
 package com.kaede.uspace.qqbot;
 
 import com.kaede.uspace.billing.dto.BillingRulesVo;
+import com.kaede.uspace.billing.event.FreePeriodChangeAction;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.notice.NoticePublishMode;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.dto.InstoreUserVo;
 import com.kaede.uspace.order.dto.MonthSpentVo;
@@ -11,9 +13,11 @@ import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductVo;
 import com.kaede.uspace.promotion.MonthlyCardType;
+import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
 import com.kaede.uspace.space.dto.StoreStatusVo;
+import com.kaede.uspace.space.event.ClosureChangeAction;
 import com.kaede.uspace.user.entity.SysUser;
 
 import java.math.BigDecimal;
@@ -88,6 +92,14 @@ public final class QqReplyText {
      */
     private static final String UNKNOWN_COMMAND =
             "没认出这条指令。发 /帮助 看看能问什么";
+
+    /**
+     * 公告正文在群里的截断长度。
+     *
+     * <p>群消息窗口窄，一条公告把正文全铺开会占满整屏、把后面的消息推上去，
+     * 而公告正文没有长度上限（只有标题限 100 字）。所以按字符截断，末尾给链接。
+     */
+    private static final int NOTICE_CONTENT_MAX = 60;
 
     /**
      * 工具类，不实例化。
@@ -359,18 +371,26 @@ public final class QqReplyText {
                     .append(plain(rules.getDiscountDayPricePerHour())).append(" 元/小时、夜场 ")
                     .append(plain(rules.getDiscountNightPricePerHour())).append(" 元/小时。");
         }
+        // 月卡是另一种买法（包月），不在这张表里 —— 给一句指路，
+        // 否则在群里问「月卡多少钱」的人得不到任何线索
+        text.append("\n月卡另算（全天 / 夜间两种），发 /月卡 看说明。");
         return text.toString();
     }
 
     /**
-     * 商城菜单：店里卖的东西与价格。
+     * 商城菜单：店里卖什么、多少钱、还剩多少。
      *
      * <p>只列<b>上架中</b>的商品（数据源是 {@code ProductService.listOnSale}）——
-     * 下架的不该出现在群里的菜单上。售罄的照列但标出来：
-     * 顾客看到「售罄」才会问「什么时候补」，直接藏起来他只会以为店里没这个东西。
+     * 下架的不该出现在群里的菜单上。卖完的照列（余 0）：
+     * 顾客看到「余（0）」才会问「什么时候补」，直接藏起来他只会以为店里没这个东西。
+     *
+     * <p>⚠️ <b>库存报的是可售量（{@code availableStock}），不是实际库存</b>：
+     * 它与用户端商城页、下单校验共用同一个口径（见 {@code ProductVo} 的类注释）。
+     * 报实际库存的话会出现「群里说还剩 3 件、下单却说售罄」—— 那 3 件被未支付的
+     * 单子占着，而这种不一致是纯展示口径造成的，本可以避免。
      *
      * @param products 上架商品，已按后台排的序号排好
-     * @param mallUrl  网页端商城地址（群里的菜单只报价格，下单还是回网页）
+     * @param mallUrl  网页端商城地址（群里的菜单只报价格与库存，下单还是回网页）
      * @return 多行文本；没有商品时回一句人话
      */
     public static String menu(List<ProductVo> products, String mallUrl) {
@@ -380,14 +400,59 @@ public final class QqReplyText {
         StringBuilder text = new StringBuilder("店里卖这些（共 ")
                 .append(products.size()).append(" 种）：\n");
         for (ProductVo product : products) {
-            text.append("· ").append(product.getName())
-                    .append(' ').append(yuan(product.getPrice()));
-            if (Boolean.TRUE.equals(product.getSoldOut())) {
-                text.append("（售罄）");
-            }
-            text.append('\n');
+            text.append(product.getName())
+                    .append(" --- ").append(yuan(product.getPrice()))
+                    .append(" -- ").append(stockLabel(product))
+                    .append('\n');
         }
         text.append("要买的话到网页端商城下单：").append(mallUrl);
+        return text.toString();
+    }
+
+    /**
+     * 商品的余量文案。
+     *
+     * <p>⚠️ 读的是<b>可售量</b>（{@code availableStock}）而不是实际库存 ——
+     * 与用户端商城页、下单校验同一口径，理由见 {@link #menu} 的注释。
+     *
+     * <p>卖完不另起一个「售罄」的说法，就是 {@code 余（0）}：一列数读下来整齐，
+     * 也省掉「售罄 / 余 0」两种说法的分叉。
+     *
+     * @param product 商品视图
+     * @return 形如 {@code 余（5）}
+     */
+    private static String stockLabel(ProductVo product) {
+        Integer available = product.getAvailableStock();
+        return "余（" + (available == null ? 0 : available) + "）";
+    }
+
+    /**
+     * 月卡说明：有哪几种卡、各多少钱、覆盖什么时段。
+     *
+     * <p>数据源是 {@code MonthlyCardService#cardTypes()} —— 与用户端月卡页
+     * <b>同一个方法</b>，所以群里报的价与网页上看到的必然一致（同 {@link #menu}）。
+     * 价格与有效期都从配置现取，运营调价后群里立刻跟着变 —— 文案里不写死数字。
+     *
+     * <p>只讲「有哪些卡、多少钱、管哪些时段」；<b>怎么用、能省多少</b>留给
+     * 网页端那一页去讲 —— 群里塞太多字，读的人反而抓不到重点。
+     *
+     * @param types       在售卡种，按枚举顺序（全天在前）
+     * @param purchaseUrl 网页端月卡页地址（买卡在那儿）
+     * @return 多行文本；没有卡种时回一句人话
+     */
+    public static String cardTypes(List<CardTypeVo> types, String purchaseUrl) {
+        if (types == null || types.isEmpty()) {
+            return "月卡暂时没有开放售卖，问一下店主吧。";
+        }
+        StringBuilder text = new StringBuilder("月卡（有效期 ")
+                .append(types.get(0).getValidDays()).append(" 天）：\n");
+        for (CardTypeVo type : types) {
+            text.append(type.getLabel())
+                    .append(" --- ").append(yuan(type.getPrice()))
+                    .append(" -- ").append(type.getPeriodText())
+                    .append('\n');
+        }
+        text.append("有效期内卡覆盖的时段不计费；到网页端买：").append(purchaseUrl);
         return text.toString();
     }
 
@@ -409,34 +474,261 @@ public final class QqReplyText {
     }
 
     /**
-     * 指令列表。
+     * 付款凭证被驳回的提醒。
+     *
+     * <p>⚠️ <b>文案里不写金额</b>：群消息对所有群成员可见，而金额按群分级
+     * 只进店主群（见 {@code QqbotProperties#isAmountVisible}）。这条提醒的受众
+     * 就是被驳回的那个人，他不缺「自己花了多少」这个信息；要看点进网页端就有。
+     *
+     * <p><b>说的是「请重新上传」—— 因为驳回之后这件事真的做得到了。</b>
+     * 驳回会把订单退回待支付（见 {@code PaymentProofService#reject} 与
+     * {@code PaymentTargetHandler#revertDelivery}），用户点进去就能重新传一张，
+     * 群里那句话与页面上的入口是同一件事。
+     *
+     * <p>（2026-10-04 之前这里写的是「点这里看看」，因为那时系统对
+     * 「已支付 + 已驳回」明确拒绝重交 —— 喊了做不到的话不如不喊。
+     * 状态回退做出来之后那条限制没有了，文案随之翻回来。）
+     *
+     * <p>开头那个空格是给 @ 段留的：少了它，群里会显示成
+     * {@code @张三你的付款凭证……}，两截挤在一起。
+     *
+     * <p>⚠️ <b>「不要重复付款」这半句不能省</b>：驳回会把订单退回待支付
+     *（见 {@code PaymentProofService#reject}），于是用户端看到的是「待支付 ¥8.00」——
+     * 而他明明付过。不说这一句，他很可能再扫一次码，<b>真的付第二遍</b>。
+     * 那笔多余的款子退起来比提醒一句麻烦得多。
+     *
+     * @param reason    管理员填写的驳回原因（必填），原样出现在文案里
+     * @param ordersUrl 订单列表页地址（被驳回的那几笔都在那儿）
+     * @return 提示文本
+     */
+    public static String proofRejected(String reason, String ordersUrl) {
+        return " 你的付款凭证没有通过复核：" + reason
+                + "。请重新上传一张付款截图（已经付过款的话，不要重复支付） → " + ordersUrl;
+    }
+
+    /**
+     * 新包场生效的播报。
+     *
+     * <p><b>只播时段、不播包场人</b> —— 与 {@link #bookingSchedule} 同一条披露边界
+     * （那个 VO 里压根没有包场人字段）。也刻意<b>不播金额</b>：群消息所有人可见，
+     * 而「这场收了多少钱」属于经营信息（含金额的版本只进店主群，见
+     * {@code QqbotProperties#isAmountVisible}），这条播报没有分两个版本的理由。
+     *
+     * <p>日期与时刻的写法与 {@code /包场} 指令<b>逐字一致</b>（含「跨零点时
+     * 只报到时刻为止」这一处）—— 两处各写一份的话，同一场包场在群里会有
+     * 两种说法。要改格式就两处一起改。
+     *
+     * @param startAt 包场开始时刻
+     * @param endAt   包场结束时刻
+     * @param today   今天，用于把日期说成「今天 / 明天」
+     * @return 播报文本
+     */
+    public static String bookingActivated(LocalDateTime startAt, LocalDateTime endAt,
+                                          LocalDate today) {
+        return "📅 已安排包场：" + dayLabel(startAt.toLocalDate(), today)
+                + " " + TIME.format(startAt) + " – " + TIME.format(endAt)
+                + "，该时段仅限包场人与被邀请者入场。";
+    }
+
+    /**
+     * 有人买了商品的播报，形如
+     * {@code 🛒 Kaede 购买了魔爪 ×2，还剩 3 件}。
+     *
+     * <p><b>不含金额</b> —— 这条对所有群发同一份文本
+     * （与到店、包场播报同一条披露边界）。「还剩」报的是<b>可售量</b>，
+     * 与商城页、{@code /菜单} 同一口径；为 0 时照 {@code /菜单} 的规矩
+     * 老实显示「还剩 0 件」，不另起「售罄」的说法 —— 两处口径不同的话，
+     * 群里说售罄、商城里却还买得到，谁都不知道该信哪个。
+     *
+     * @param nickname       购买人昵称
+     * @param productName    商品名（下单时的快照）
+     * @param quantity       数量，null 按 1 件处理
+     * @param availableStock 当前可售量；<b>为 null 时不带「还剩」</b>
+     *                       （商品已被删除时查不到）—— 查不到就如实不说，
+     *                       编一个数出来群里没人分得清真假
+     * @return 播报文本
+     */
+    public static String productPurchased(String nickname, String productName,
+                                          Integer quantity, Integer availableStock) {
+        StringBuilder text = new StringBuilder("🛒 ")
+                .append(nickname)
+                .append(" 购买了")
+                .append(productName)
+                .append(" ×").append(quantity == null ? 1 : quantity);
+        if (availableStock != null) {
+            text.append("，还剩 ").append(availableStock).append(" 件");
+        }
+        return text.toString();
+    }
+
+    /**
+     * 停业时段新增 / 撤销的播报。
+     *
+     * <p><b>撤销也带时段</b>：群里可能积着好几条停业安排，只说「已撤销」，
+     * 没人知道撤的是哪一段。原因则不重复 —— 撤销时那句「设备维护」已无意义，
+     * 时段本身就足以对上号。
+     *
+     * @param action  新增还是撤销
+     * @param startAt 停业开始时刻
+     * @param endAt   停业结束时刻
+     * @param reason  停业原因（新增时带上，让群里知道为什么不开），可为 null
+     * @param today   今天，用于把日期说成「今天 / 明天」
+     * @return 播报文本
+     */
+    public static String closureChanged(ClosureChangeAction action, LocalDateTime startAt,
+                                        LocalDateTime endAt, String reason, LocalDate today) {
+        String range = rangeText(startAt, endAt, today);
+        if (action == ClosureChangeAction.DELETED) {
+            return "🚧 停业安排已撤销：" + range + "，该时段恢复正常接待。";
+        }
+        return "🚧 门店停业安排：" + range + parenthesized(reason) + "，该时段不接待新顾客。";
+    }
+
+    /**
+     * 免费活动新增 / 撤销的播报。
+     *
+     * <p>写的是「<b>消费全免</b>」而不是含糊的「免费」—— 免的是账单金额，
+     * 不影响开门与准入（那是停业管的事，两者是两回事，见计费规则一节）。
+     * 撤销时明说「恢复按时长计费」，免得有人以为还能白玩。
+     *
+     * @param action  新增还是撤销
+     * @param startAt 活动开始时刻
+     * @param endAt   活动结束时刻
+     * @param reason  活动名称，可为 null
+     * @param today   今天，用于把日期说成「今天 / 明天」
+     * @return 播报文本
+     */
+    public static String freePeriodChanged(FreePeriodChangeAction action, LocalDateTime startAt,
+                                           LocalDateTime endAt, String reason, LocalDate today) {
+        String range = rangeText(startAt, endAt, today);
+        if (action == FreePeriodChangeAction.DELETED) {
+            return "🎉 免费活动已撤销：" + range + "，该时段恢复按时长计费。";
+        }
+        return "🎉 免费活动：" + range + parenthesized(reason) + "，该时段内消费全免。";
+    }
+
+    /**
+     * 包场撤销的播报。
+     *
+     * <p>与 {@code /包场} 指令和「已安排包场」{@link #rangeText 同一套时段写法} ——
+     * 撤销的这一条要能与几天前那条生效消息对得上，
+     * 否则群里读不出这两条说的是同一场包场。
+     *
+     * @param startAt 包场开始时刻
+     * @param endAt   包场结束时刻
+     * @param today   今天，用于把日期说成「今天 / 明天」
+     * @return 播报文本
+     */
+    public static String bookingRevoked(LocalDateTime startAt, LocalDateTime endAt,
+                                        LocalDate today) {
+        return "📅 包场已撤销：" + rangeText(startAt, endAt, today) + "，该时段恢复开放。";
+    }
+
+    /**
+     * 把一段起止时刻写成「今天 14:00 – 18:00」。
+     *
+     * <p>与 {@link #bookingActivated} 和 {@code /包场} 指令<b>逐字同一套写法</b>
+     * （含「跨零点时只报到时刻为止」这一处）—— 几处各写一份的话，
+     * 同一段时间在群里会有好几种说法。
+     *
+     * @param startAt 起始时刻
+     * @param endAt   结束时刻
+     * @param today   今天，用于把日期说成「今天 / 明天」
+     * @return 形如 {@code 明天 14:00 – 18:00}
+     */
+    private static String rangeText(LocalDateTime startAt, LocalDateTime endAt, LocalDate today) {
+        return dayLabel(startAt.toLocalDate(), today)
+                + " " + TIME.format(startAt) + " – " + TIME.format(endAt);
+    }
+
+    /**
+     * 把可选的原因 / 名称括起来；没填时返回空串。
+     *
+     * <p>空串与 null 都当作「没填」—— 库里这两种表示都有可能出现
+     * （表单没填是 null，清空过是空串），播报不该为它印出「（）」。
+     *
+     * @param value 原始文本，可为 null
+     * @return 形如 {@code （设备维护）}；没填时为空串
+     */
+    private static String parenthesized(String value) {
+        return value == null || value.isBlank() ? "" : "（" + value + "）";
+    }
+
+    /**
+     * 新公告发布的播报。
+     *
+     * <p><b>两类公告的文案不同</b>：
+     * <ul>
+     *   <li><b>手写公告</b>带正文与详情链接 —— 它是运营主动说的话，
+     *       正文往往才是重点（标题「本周六场地维护」+ 正文写具体时段）</li>
+     *   <li><b>自动公告</b>只发标题 —— 标题本身就是一句完整的事件描述
+     *       （「3 号机台由 良好 转为 维护中」），它没有正文，
+     *       点进去也只是列表页，链接同样是多余的</li>
+     * </ul>
+     *
+     * <p>正文经 {@link #truncate} 压成一行并截断，超长的部分点链接看全文。
+     *
+     * @param mode       发布方式；<b>只有 MANUAL 走带正文那一支</b>，
+     *                   其余取值（含 null）一律按自动公告处理 —— 信息少的那一侧更保守
+     * @param title      公告标题
+     * @param content    公告正文，可为 null（自动公告恒为 null）
+     * @param noticesUrl 网页端「全部公告」页地址
+     * @return 播报文本
+     */
+    public static String noticePublished(NoticePublishMode mode, String title,
+                                         String content, String noticesUrl) {
+        if (mode != NoticePublishMode.MANUAL) {
+            return "📢 " + title;
+        }
+        StringBuilder text = new StringBuilder("📢 门店公告：").append(title);
+        String body = truncate(content, NOTICE_CONTENT_MAX);
+        if (body != null) {
+            text.append('\n').append(body);
+        }
+        return text.append("\n详情 → ").append(noticesUrl).toString();
+    }
+
+    /**
+     * 指令列表（按「你想干什么」分组）。
      *
      * <p>顺带写明前缀要求 —— 这是「必须带前缀」那条规矩唯一的说明处，
      * 少了它用户会照着指令名裸发，然后什么都得不到。
      *
-     * @param writeEnabled 两条写指令是否启用（关掉时不能列出来，
+     * <p><b>分组是 2026-10-04 排的</b>：指令到十来条之后，一列平铺得逐行读完
+     * 才能找到自己要的那条。分成「看店里 / 我自己的 / 常用 / 其他」四段之后，
+     * 扫一眼就知道该发哪条。⚠️ 分组<b>只影响这一条回复的排版</b>，
+     * 不改变任何识别规则（别名与整条精确匹配都在 {@code QqCommandParser} 里）。
+     *
+     * @param writeEnabled 写指令是否启用（关掉时那一组整段不列出来，
      *                     否则用户发了没反应，而原因无处可查）
      * @return 多行文本
      */
     public static String help(boolean writeEnabled) {
         StringBuilder text = new StringBuilder("可用指令（前面加 / 或 fw，例如 /在店）：\n");
-        text.append("/在店 或 /看看里面 —— 看看店里现在有谁\n");
-        text.append("/包场 —— 看看近期的包场安排\n");
+
+        text.append("\n【看店里】\n");
+        text.append("/在店 或 /看看里面 —— 店里现在有谁\n");
         text.append("/营业 —— 门店现在开着吗\n");
-        text.append("/价格 —— 怎么计费\n");
-        text.append("/菜单 —— 看看店里卖什么\n");
-        text.append("/web 或 /网址 —— 网页端地址（手机下单、看账单都在这儿）\n");
+        text.append("/包场 —— 近期的包场安排\n");
+        text.append("/菜单 —— 店里卖什么、还剩多少\n");
+        text.append("/价格 —— 按时长怎么计费\n");
+        text.append("/月卡 或 /pass —— 月卡有哪几种、多少钱\n");
+
+        text.append("\n【我自己的】\n");
         text.append("/看看自己 —— 我的月卡、消费与时长\n");
-        text.append("/当前订单 或 /now —— 正在计时的这一单现在多少钱（只看，不停表）\n");
-        text.append("/ping —— 看看机器人在不在\n");
-        text.append("/帮助 —— 显示这条消息\n");
+        text.append("/当前订单 或 /now —— 正在计时的这一单多少钱（只看，不停表）\n");
 
         if (writeEnabled) {
-            text.append("\n/开门 —— 开始计时，并拿到门锁密码\n");
+            text.append("\n【常用】\n");
+            text.append("/开门 —— 开始计时，并拿到门锁密码\n");
             text.append("/结账 —— 停止计时并去付款\n");
-            text.append("/买个商品名 —— 买一件，如 /买个可乐\n");
-            text.append("/买N个商品名 —— 买 N 件，如 /买2个可乐（也可写成 /可乐-2）\n");
+            text.append("/买个可乐 或 /买2个可乐 或 /可乐-2 —— 下单买商品\n");
         }
+
+        text.append("\n【其他】\n");
+        text.append("/web 或 /网址 —— 网页端地址（手机下单、看账单都在这儿）\n");
+        text.append("/ping —— 看看机器人在不在\n");
+        text.append("/帮助 —— 显示这条消息\n");
 
         text.append("\n注册时网页会给你一条「/验证 」开头的指令，复制发到群里就能把 QQ 号绑到账号上。");
         return text.toString();
@@ -800,6 +1092,29 @@ public final class QqReplyText {
             }
         }
         return names.isEmpty() ? null : String.join("、", names);
+    }
+
+    /**
+     * 截断过长的文本（用于公告正文）。
+     *
+     * <p>两处刻意的处理：
+     * <ul>
+     *   <li><b>换行与连续空白压成单个空格</b>：正文可能是多行的（列表、分段），
+     *       而群里一条播报铺成五行会把聊天记录整个推上去。压平之后再决定要不要截</li>
+     *   <li><b>按字符截而不是字节</b>：中文一个字符三字节，按字节截会切出
+     *       半个汉字（群里显示成乱码方块）</li>
+     * </ul>
+     *
+     * @param text  原文，可为 null
+     * @param limit 最多保留几个字符
+     * @return 压平并截断后的文本；原文为空时返回 null
+     */
+    private static String truncate(String text, int limit) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        String flat = text.replaceAll("\\s+", " ").trim();
+        return flat.length() <= limit ? flat : flat.substring(0, limit) + "…";
     }
 
     /**

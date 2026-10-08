@@ -3,6 +3,7 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 import com.kaede.uspace.promotion.CardOrderStatus;
 import com.kaede.uspace.promotion.MonthlyCardNo;
 import com.kaede.uspace.promotion.MonthlyCardStatus;
@@ -80,6 +81,27 @@ public class MonthlyCardPaymentTargetHandler implements PaymentTargetHandler {
      */
     @Override
     public boolean deliverOnSubmit() {
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>什么都不做，而且这是对的</b>：月卡 {@link #deliverOnSubmit()} 返回 false ——
+     * 用户在提交凭证那一刻并没有拿到卡（卡是管理员复核通过时才插进
+     * {@code biz_monthly_card} 的，见 {@link #markPaid}）。所以驳回时没有
+     * 「已经发出去的卡」要收回，目标本来就还停在待支付上。
+     *
+     * <p>⚠️ 这与订单、商品形成对照：那两样是「提交即交付」，驳回时
+     * <b>必须</b>把交付退回去，否则用户既不能再付、也不能重交凭证。
+     *
+     * <p>返回 {@code false} 表示「没退任何东西」，调用方据此跳过冲减累计消费 ——
+     * 月卡的卡费本来也记在 {@code card_paid} 而不是 {@code order_paid} 上，
+     * 而那一列只在复核通过时才累加。
+     */
+    @Override
+    public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
+        log.debug("[支付] 月卡驳回无需冲销（未交付过）orderNo={}", target.getOutTradeNo());
         return false;
     }
 

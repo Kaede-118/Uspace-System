@@ -498,15 +498,15 @@ public class QqWriteCommandService {
     }
 
     /**
-     * 取站点基地址并去掉末尾斜杠。
+     * 取站点基地址。
+     *
+     * <p>逻辑已上收到 {@code WebProperties#normalizedBaseUrl} ——
+     * 本类与 {@code QqCommandService} 各写一份，加上后来要发提醒的
+     * {@code QqBroadcastListener} 正好是第三处，按项目惯例该合了。
      *
      * @return 形如 {@code https://xxx.com}；没配置时返回空串（链接退化成站内路径）
      */
     private String baseUrl() {
-        String url = webProperties.getBaseUrl();
-        if (url == null || url.isBlank()) {
-            return "";
-        }
-        return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+        return webProperties.normalizedBaseUrl();
     }
 }

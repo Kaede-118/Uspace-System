@@ -149,6 +149,28 @@ public class OneBotClient {
     }
 
     /**
+     * 往群里发一条「@ 某人 + 文本」的消息。
+     *
+     * <p>失败处置与 {@link #sendGroupMessage} 完全一致（绝不抛异常），
+     * 区别只在于消息以<b>段数组</b>发送，因此可以带 @ ——
+     * 用途是付款凭证被驳回时提醒本人重新提交，那是唯一一条
+     * <b>针对特定某个人</b>的播报，纯文本 @ 不出来。
+     *
+     * @param groupId 群号
+     * @param atQq    要 @ 的 QQ 号；为 null 或空串时退化成普通群消息
+     * @param text    @ 之后的文本
+     * @return 帧确实发出去了返回 true
+     */
+    public boolean sendGroupMessageAt(Long groupId, String atQq, String text) {
+        if (groupId == null || text == null || text.isEmpty()) {
+            return false;
+        }
+        String echo = "uspace-" + echoSequence.incrementAndGet();
+        return dispatch(OneBotAction.sendGroupMessageWithAt(groupId, atQq, text, echo), echo,
+                "群消息(带@) groupId=" + groupId + " at=" + atQq);
+    }
+
+    /**
      * 给某个人发一条私聊消息。
      *
      * <p>目前唯一的用途是群指令 {@code /开门}：把<b>固定的限时密码</b>单独发给本人 ——

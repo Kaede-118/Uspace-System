@@ -14,12 +14,14 @@ import com.kaede.uspace.space.dto.JoinResultVo;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.BookingParticipant;
+import com.kaede.uspace.space.event.BookingActivatedEvent;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import com.kaede.uspace.space.mapper.BookingParticipantMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
 import com.kaede.uspace.user.entity.SysUser;
 import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -92,16 +94,27 @@ public class BookingService {
      */
     private final BookingParticipantMapper participantMapper;
 
+    /**
+     * 发布「包场生效」事件，由 {@code qqbot} 监听后播报到群（见 {@link BookingActivatedEvent}）。
+     *
+     * <p>本类只在<b>0 元场次</b>那一支发布（建单即 PAID）；收费场次的发布点
+     * 在 order 包的 {@code BookingPaymentTargetHandler#markPaid} 里 ——
+     * 两处共用同一个事件类，理由见它的类注释。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
     public BookingService(BookingMapper bookingMapper,
                           StoreMapper storeMapper,
                           ClosureService closureService,
                           SysUserMapper userMapper,
-                          BookingParticipantMapper participantMapper) {
+                          BookingParticipantMapper participantMapper,
+                          ApplicationEventPublisher eventPublisher) {
         this.bookingMapper = bookingMapper;
         this.storeMapper = storeMapper;
         this.closureService = closureService;
         this.userMapper = userMapper;
         this.participantMapper = participantMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     // ==================================================================
@@ -319,14 +332,20 @@ public class BookingService {
      * <p>校验链，按「越基础越先查」的顺序排列，让报错尽早落到真正的原因上：
      * <ol>
      *   <li>时段首尾关系</li>
-     *   <li>时段不能是过去</li>
      *   <li>门店存在</li>
      *   <li>包场人存在</li>
      *   <li>不与既有包场重叠</li>
      *   <li>不与停业时段重叠</li>
      * </ol>
      *
-     * <p>新记录固定为 {@code PENDING_PAYMENT} 状态，等待付款。
+     * <p><b>「开始时刻不能是过去」这条校验于 2026-10-04 放开</b>：排一场
+     * 已经开始（或过去）的包场是做测试（清场、准入窗口、群播报）与补录的唯一途径，
+     * 而它本身不破坏任何数据。提示交给运营后台的前端 —— 提交时弹一次确认层，
+     * 那里是唯一还能拦住手滑的地方。错误码 {@code BOOKING_START_IN_PAST}(40911)
+     * 保留但已无调用方。
+     *
+     * <p>新记录固定为 {@code PENDING_PAYMENT} 状态，等待付款；
+     * <b>0 元场次例外</b> —— 它落库时就是终态 {@code PAID}，并当场发布生效事件。
      *
      * @param request 包场时段、包场人与价格
      * @param adminId 安排人（当前登录的管理员 ID）
@@ -336,9 +355,6 @@ public class BookingService {
     public BizResult<BookingVo> createBooking(CreateBookingRequest request, Long adminId) {
         if (!request.getEndAt().isAfter(request.getStartAt())) {
             return BizResult.fail(ErrorCode.BOOKING_TIME_INVALID);
-        }
-        if (request.getStartAt().isBefore(LocalDateTime.now())) {
-            return BizResult.fail(ErrorCode.BOOKING_START_IN_PAST);
         }
 
         Long storeId = storeMapper.selectCurrentId();
@@ -391,6 +407,14 @@ public class BookingService {
         }
 
         bookingMapper.insert(booking);
+
+        // 0 元场次在上面那一段就已经置成 PAID —— 它此刻起真的生效了，该让群里知道。
+        // 收费场次等付款，那个发布点在 BookingPaymentTargetHandler#markPaid 里
+        if (BookingStatus.PAID.name().equals(booking.getStatus())) {
+            eventPublisher.publishEvent(new BookingActivatedEvent(
+                    booking.getId(), booking.getBookingNo(),
+                    booking.getStartAt(), booking.getEndAt()));
+        }
 
         log.info("[空间] 创建包场 {} 包场人={} 时段 {} ~ {} 价格={} 状态={}",
                 booking.getBookingNo(), booking.getHostUserId(),

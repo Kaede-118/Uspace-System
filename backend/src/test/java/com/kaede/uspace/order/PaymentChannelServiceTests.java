@@ -3,6 +3,7 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.order.dto.PayChannelVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -150,6 +151,11 @@ class PaymentChannelServiceTests {
 
             @Override
             public boolean deliverOnSubmit() {
+                throw new UnsupportedOperationException("本测试用不到");
+            }
+
+            @Override
+            public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
                 throw new UnsupportedOperationException("本测试用不到");
             }
 

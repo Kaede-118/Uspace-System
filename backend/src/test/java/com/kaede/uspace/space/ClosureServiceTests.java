@@ -6,11 +6,15 @@ import com.kaede.uspace.space.dto.ClosureRequest;
 import com.kaede.uspace.space.dto.ClosureVo;
 import com.kaede.uspace.space.entity.Closure;
 import com.kaede.uspace.space.entity.Store;
+import com.kaede.uspace.space.event.ClosureChangeAction;
+import com.kaede.uspace.space.event.ClosureChangedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,9 +50,17 @@ class ClosureServiceTests {
     private final FakeStoreMapper storeMapper = new FakeStoreMapper();
     private final FakeClosureMapper closureMapper = new FakeClosureMapper();
 
+    /**
+     * 捕获服务发布的事件，供断言使用。
+     *
+     * <p>⚠️ 必须声明在 {@link #closureService} <b>之前</b> —— 字段按声明顺序初始化，
+     * 反过来时方法引用 {@code publishedEvents::add} 会对着 null 创建，当场 NPE。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     /** 被测服务 */
     private final ClosureService closureService =
-            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper());
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), publishedEvents::add);
 
     /**
      * 每个用例前预置一条门店 —— 停业记录必须挂在门店下，
@@ -56,6 +68,7 @@ class ClosureServiceTests {
      */
     @BeforeEach
     void setUp() {
+        publishedEvents.clear();
         Store store = new Store();
         store.setId(STORE_ID);
         store.setName("测试门店");
@@ -135,7 +148,7 @@ class ClosureServiceTests {
     @DisplayName("新增停业：门店不存在时返回门店错误码，而不是静默写入脏数据")
     void createClosure_failsWhenStoreMissing() {
         FakeStoreMapper empty = new FakeStoreMapper();
-        ClosureService service = new ClosureService(closureMapper.asMapper(), empty.asMapper());
+        ClosureService service = new ClosureService(closureMapper.asMapper(), empty.asMapper(), event -> { });
 
         BizResult<ClosureVo> result = service.createClosure(newRequest(
                 LocalDateTime.of(2026, 10, 1, 10, 0),
@@ -206,6 +219,48 @@ class ClosureServiceTests {
     }
 
     // ==================================================================
+    // 群播报（新增与撤销成对发事件）
+    // ==================================================================
+
+    @Test
+    @DisplayName("新增与撤销都发「停业变更」事件 —— 群里那条「明天不营业」才收得回来")
+    void createAndDelete_publishClosureChangedEvents() {
+        LocalDateTime start = LocalDateTime.of(2026, 10, 1, 10, 0);
+        Long id = closureService.createClosure(
+                newRequest(start, start.plusHours(4), "设备维护"), ADMIN_ID).getData().getId();
+
+        assertEquals(1, publishedEvents.size(), "新增要播 —— 顾客得提前知道哪天不营业");
+        ClosureChangedEvent created = (ClosureChangedEvent) publishedEvents.get(0);
+        assertEquals(ClosureChangeAction.CREATED, created.action());
+        assertEquals("设备维护", created.reason(), "原因要带上，只报时段的话群里只会困惑「为什么突然不开」");
+        assertEquals(start, created.startAt());
+
+        closureService.deleteClosure(id);
+
+        assertEquals(2, publishedEvents.size(),
+                "撤销也要播 —— 少了它，群里那条停业消息就变成了永不过期的假消息");
+        ClosureChangedEvent deleted = (ClosureChangedEvent) publishedEvents.get(1);
+        assertEquals(ClosureChangeAction.DELETED, deleted.action());
+        assertEquals(start, deleted.startAt(),
+                "撤销播报要带上原时段（取自删除前的那一份），否则没人知道撤的是哪一段");
+    }
+
+    @Test
+    @DisplayName("新增被拒（时段重叠）时不发事件 —— 没落库的事不该进群")
+    void createClosure_doesNotPublishWhenRejected() {
+        LocalDateTime start = LocalDateTime.of(2026, 10, 1, 10, 0);
+        closureService.createClosure(newRequest(start, start.plusHours(4), "维护"), ADMIN_ID);
+        publishedEvents.clear();
+
+        BizResult<ClosureVo> result = closureService.createClosure(
+                newRequest(start.plusHours(1), start.plusHours(2), "重叠"), ADMIN_ID);
+
+        assertEquals(ErrorCode.CLOSURE_OVERLAP, result.getError());
+        assertEquals(0, publishedEvents.size(),
+                "被拒绝的排期根本没落库，播出去就是一条假消息");
+    }
+
+    // ==================================================================
     // 停业判断
     // ==================================================================
 
@@ -233,7 +288,7 @@ class ClosureServiceTests {
     @DisplayName("停业判断：门店不存在时返回「不停业」，不伪装成停业")
     void isClosedAt_returnsFalseWhenStoreMissing() {
         FakeStoreMapper empty = new FakeStoreMapper();
-        ClosureService service = new ClosureService(closureMapper.asMapper(), empty.asMapper());
+        ClosureService service = new ClosureService(closureMapper.asMapper(), empty.asMapper(), event -> { });
 
         assertFalse(service.isClosedAt(LocalDateTime.now()),
                 "门店不存在属于系统未初始化，应当让下单链路自己去报「门店不存在」，"

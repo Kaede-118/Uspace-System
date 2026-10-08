@@ -17,9 +17,22 @@ import java.util.List;
  * 那时 {@code batch_id} 还不存在。草稿留在内存里，等批次落了库再由 Service
  * 补上批次 ID 转成实体。
  *
+ * <h3>{@code billUnclaimed*} 是「总账对没对平」的依据</h3>
+ *
+ * <p>口径：<b>账单里的这笔钱，在系统里有没有一条「有效凭证」指着它</b>。
+ * 没有的才算未认领 —— 具体是 {@code BILL_ONLY}（一条凭证都没有）与
+ * {@code REJECTED_IN_BILL}（有凭证指着，但那条被驳回了，不算数）两支。
+ *
+ * <p>⚠️ <b>{@code AMOUNT_MISMATCH} 与 {@code DUPLICATE_CLAIM} 刻意不算未认领</b>：
+ * 那两类钱确实到了、也有凭证指着它，只是有疑点。混进来的话，一笔「金额差 2 元」
+ * 会被报成「有 8 元没收到」—— 把结论说重了，而管理员据此会去找一笔并不存在的账。
+ * 它们仍然进差异列表，只是不拉低总账。
+ *
  * @param matched       匹配成功的（凭证 ID，账单记录）对
  * @param diffs         差异草稿，已去重由 Service 负责
  * @param billSkipped   账单侧因「已被之前的批次认领」而跳过的笔数
+ * @param billUnclaimedCount  账单侧未被任何有效凭证认领的笔数
+ * @param billUnclaimedAmount 账单侧未被认领的金额合计（元）
  * @param proofSkipped  系统侧因「已被之前的批次认领」而跳过的凭证数
  * @param activeCount   参与比对的凭证数（未被认领、未被驳回）
  * @param activeAmount  参与比对的凭证金额合计（元）
@@ -29,6 +42,8 @@ public record ReconcilePlan(
         List<MatchedPair> matched,
         List<DiffDraft> diffs,
         int billSkipped,
+        int billUnclaimedCount,
+        BigDecimal billUnclaimedAmount,
         int proofSkipped,
         int activeCount,
         BigDecimal activeAmount,

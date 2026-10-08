@@ -3,13 +3,16 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 import com.kaede.uspace.space.BookingParticipantRole;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.BookingParticipant;
+import com.kaede.uspace.space.event.BookingActivatedEvent;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import com.kaede.uspace.space.mapper.BookingParticipantMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
 
@@ -47,12 +50,25 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
     private final InviteTokenService inviteTokenService;
     private final BookingParticipantMapper participantMapper;
 
+    /**
+     * 发布「包场生效」事件，由 {@code qqbot} 监听后播报到群。
+     *
+     * <p>本类住在 {@code order} 包却发布 {@code space.event} 的事件 ——
+     * 方向允许（{@code order → space} 单向），而事件住 space 是因为另一处
+     * 发布点在 0 元场次的 {@code BookingService#createBooking} 里，
+     * 而 {@code space} 不能反向 import {@code order/event}。
+     * 详见 {@link BookingActivatedEvent} 的类注释。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
     public BookingPaymentTargetHandler(BookingMapper bookingMapper,
                                        InviteTokenService inviteTokenService,
-                                       BookingParticipantMapper participantMapper) {
+                                       BookingParticipantMapper participantMapper,
+                                       ApplicationEventPublisher eventPublisher) {
         this.bookingMapper = bookingMapper;
         this.inviteTokenService = inviteTokenService;
         this.participantMapper = participantMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -79,6 +95,27 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
      */
     @Override
     public boolean deliverOnSubmit() {
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>什么都不做，而且这是对的</b>：包场 {@link #deliverOnSubmit()} 返回 false ——
+     * 用户在提交凭证那一刻什么也没拿到（邀请令牌与参与者记录都要等管理员复核
+     * 才产生，见 {@link #markPaid}）。所以驳回时没有「已经交付出去的东西」要退，
+     * 目标本来就还停在待支付上，用户可以重新上传一张截图。
+     *
+     * <p>⚠️ <b>留着这个空实现而不是给接口一个默认方法</b>：漏实现的后果是
+     * 一笔被驳回却永远停在已支付的账，而那不会有任何报错 ——
+     * 编译器应该替我们把这类遗漏拦下来。
+     *
+     * <p>返回 {@code false} 表示「没退任何东西」，调用方据此跳过冲减累计消费。
+     * 这与包场本身是对称的：它在复核通过之前也从来没累加过。
+     */
+    @Override
+    public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
+        log.debug("[支付] 包场驳回无需冲销（未交付过）orderNo={}", target.getOutTradeNo());
         return false;
     }
 
@@ -150,6 +187,11 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
                 // 放在 affected > 0 之后：重复回调在上一行就已经 return 了，
                 // 走不到这里，所以不必额外判断「是不是第一次付成功」
                 ensureHostParticipant(target.getId(), target.getUserId(), paidAt);
+
+                // 包场此刻才真正生效（排他性从这一秒起存在），播报到群。
+                // 待付款的场次刻意不播 —— 它随时可能被取消，提前说就成了空头安排
+                publishActivated(target.getId());
+
                 log.info("[支付] 包场付款成功 bookingNo={} 通道={} 交易号={} 金额={}（已生成邀请令牌）",
                         target.getOutTradeNo(), channel, transactionNo, target.getAmount());
                 return true;
@@ -196,6 +238,37 @@ public class BookingPaymentTargetHandler implements PaymentTargetHandler {
             participantMapper.insert(row);
         } catch (DuplicateKeyException e) {
             log.info("[支付] 包场人已在参与者表中，跳过 bookingId={} userId={}", bookingId, hostUserId);
+        }
+    }
+
+    /**
+     * 发布「包场生效」事件（{@code qqbot} 监听后播报到群）。
+     *
+     * <p><b>{@link PaymentTarget} 里没有时段字段</b>（那是四类收款共用的 DTO，
+     * 不为某一类扩它），所以这里重查一次拿 {@code startAt} / {@code endAt} ——
+     * 与其它模块「改完重查一次」是同一个习惯。包场一旦 PAID 就不可改期
+     * （{@code BookingService#updateBooking} 只放行待付款的），因此重查到的
+     * 时刻就是最终时刻。
+     *
+     * <p><b>异常自己吞掉。</b>播报是次要功能，一次查询失败不该让整笔付款
+     * 抛异常回滚（走凭证那条路时，表现就是「管理员点了复核通过，却报了个错」）。
+     * 吞掉还有一处附带的好：异常不会误落到外层那个
+     * {@code catch (DuplicateKeyException)} —— 它只该管令牌撞索引。
+     *
+     * @param bookingId 包场 ID
+     */
+    private void publishActivated(Long bookingId) {
+        try {
+            Booking booking = bookingMapper.selectById(bookingId);
+            if (booking == null) {
+                log.warn("[支付] 包场已付款但重查不到记录，跳过群播报 bookingId={}", bookingId);
+                return;
+            }
+            eventPublisher.publishEvent(new BookingActivatedEvent(
+                    booking.getId(), booking.getBookingNo(),
+                    booking.getStartAt(), booking.getEndAt()));
+        } catch (RuntimeException e) {
+            log.warn("[支付] 发布包场生效事件失败，跳过群播报 bookingId={}", bookingId, e);
         }
     }
 

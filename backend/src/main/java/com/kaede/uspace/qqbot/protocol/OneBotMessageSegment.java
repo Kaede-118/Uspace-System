@@ -31,9 +31,57 @@ public class OneBotMessageSegment {
     /** 图片段 */
     public static final String TYPE_IMAGE = "image";
 
+    /**
+     * @ 某人段。
+     *
+     * <p><b>出站方向靠它主动 @ 人</b> —— 那是 {@code auto_escape=true} 的纯文本
+     * 消息做不到的事（CQ 码会被转义成字面文本，见 {@code OneBotAction}）。
+     */
+    public static final String TYPE_AT = "at";
+
     /** 段类型：{@code text} / {@code image} / {@code at} / {@code face} …… */
     private String type;
 
     /** 该类型自己的字段。见类注释 */
     private Map<String, Object> data;
+
+    /**
+     * 造一个文本段。
+     *
+     * @param text 文本内容。<b>不会被当作 CQ 码解析</b>，所以把用户昵称放进来是安全的
+     * @return 文本段
+     */
+    public static OneBotMessageSegment text(String text) {
+        return of(TYPE_TEXT, Map.of("text", text));
+    }
+
+    /**
+     * 造一个 @ 段。
+     *
+     * <p>⚠️ <b>{@code qq} 用字符串而不是数字</b>：OneBot v11 规范里它的类型是
+     * {@code string}。多数实现也认数字，但按规范写不必去赌对端的宽容度。
+     *
+     * @param qq 要 @ 的 QQ 号，不可为 null
+     * @return @ 段
+     */
+    public static OneBotMessageSegment at(String qq) {
+        return of(TYPE_AT, Map.of("qq", qq));
+    }
+
+    /**
+     * 造一个段。
+     *
+     * <p>用 {@code Map.of} 意味着 data 里的值不能为 null ——
+     * 这对本项目的三种段都成立（各自的字段由调用方保证有值）。
+     *
+     * @param type 段类型
+     * @param data 该类型的字段
+     * @return 段
+     */
+    private static OneBotMessageSegment of(String type, Map<String, Object> data) {
+        OneBotMessageSegment segment = new OneBotMessageSegment();
+        segment.setType(type);
+        segment.setData(data);
+        return segment;
+    }
 }

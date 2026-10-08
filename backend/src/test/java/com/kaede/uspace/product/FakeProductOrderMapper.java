@@ -107,6 +107,7 @@ public class FakeProductOrderMapper implements InvocationHandler {
             case "selectByOrderNo" -> selectByOrderNo((String) args[0]);
             case "selectPageBy" -> selectPageBy(args);
             case "markPaid" -> markPaid(args);
+            case "markRejected" -> markRejected((Long) args[0]);
             case "closePending" -> closePending((Long) args[0]);
             case "countPendingByProduct" -> countPendingByProduct(args);
             default -> throw new UnsupportedOperationException(
@@ -204,6 +205,31 @@ public class FakeProductOrderMapper implements InvocationHandler {
      * @param args 依次为购买单 ID、支付通道、平台交易号、支付时刻
      * @return 受影响行数；0 表示单据不是待支付状态，或记录不存在
      */
+    /**
+     * 标记为「凭证未通过」（管理员复核未通过）。
+     *
+     * <p>⚠️ 注意这里<b>没有还库存那一步</b>，真实现里也没有 ——
+     * 商品是「付了钱自己取」，而驳回发生在管理员有空复核的时候，
+     * 那时货多半已经被拿走了。还回去等于记一笔假账。
+     *
+     * <p>状态取 {@code REJECTED} 而不是 {@code PENDING_PAYMENT}：后者会让
+     * 「还没付钱」与「付了但凭证没通过」混成同一个状态，两者的处置动作不同。
+     *
+     * @param id 购买单 ID
+     * @return 受影响行数；状态不是已支付时为 0
+     */
+    private int markRejected(Long id) {
+        ProductOrder order = selectById(id);
+        if (order == null || !ProductOrderStatus.PAID.name().equals(order.getStatus())) {
+            return 0;
+        }
+        order.setStatus(ProductOrderStatus.REJECTED.name());
+        order.setPaymentMethod(null);
+        order.setPaymentNo(null);
+        order.setPaidAt(null);
+        return 1;
+    }
+
     private int markPaid(Object[] args) {
         ProductOrder order = selectById((Long) args[0]);
         if (order == null

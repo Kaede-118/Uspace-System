@@ -8,9 +8,12 @@ import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.space.dto.ClosureRequest;
 import com.kaede.uspace.space.dto.ClosureVo;
 import com.kaede.uspace.space.entity.Closure;
+import com.kaede.uspace.space.event.ClosureChangeAction;
+import com.kaede.uspace.space.event.ClosureChangedEvent;
 import com.kaede.uspace.space.mapper.ClosureMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,9 +43,19 @@ public class ClosureService {
     private final ClosureMapper closureMapper;
     private final StoreMapper storeMapper;
 
-    public ClosureService(ClosureMapper closureMapper, StoreMapper storeMapper) {
+    /**
+     * 发布「停业时段变更」事件，由 {@code qqbot} 监听后播报到群。
+     *
+     * <p>新增与撤销<b>都播</b>：群里看到过「明天 10:00 不营业」之后，
+     * 撤销若不播，那条消息就永远停留在群里，成为一条过期的假消息。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
+    public ClosureService(ClosureMapper closureMapper, StoreMapper storeMapper,
+                          ApplicationEventPublisher eventPublisher) {
         this.closureMapper = closureMapper;
         this.storeMapper = storeMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     // ==================================================================
@@ -166,6 +179,7 @@ public class ClosureService {
 
         log.info("[空间] 新增停业记录 id={} 时段 {} ~ {} 原因={}",
                 closure.getId(), closure.getStartAt(), closure.getEndAt(), closure.getReason());
+        publishChanged(closure, ClosureChangeAction.CREATED);
         return BizResult.ok(ClosureVo.from(closure));
     }
 
@@ -225,7 +239,30 @@ public class ClosureService {
 
         log.info("[空间] 删除停业记录 id={} 原时段 {} ~ {}",
                 id, existing.getStartAt(), existing.getEndAt());
+        // 撤销播报要用删除前查到的那一份 —— 删完就查不到了。
+        // 上面那次 selectById 本来就有，直接用它，不必再查一次
+        publishChanged(existing, ClosureChangeAction.DELETED);
         return BizResult.ok(null);
+    }
+
+    /**
+     * 发布「停业时段变更」事件（{@code qqbot} 监听后播报到群）。
+     *
+     * <p><b>异常自己吞掉。</b>播报是次要功能，一次发布失败不该让停业安排
+     * 保存不了 —— 管理员排的是「明天不开门」这件事本身，播报只是附带的一句通知。
+     *
+     * @param closure 停业记录；撤销时传的是删除前查到的那一份
+     * @param action  新增还是撤销
+     */
+    private void publishChanged(Closure closure, ClosureChangeAction action) {
+        try {
+            eventPublisher.publishEvent(new ClosureChangedEvent(
+                    closure.getId(), closure.getStartAt(), closure.getEndAt(),
+                    closure.getReason(), action));
+        } catch (RuntimeException e) {
+            log.warn("[空间] 发布停业变更事件失败，跳过群播报 closureId={} action={}",
+                    closure.getId(), action, e);
+        }
     }
 
     /**

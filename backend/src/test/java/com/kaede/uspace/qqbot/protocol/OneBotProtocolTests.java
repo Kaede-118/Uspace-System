@@ -172,6 +172,39 @@ class OneBotProtocolTests {
     }
 
     @Test
+    @DisplayName("协议：带 @ 的群消息以段数组发送，且不传 auto_escape")
+    void action_sendGroupMessageWithAtUsesSegments() throws Exception {
+        OneBotAction action = OneBotAction.sendGroupMessageWithAt(
+                1062204057L, "2198047522", " 你的付款凭证没通过复核", "uspace-7");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertTrue(json.contains("\"action\":\"send_group_msg\""), "动作名与纯文本那条相同");
+        assertTrue(json.contains("\"type\":\"at\""),
+                "@ 必须走段数组 —— CQ 码那种写法会被 auto_escape 转义成一行字面文本，@ 不到任何人");
+        assertTrue(json.contains("\"qq\":\"2198047522\""),
+                "qq 按规范的 string 类型发（写成数字多数实现也认，但不必去赌）");
+        assertTrue(json.contains("\"type\":\"text\""), "正文是一段 text");
+        assertFalse(json.contains("auto_escape"),
+                "段数组形态下刻意不带它：它只对字符串形式的 message 有效，"
+                        + "带上会让人误以为这里也在转义");
+        assertFalse(json.contains("CQ:at"),
+                "绝不能退回 CQ 码：那条路要关掉转义，而转义挡的正是"
+                        + "「用户把昵称起成 [CQ:at,qq=all] 让机器人替他 @ 全体」这个注入面");
+    }
+
+    @Test
+    @DisplayName("协议：没绑 QQ 时退化成纯文本段，但消息照发")
+    void action_sendGroupMessageWithAtDegradesWithoutQq() throws Exception {
+        OneBotAction action = OneBotAction.sendGroupMessageWithAt(
+                1062204057L, null, " 你的付款凭证没通过复核", "uspace-8");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertFalse(json.contains("\"type\":\"at\""), "没有 QQ 号就不该有 @ 段");
+        assertTrue(json.contains("\"type\":\"text\""),
+                "但正文照发 —— 提醒本身比 @ 到人重要，群里的人多半能认出说的是谁");
+    }
+
+    @Test
     @DisplayName("协议：发私聊的动作带有 auto_escape 与 user_id")
     void action_sendPrivateMessageEscapesCqCode() throws Exception {
         OneBotAction action = OneBotAction.sendPrivateMessage(12345L, "你的固定密码：111111", "uspace-9");

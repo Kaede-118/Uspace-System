@@ -7,6 +7,7 @@ import com.kaede.uspace.order.PaidCategory;
 import com.kaede.uspace.order.PaymentTargetHandler;
 import com.kaede.uspace.order.PaymentTargetType;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.entity.PaymentProof;
 import com.kaede.uspace.qqbot.protocol.OneBotEvent;
 import com.kaede.uspace.qqbot.protocol.OneBotMessageSegment;
 import com.kaede.uspace.user.entity.SysUser;
@@ -248,6 +249,11 @@ class QqPaymentProofServiceTests {
         @Override
         public PaidCategory paidCategory() {
             return PaidCategory.ORDER;
+        }
+
+        @Override
+        public boolean revertDelivery(PaymentTarget target, PaymentProof proof) {
+            throw new UnsupportedOperationException("本桩只测「群里传图」，不涉及驳回冲销");
         }
 
         @Override

@@ -8,10 +8,12 @@ import com.kaede.uspace.notice.dto.CreateNoticeRequest;
 import com.kaede.uspace.notice.dto.NoticeVo;
 import com.kaede.uspace.notice.dto.UpdateNoticeRequest;
 import com.kaede.uspace.notice.entity.Notice;
+import com.kaede.uspace.notice.event.NoticePublishedEvent;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,8 +43,17 @@ class NoticeServiceTests {
     /** 内存版数据访问层 */
     private final FakeNoticeMapper noticeMapper = new FakeNoticeMapper();
 
+    /**
+     * 「公告已发布」事件的发布记录。
+     *
+     * <p>用「记下来」而不是「丢掉」，因为事件的<b>缺席</b>同样是缺陷 ——
+     * 公告落了库却没发事件的话，群里什么都看不到，而不会报任何错。
+     */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     /** 被测服务 */
-    private final NoticeService noticeService = new NoticeService(noticeMapper.asMapper());
+    private final NoticeService noticeService =
+            new NoticeService(noticeMapper.asMapper(), publishedEvents::add);
 
     // ==================================================================
     // 消息流语义：只增不改
@@ -162,6 +173,41 @@ class NoticeServiceTests {
         // NoticeVo 里根本没有 sourceId / sourceType / createdBy 这三个字段 ——
         // 白名单 VO 的意义就在这里：想泄露也拿不到
         assertEquals(42L, noticeMapper.last().getSourceId(), "来源 ID 只在库里");
+    }
+
+    // ==================================================================
+    // 播报：事件发布（qqbot 据此推群）
+    // ==================================================================
+
+    @Test
+    @DisplayName("播报：手写公告发布时发一条事件，带标题、正文与 MANUAL")
+    void createManual_publishesEvent() {
+        CreateNoticeRequest req = request("本周六场地维护");
+        req.setContent("10:00–14:00 暂停营业");
+
+        noticeService.createManual(99L, req);
+
+        assertEquals(1, publishedEvents.size(),
+                "公告落了库却没发事件的话，群里什么都看不到，而不会报任何错");
+        NoticePublishedEvent event = (NoticePublishedEvent) publishedEvents.get(0);
+        assertEquals("本周六场地维护", event.title());
+        assertEquals("10:00–14:00 暂停营业", event.content(),
+                "手写公告的正文往往才是重点，要带进播报");
+        assertEquals(NoticePublishMode.MANUAL, event.publishMode());
+    }
+
+    @Test
+    @DisplayName("播报：自动公告也发事件，且不带正文")
+    void publishAuto_publishesEvent() {
+        noticeService.publishAuto(NoticeSourceType.DEVICE, 42L, "拍拍机 1 号 由 良好 转为 维护中");
+
+        assertEquals(1, publishedEvents.size(),
+                "自动公告也要在群里说一声（2026-10-04 定：机台转维护这类记录同样值得知道）");
+        NoticePublishedEvent event = (NoticePublishedEvent) publishedEvents.get(0);
+        assertEquals("拍拍机 1 号 由 良好 转为 维护中", event.title());
+        assertNull(event.content(), "自动公告没有正文");
+        assertEquals(NoticePublishMode.AUTO, event.publishMode(),
+                "两类公告的播报文案不同，所以事件必须带上发布方式");
     }
 
     // ==================================================================

@@ -55,12 +55,12 @@ class InviteTokenServiceTests {
             new FakeBookingParticipantMapper(bookingMapper);
 
     private final ClosureService closureService =
-            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper());
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { });
 
     /** 真实实现（不是假货）—— findByToken 要调它的 listParticipants 组装名单 */
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
-            userMapper.asMapper(), participantMapper.asMapper());
+            userMapper.asMapper(), participantMapper.asMapper(), event -> { });
 
     private final InviteTokenService service = new InviteTokenService(
             bookingMapper.asMapper(), bookingService, new WebProperties());

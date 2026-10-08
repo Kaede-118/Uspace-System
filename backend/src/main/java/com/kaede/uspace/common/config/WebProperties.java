@@ -38,4 +38,27 @@ public class WebProperties {
      * 访问得到的地址」，开发期比后端配的任何值都准。
      */
     private String baseUrl = "http://localhost:5173";
+
+    /**
+     * 取站点地址，去掉末尾斜杠，并兜住空值。
+     *
+     * <p><b>为什么要有这个方法</b>：拼链接的地方此前各自写了同一段
+     * 「取配置 → 去末尾斜杠 → 空则退化成空串」的三行逻辑，到第三处
+     *（{@code QqCommandService} / {@code QqWriteCommandService} 之后，
+     * 又加了 {@code QqBroadcastListener}）按项目惯例该合了。
+     * 分开写的代价很具体：某天有人在其中一处改了空值处理，
+     * 另外两处的链接就悄悄变得不一样，而且不会报任何错。
+     *
+     * <p>配置为空时退化成空串而不是抛异常：拼出来是个站内相对路径，
+     * 点不开，但至少不会拼出一串 {@code null/#/orders}。
+     *
+     * @return 形如 {@code https://xxx.com}；没配置时返回空串
+     */
+    public String normalizedBaseUrl() {
+        String url = getBaseUrl();
+        if (url == null || url.isBlank()) {
+            return "";
+        }
+        return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+    }
 }

@@ -30,7 +30,19 @@ const props = defineProps({
   /** 应付金额（仅用于展示） */
   amount: { type: [Number, String], default: null },
   /** 支付按钮文案 */
-  payText: { type: String, default: '去支付' }
+  payText: { type: String, default: '去支付' },
+  /**
+   * 只走「上传付款凭证」那条路，不显示通道选择。
+   *
+   * <p>给「付款凭证被驳回」的场景用（订单与商品都是）：那一刻用户能做的只有
+   * 重新传一张截图，而<b>后端也不允许再发起支付</b>（{@code loadForPay}
+   * 只认待支付状态）。摆一排通道给他选，选到线上通道还会换来一个拒绝提示 ——
+   * 而他本来就只是想把那张图重传一遍。
+   *
+   * <p>少了这个开关，页面上的表现是「一笔凭证被驳回的单子，看着像还能再付一次」，
+   * 而按钮文案还是「去支付」—— 用户既找不到重传的入口，又可能真的再付一笔。
+   */
+  proofOnly: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['paid'])
@@ -96,6 +108,19 @@ async function loadChannels() {
 watch(() => [props.targetType, props.targetId], loadChannels, { immediate: true })
 
 async function onPay() {
+  /*
+   * 只走凭证那条路时直接开弹层，不看通道。
+   *
+   * 后端在 REJECTED 状态下也不允许再发起支付（loadForPay 只认 PENDING_PAYMENT），
+   * 所以让用户先选通道是白费一道手续 —— 选到线上通道还会换来一个错误提示，
+   * 而那个提示说的是「该订单当前不需要支付」，对着一个正想重传截图的人，
+   * 这句话完全指错了方向。
+   */
+  if (props.proofOnly) {
+    proofVisible.value = true
+    return
+  }
+
   if (!selected.value) {
     toastError('请先选择支付方式')
     return
@@ -141,7 +166,11 @@ async function onCheck() {
 
 <template>
   <div class="pay-panel">
-    <div class="card">
+    <!--
+      「选择支付方式」这张卡在只走凭证时整块不出现：那时用户能做的只有
+      重新上传一张截图，摆一排通道给他选，选错了还会撞上后端的拒绝
+    -->
+    <div v-if="!proofOnly" class="card">
       <div class="card-title">选择支付方式</div>
       <PayChannelPicker v-model="channel" :channels="channels" />
     </div>

@@ -10,8 +10,10 @@ import com.kaede.uspace.notice.dto.CreateNoticeRequest;
 import com.kaede.uspace.notice.dto.NoticeVo;
 import com.kaede.uspace.notice.dto.UpdateNoticeRequest;
 import com.kaede.uspace.notice.entity.Notice;
+import com.kaede.uspace.notice.event.NoticePublishedEvent;
 import com.kaede.uspace.notice.mapper.NoticeMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -58,8 +60,17 @@ public class NoticeService {
 
     private final NoticeMapper noticeMapper;
 
-    public NoticeService(NoticeMapper noticeMapper) {
+    /**
+     * 发布「公告已发布」事件，由 {@code qqbot} 监听后播报到群。
+     *
+     * <p>本模块不认识 qqbot，也不该认识 —— 依赖方向是「qqbot → 各业务模块」
+     * 单向的（见 {@code NoticePublishedEvent} 的类注释）。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
+    public NoticeService(NoticeMapper noticeMapper, ApplicationEventPublisher eventPublisher) {
         this.noticeMapper = noticeMapper;
+        this.eventPublisher = eventPublisher;
     }
 
     // ==================================================================
@@ -128,6 +139,13 @@ public class NoticeService {
         noticeMapper.insert(notice);
 
         log.info("[公告] 管理员 {} 发布公告 id={} 标题={}", adminId, notice.getId(), notice.getTitle());
+
+        // 手写公告是「运营现在想说的话」，发出来就该让群里也知道一声
+        // （自动公告走 publishAuto，发布的是同一个事件）
+        eventPublisher.publishEvent(new NoticePublishedEvent(
+                notice.getId(), notice.getTitle(), notice.getContent(),
+                NoticePublishMode.MANUAL));
+
         return BizResult.ok(AdminNoticeVo.from(noticeMapper.selectById(notice.getId())));
     }
 
@@ -238,6 +256,13 @@ public class NoticeService {
             noticeMapper.insert(notice);
 
             log.info("[公告] 自动记录 source={}/{} 标题={}", sourceType, sourceId, title);
+
+            // 事件发布放在 try 内、insert 之后：前者是「本方法不抛异常」的契约
+            // （见类注释），后者保证「库里有了才播」。有事务时监听器在提交后才跑；
+            // 无事务时由监听器的 fallbackExecution 兜住（见 NoticePublishedEvent 注释）
+            eventPublisher.publishEvent(new NoticePublishedEvent(
+                    notice.getId(), notice.getTitle(), notice.getContent(),
+                    NoticePublishMode.AUTO));
         } catch (RuntimeException e) {
             log.error("[公告] 自动记录失败，不影响主流程 source={}/{} 标题={}",
                     sourceType, sourceId, title, e);

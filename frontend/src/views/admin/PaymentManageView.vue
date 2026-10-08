@@ -25,7 +25,7 @@
  * 列表与详情是一件事的两步，拆成两个路由反而要处理「刷新后落在详情页、
  * 而那个批次已不存在」这类状态。
  */
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import {
   listAdminPayQrs,
   createPayQr,
@@ -340,6 +340,52 @@ const uploading = ref(false)
 
 /** 正在看的那个批次（详情视图的头部信息） */
 const currentBatch = ref(null)
+
+/**
+ * 总账：账单侧<b>未被任何有效凭证认领</b>的笔数。
+ *
+ * <p><b>它回答的是月底对账的第一个问题 —— 「钱少没少」</b>，而不是「这 30 笔
+ * 分别是谁付的」。对平了就可以直接走人，不必翻下面的逐笔差异：逐笔差异永远有杂音
+ *（OCR 读错、顾客跨月才付款），拿它们判断账平不平，等于用人力去消化机器的误差。
+ *
+ * <p>口径由后端定死（见 {@code ReconcileMatcher}）：未被认领 = 系统里没有一条
+ * 有效凭证指着这笔钱。金额不符与重复认领<b>不算</b> —— 那两类钱确实到了，
+ * 只进差异列表。
+ */
+const unclaimedCount = computed(() => currentBatch.value?.billUnclaimedCount ?? null)
+
+/** 总账：账单侧未被认领的金额（元），口径见上 */
+const unclaimedAmount = computed(() => currentBatch.value?.billUnclaimedAmount ?? null)
+
+/**
+ * 这个批次有没有总账数据。
+ *
+ * <p>⚠️ <b>刻意用 {@code != null} 判断，而不是「取不到就当 0」</b>：
+ * 本次升级之前建的批次没有这两列，当 0 处理会让它们显示「账已对平」——
+ * 那是一个<b>没有依据的结论</b>，比不显示这一块糟得多。
+ */
+const hasBalance = computed(() => unclaimedCount.value != null)
+
+/** 已认领笔数 = 账单笔数 − 未被认领的（账单笔数里包含「之前批次已对过」的那些） */
+const claimedCount = computed(() =>
+  hasBalance.value ? (currentBatch.value?.billCount ?? 0) - unclaimedCount.value : 0
+)
+
+/**
+ * 已认领金额（元）。
+ *
+ * <p>两端都显式转数字再相减：后端返回的金额是字符串形式的 {@code DECIMAL}，
+ * 而 {@code undefined} 参与减法会得到 {@code NaN}，页面上显示成「¥0.00」——
+ * 一个看起来正常、实际什么都没有的数。
+ */
+const claimedAmount = computed(() =>
+  hasBalance.value
+    ? Number(currentBatch.value?.billAmount ?? 0) - Number(unclaimedAmount.value)
+    : 0
+)
+
+/** 账对不对得平。结论只由笔数决定，金额陈列在旁边供核对 */
+const isBalanced = computed(() => hasBalance.value && unclaimedCount.value === 0)
 
 const diffs = ref([])
 const diffsLoading = ref(false)
@@ -842,6 +888,58 @@ onMounted(() => {
           >
             下载原文件
           </button>
+        </div>
+
+        <!--
+          总账摆在最前面：月底打开一个批次，第一个要回答的是「钱少没少」，
+          而不是「这 30 笔分别是谁付的」。对平了就不必往下翻 —— 下面的逐笔差异
+          永远有杂音（OCR 读错、顾客跨月才付款），拿它们判断账平不平，
+          等于用人力去消化机器的误差。
+
+          hasBalance 为 false 时整块不显示：那是本次升级之前建的批次，
+          库里没有这两列。当 0 处理会显示「账已对平」，而那是个没有依据的结论。
+        -->
+        <div
+          v-if="currentBatch && hasBalance"
+          class="rec__balance"
+          :class="{ 'rec__balance--ok': isBalanced }"
+        >
+          <div class="rec__balance-head">
+            <span class="rec__balance-mark">{{ isBalanced ? '✓' : '!' }}</span>
+            <span class="rec__balance-title">
+              {{ isBalanced ? '账已对平' : `${unclaimedCount} 笔没对上 · ¥${formatMoney(unclaimedAmount)}` }}
+            </span>
+          </div>
+
+          <div class="rec__balance-rows">
+            <div class="rec__balance-row">
+              <span class="rec__balance-label">账单收款</span>
+              <span class="rec__balance-value">
+                {{ currentBatch.billCount }} 笔 · ¥{{ formatMoney(currentBatch.billAmount) }}
+              </span>
+            </div>
+            <div class="rec__balance-row">
+              <span class="rec__balance-label">已认领</span>
+              <span class="rec__balance-value">
+                {{ claimedCount }} 笔 · ¥{{ formatMoney(claimedAmount) }}
+              </span>
+            </div>
+            <div class="rec__balance-row" :class="{ 'rec__balance-row--miss': !isBalanced }">
+              <span class="rec__balance-label">未认领</span>
+              <span class="rec__balance-value">
+                {{ unclaimedCount }} 笔 · ¥{{ formatMoney(unclaimedAmount) }}
+              </span>
+            </div>
+          </div>
+
+          <p class="rec__balance-note">
+            <template v-if="isBalanced">
+              账单里每一笔钱都有凭证认领，可以按需处理剩下的逐笔差异。
+            </template>
+            <template v-else>
+              未认领 = 系统里没有一条有效凭证指着这笔钱。往下翻差异列表定位。
+            </template>
+          </p>
         </div>
 
         <div v-if="currentBatch" class="rec__summary">
@@ -1589,6 +1687,88 @@ onMounted(() => {
 .rec__download {
   width: auto;
   flex: none;
+}
+
+/* ---------- 总账（对没对平） ---------- */
+
+/*
+  用左侧色条而不是整块染色：整块染色会让下面的差异列表显得「不重要」，
+  而没对平时恰恰要往下看
+*/
+.rec__balance {
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  background: var(--c-icon-bg);
+  border-left: 3px solid var(--c-warning);
+  border-radius: var(--r-btn);
+}
+
+.rec__balance--ok {
+  border-left-color: var(--c-success);
+}
+
+.rec__balance-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+
+/* 圆形的状态标记。用色块而不是 emoji，与后台其余处的状态提示保持一致 */
+.rec__balance-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--c-warning);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rec__balance--ok .rec__balance-mark {
+  background: var(--c-success);
+}
+
+.rec__balance-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rec__balance-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rec__balance-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: 13px;
+}
+
+/* 未认领那一行加粗 —— 没对平时它是唯一需要追的数 */
+.rec__balance-row--miss {
+  font-weight: 600;
+}
+
+.rec__balance-label {
+  color: var(--c-text-muted);
+}
+
+.rec__balance-row--miss .rec__balance-label {
+  color: inherit;
+}
+
+.rec__balance-note {
+  margin-top: var(--sp-2);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-text-muted);
 }
 
 .rec__summary {

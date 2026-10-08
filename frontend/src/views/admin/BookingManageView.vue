@@ -152,8 +152,27 @@ const form = ref({
 const formError = ref('')
 const submitting = ref(false)
 
+/**
+ * 「开始时刻已过去」的确认层。
+ *
+ * <p>后端 2026-10-04 放开了「开始时刻不能是过去」的校验 —— 排一场过去的包场
+ * 是做测试与补录的唯一途径。提示因此只剩前端这一处，也是唯一还能拦住手滑的地方。
+ *
+ * <p>{@code pastAcknowledged} 记住「本次表单已经确认过一次」：
+ * 少了它，管理员每点一次「确定」都会被再拦一次（同一场表单确认一次就够）。
+ */
+const pastWarning = ref(false)
+let pastAcknowledged = false
+
 /** 弹层里的第二层「视图」：选包场人。⚠️ 换内容而不是再叠一个弹层 */
 const pickingHost = ref(false)
+
+/** 弹层标题：三个视图各有各的说法，抽出来免得模板里套三层三元。 */
+const formSheetTitle = computed(() => {
+  if (pickingHost.value) return '选择包场人'
+  if (pastWarning.value) return '开始时刻已过去'
+  return editing.value ? '包场改期' : '包场排期'
+})
 
 /* ---------------- 包场人选择器 ---------------- */
 
@@ -173,9 +192,6 @@ const revoking = ref(null)
 /** 选中的退款方式：MANUAL / ONLINE */
 const refundMode = ref('ONLINE')
 const revokeError = ref('')
-
-/** 日期选择框的最早可选值：今天。同一天里过了钟点的情况交给后端判（40911），前端不重算一遍。 */
-const todayInput = computed(() => formatDate(formatDateTime(new Date())))
 
 /*
  * 「日期 + 整点小时」拼成后端时刻串的 fromDateTimeHour 已提到 utils/format.js
@@ -359,7 +375,7 @@ function onPageChange(target) {
 /** 打开「新建」表单。 */
 function openCreate() {
   editing.value = null
-  // 日期预填明天：今天的那几档多半已经开始了，预填未来一天能少一次 40911
+  // 日期预填明天：今天的那几档多半已经开始了，预填未来一天能少一次确认（见 pastWarning）
   const tomorrow = formatDate(formatDateTime(new Date(Date.now() + DAY_MS)))
   form.value = {
     hostUserId: null,
@@ -376,6 +392,9 @@ function openCreate() {
   }
   formError.value = ''
   pickingHost.value = false
+  // 新开一次表单 = 重新问一次：上一次的确认不作数
+  pastAcknowledged = false
+  pastWarning.value = false
   formVisible.value = true
 }
 
@@ -405,6 +424,9 @@ function openEdit(row) {
   }
   formError.value = ''
   pickingHost.value = false
+  // 同新建：换一场表单就重新问一次
+  pastAcknowledged = false
+  pastWarning.value = false
   formVisible.value = true
 }
 
@@ -460,6 +482,11 @@ async function submit() {
     formError.value = '请选择包场人'
     return
   }
+  // 开始时刻已经过去 → 先弹确认（后端已放开这条限制，见 pastWarning 的注释）
+  if (!pastAcknowledged && parseDateTime(range.startAt) < new Date()) {
+    pastWarning.value = true
+    return
+  }
 
   submitting.value = true
   formError.value = ''
@@ -475,12 +502,24 @@ async function submit() {
     formVisible.value = false
     await load()
   } catch (err) {
-    // 时段冲突（40912）、与停业重叠（40913）、开始时刻在过去（40911）都从这里出来，
+    // 时段冲突（40912）、与停业重叠（40913）从这里出来，
     // 文案由后端给，前端不做二次解释
     formError.value = errorMessage(err, '保存失败')
   } finally {
     submitting.value = false
   }
+}
+
+/**
+ * 「开始时刻已过去」确认后继续提交。
+ *
+ * <p>把确认标志立起来再走同一条 submit 路径 —— 不为「已确认」另开一条提交分支，
+ * 那样两条路迟早分叉（某天改了请求体，只改了一处）。
+ */
+function confirmPastAndSubmit() {
+  pastAcknowledged = true
+  pastWarning.value = false
+  submit()
 }
 
 /**
@@ -631,10 +670,10 @@ onMounted(load)
     <!-- 新建 / 改期 -->
     <AdminSheet
       v-model:visible="formVisible"
-      :title="pickingHost ? '选择包场人' : editing ? '包场改期' : '包场排期'"
-      :error="pickingHost ? '' : formError"
+      :title="formSheetTitle"
+      :error="pickingHost || pastWarning ? '' : formError"
     >
-      <!-- 视图二：选包场人。同一层弹层里换内容，不再叠一个弹层 -->
+      <!-- 视图一：选包场人。同一层弹层里换内容，不再叠一个弹层 -->
       <template v-if="pickingHost">
         <div class="booking__search">
           <input
@@ -668,7 +707,20 @@ onMounted(load)
         </div>
       </template>
 
-      <!-- 视图一：排期表单 -->
+      <!--
+        视图二：「开始时刻已过去」的确认。后端已放开那条限制（排过去的场次
+        是做测试与补录的唯一途径），提示只剩这一处 —— 它不是为了拦住谁，
+        而是为了让人知道自己在做什么。确认后仍走同一条提交路径（见 confirmPastAndSubmit）。
+      -->
+      <template v-else-if="pastWarning">
+        <p class="booking__confirm">这场包场的开始时刻已经过去。仍要创建吗？</p>
+        <p class="booking__hint">
+          已经结束的场次不会出现在用户端的时间表里；仍在进行中的会照常生效
+          （占用时段、影响准入）。
+        </p>
+      </template>
+
+      <!-- 视图三：排期表单 -->
       <template v-else>
         <div class="field">
           <label class="field-label">包场人</label>
@@ -706,7 +758,6 @@ onMounted(load)
             v-model="form.date"
             class="field-input"
             type="date"
-            :min="editing ? undefined : todayInput"
           />
         </div>
 
@@ -724,7 +775,6 @@ onMounted(load)
                 v-model="form.startDate"
                 class="field-input booking__date"
                 type="date"
-                :min="editing ? undefined : todayInput"
               />
               <input
                 v-model="form.startHour"
@@ -783,6 +833,12 @@ onMounted(load)
       <template #footer>
         <template v-if="pickingHost">
           <button class="btn btn-ghost" @click="pickingHost = false">返回</button>
+        </template>
+        <template v-else-if="pastWarning">
+          <button class="btn btn-ghost" @click="pastWarning = false">返回修改</button>
+          <button class="btn btn-primary" :disabled="submitting" @click="confirmPastAndSubmit">
+            仍然创建
+          </button>
         </template>
         <template v-else>
           <button class="btn btn-ghost" @click="formVisible = false">取消</button>

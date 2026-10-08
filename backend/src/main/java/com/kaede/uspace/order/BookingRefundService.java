@@ -4,11 +4,13 @@ import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.dto.RefundCommand;
 import com.kaede.uspace.order.dto.RefundResult;
+import com.kaede.uspace.order.event.BookingRevokedEvent;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -51,9 +53,21 @@ public class BookingRefundService {
     private final BookingMapper bookingMapper;
     private final PaymentGateway paymentGateway;
 
-    public BookingRefundService(BookingMapper bookingMapper, PaymentGateway paymentGateway) {
+    /**
+     * 发布「包场已撤销」事件，由 {@code qqbot} 监听后播报到群。
+     *
+     * <p>⚠️ {@link #revoke} <b>没有 {@code @Transactional}</b>（占位靠 SQL 的状态守卫
+     * 保证并发安全，不靠事务锁），所以这里发布的事件走的是「事务外发布」那条路 ——
+     * {@code qqbot} 侧的监听器为此特意带了 {@code fallbackExecution = true}，
+     * 少了它事件会被静默丢弃。
+     */
+    private final ApplicationEventPublisher eventPublisher;
+
+    public BookingRefundService(BookingMapper bookingMapper, PaymentGateway paymentGateway,
+                                ApplicationEventPublisher eventPublisher) {
         this.bookingMapper = bookingMapper;
         this.paymentGateway = paymentGateway;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -138,7 +152,29 @@ public class BookingRefundService {
                     booking.getBookingNo(), booking.getPrice(), adminId);
         }
 
+        // 退款（或人工登记）确实成功之后才播 —— 上面那条 return fail 的回滚路径
+        // 刻意不播：那次撤销没有成功，包场仍是已付款状态，群里的「已安排包场」依然有效
+        publishRevoked(booking);
+
         return BizResult.ok(BookingVo.from(bookingMapper.selectById(bookingId)));
+    }
+
+    /**
+     * 发布「包场已撤销」事件（{@code qqbot} 监听后播报到群）。
+     *
+     * <p><b>异常自己吞掉。</b>播报是次要功能，一次发布失败不该让撤销操作
+     * 报错回滚 —— 钱已经退回去了，那才是这件事的主体。
+     *
+     * @param booking 撤销成功的那场包场（撤销后不可改期，这里拿到的时段就是最终时段）
+     */
+    private void publishRevoked(Booking booking) {
+        try {
+            eventPublisher.publishEvent(new BookingRevokedEvent(
+                    booking.getId(), booking.getBookingNo(),
+                    booking.getStartAt(), booking.getEndAt()));
+        } catch (RuntimeException e) {
+            log.warn("[退款] 发布包场撤销事件失败，跳过群播报 bookingNo={}", booking.getBookingNo(), e);
+        }
     }
 
     /**

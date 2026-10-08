@@ -5,17 +5,21 @@ import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.order.dto.ProofImageVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
+import com.kaede.uspace.order.dto.RejectedProofVo;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.util.List;
 
 /**
  * 付款凭证接口（模块 8 的支付能力）。
@@ -89,5 +93,24 @@ public class PaymentProofController {
     public ResponseEntity<ApiResult<ProofImageVo>> uploadImage(
             @RequestParam(value = "file", required = false) MultipartFile file) {
         return ApiResult.of(imageService.upload(file));
+    }
+
+    /**
+     * 查我被驳回的付款凭证。
+     *
+     * <p><b>补的是「先交付后复核」的缺口</b>：订单与商品提交即落账，
+     * 管理员事后驳回不回退订单状态，所以用户端看到的仍是「已支付」——
+     * 首页那条提醒与订单详情的标记都读这个接口。
+     *
+     * <p>一条都没有时返回<b>空列表而不是 404</b>：首页每次加载都会调它，
+     * 「没有待处理的事」是最常见的正常状态，不该在浏览器控制台留下一片红。
+     *
+     * @param me 当前登录用户
+     * @return 被驳回的凭证列表，可能为空
+     */
+    @GetMapping("/rejected")
+    public ResponseEntity<ApiResult<List<RejectedProofVo>>> listRejected(
+            @AuthenticationPrincipal UserPrincipal me) {
+        return ApiResult.of(paymentProofService.listRejected(me.id()));
     }
 }

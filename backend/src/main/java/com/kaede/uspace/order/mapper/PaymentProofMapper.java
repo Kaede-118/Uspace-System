@@ -192,6 +192,32 @@ public interface PaymentProofMapper extends BaseMapper<PaymentProof> {
     int reject(@Param("id") Long id, @Param("adminId") Long adminId,
                @Param("reason") String reason);
 
+    /**
+     * 查某个用户被驳回的凭证 —— 用户端「你有一笔凭证没过」的提醒来源。
+     *
+     * <p>这条查询补的是「先交付后复核」那道缺口：订单与商品在<b>提交那一刻</b>
+     * 就落账了，管理员事后驳回只改凭证结论、<b>不回退订单状态</b>，
+     * 所以用户端看到的仍是「已支付」。少了这条查询，那个结论就永远
+     * 到不了用户那里，复核环节等于白设。
+     *
+     * <p><b>「被驳回且尚未重交」不需要额外判断</b>：重交走的是
+     * {@link #upsert}，会把状态翻回 {@code SUBMITTED} 并清掉驳回原因，
+     * 所以 {@code verify_status = 'REJECTED'} 本身就意味着「还等着他处理」。
+     *
+     * <p>按驳回时刻倒序，新的在前 —— 与后台列表同一条道理：先处理刚发生的那笔。
+     *
+     * @param userId 用户 ID
+     * @return 被驳回的凭证，可能为空
+     */
+    @Select("""
+            SELECT *
+              FROM biz_payment_proof
+             WHERE user_id = #{userId}
+               AND verify_status = 'REJECTED'
+             ORDER BY confirmed_at DESC, id DESC
+            """)
+    List<PaymentProof> selectRejectedByUser(@Param("userId") Long userId);
+
     // ==================================================================
     // 流水号重复检测
     // ==================================================================

@@ -18,6 +18,7 @@ import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.product.ProductService;
 import com.kaede.uspace.product.dto.ProductVo;
 import com.kaede.uspace.promotion.MonthlyCardService;
+import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.qqbot.protocol.OneBotEvent;
 import com.kaede.uspace.space.BookingService;
@@ -216,6 +217,7 @@ public class QqCommandService {
             case CURRENT_ORDER -> replyNow(groupId, event.getUserId());
             case STORE_STATUS -> replyStoreStatus(groupId);
             case PRICE -> replyPrice(groupId);
+            case CARD_TYPES -> replyCardTypes(groupId);
             case WEB -> replyWeb(groupId);
             case PRODUCT_MENU -> replyMenu(groupId);
             case PRODUCT_ORDER -> writeCommandService.orderProduct(
@@ -466,13 +468,36 @@ public class QqCommandService {
     }
 
     /**
+     * 回复月卡说明：有哪几种卡、各多少钱、覆盖什么时段。
+     *
+     * <p><b>与 {@code /价格} 分开是刻意的</b>：那条讲「按时长怎么算钱」，
+     * 这条讲「包月怎么买」—— 两笔账的算法完全不同，塞进一条消息里两边都说不清。
+     *
+     * <p>数据源是 {@link MonthlyCardService#cardTypes()}（与用户端月卡页同一个方法），
+     * 价格与有效期都取自配置，调价后群里立刻跟着变。
+     *
+     * @param groupId 目标群号
+     */
+    private void replyCardTypes(Long groupId) {
+        BizResult<List<CardTypeVo>> result = monthlyCardService.cardTypes();
+        if (!result.isSuccess() || result.getData() == null) {
+            log.error("[QQ机器人] 查月卡卡种失败：{}",
+                    result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
+            client.sendGroupMessage(groupId, "查不到月卡信息，稍后再试");
+            return;
+        }
+        client.sendGroupMessage(groupId, QqReplyText.cardTypes(
+                result.getData(), baseUrl() + "/#/cards"));
+    }
+
+    /**
      * 回复商城菜单：店里卖的东西与价格。
      *
      * <p>数据源是 {@link ProductService#listOnSale()} —— 与用户端商城页<b>同一个方法</b>，
      * 所以群里报的价与网页上看到的必然一致，不会出现「群里说 3 块、下单变 5 块」。
      *
-     * <p>菜单只报价格与售罄，<b>下单仍然只在网页端</b> —— 买商品要扣库存、要付款，
-     * 那条链路走的是模块 8 的统一支付入口，与房间时长计费是两套账。
+     * <p>菜单报价格与库存（可售量），<b>下单仍然只在网页端</b> —— 买商品要扣库存、
+     * 要付款，那条链路走的是模块 8 的统一支付入口，与房间时长计费是两套账。
      *
      * @param groupId 目标群号
      */
@@ -509,20 +534,16 @@ public class QqCommandService {
     }
 
     /**
-     * 取站点基地址并去掉末尾斜杠。
+     * 取站点基地址。
      *
-     * <p>与 {@code QqWriteCommandService} 里那个是同一份三行逻辑（那是第二处出现，
-     * 按项目惯例到第三处再抽）。配置为空时退化成站内相对路径 —— 链接点不开，
-     * 但至少不会拼出一串 {@code null/...}。
+     * <p>逻辑已上收到 {@code WebProperties#normalizedBaseUrl} ——
+     * 本类与 {@code QqWriteCommandService} 各写一份，加上后来要发提醒的
+     * {@code QqBroadcastListener} 正好是第三处，按项目惯例该合了。
      *
      * @return 形如 {@code https://xxx.com}；没配置时返回空串
      */
     private String baseUrl() {
-        String url = webProperties.getBaseUrl();
-        if (url == null || url.isBlank()) {
-            return "";
-        }
-        return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+        return webProperties.normalizedBaseUrl();
     }
 
     /**

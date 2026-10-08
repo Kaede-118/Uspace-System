@@ -377,6 +377,90 @@ class ReconcileMatcherTests {
     }
 
     // ==================================================================
+    // 总账：未认领的笔数与金额
+    // ==================================================================
+
+    @Test
+    @DisplayName("账单里每一笔都有凭证认领 → 未认领为 0，这就是「对平」")
+    void unclaimed_allClaimedIsZero() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00"), bill(NO_B, "12.00")),
+                List.of(proof(1L, NO_A, "8.00", PaymentProofStatus.SUBMITTED.name(), null),
+                        proof(2L, NO_B, "12.00", PaymentProofStatus.SUBMITTED.name(), null)));
+
+        assertEquals(0, plan.billUnclaimedCount(), "两笔都有凭证指着，账是平的");
+        assertEquals(0, BigDecimal.ZERO.compareTo(plan.billUnclaimedAmount()),
+                "笔数为 0 时金额也必须是 0 —— 两者不一致的话，页面上会出现「0 笔 / 差 8 元」");
+    }
+
+    @Test
+    @DisplayName("账单里有、系统里一条凭证都没有 → 计入未认领")
+    void unclaimed_billOnlyCounts() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00"), bill(NO_B, "12.00")),
+                List.of(proof(1L, NO_A, "8.00", PaymentProofStatus.SUBMITTED.name(), null)));
+
+        assertEquals(1, plan.billUnclaimedCount());
+        assertEquals(0, new BigDecimal("12.00").compareTo(plan.billUnclaimedAmount()),
+                "金额要按笔累加 —— 只记笔数的话，总账答不了「到底少了多少钱」");
+    }
+
+    @Test
+    @DisplayName("凭证被驳回后有款 → 同样计入未认领")
+    void unclaimed_rejectedInBillCounts() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00")),
+                List.of(proof(1L, NO_A, "8.00", PaymentProofStatus.REJECTED.name(), null)));
+
+        assertEquals(1, plan.billUnclaimedCount(),
+                "驳回意味着系统当前的结论是「这笔不该收」，所以账面上它就是没到。"
+                        + "这一支漏计的话，最紧急的一类差异会被总账悄悄说成「对平了」");
+        assertEquals(0, new BigDecimal("8.00").compareTo(plan.billUnclaimedAmount()));
+    }
+
+    @Test
+    @DisplayName("金额不符 → 不算未认领，但差异照报")
+    void unclaimed_amountMismatchDoesNotCount() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00")),
+                List.of(proof(1L, NO_A, "12.00", PaymentProofStatus.SUBMITTED.name(), null)));
+
+        assertEquals(0, plan.billUnclaimedCount(),
+                "钱确实到了、也有凭证指着它，只是数字对不上。记成「未认领」会把"
+                        + "「差 4 元」说成「有 8 元没收到」，而管理员会据此去找一笔并不存在的账");
+        assertEquals(0, BigDecimal.ZERO.compareTo(plan.billUnclaimedAmount()));
+        assertEquals(1, plan.diffs().size(), "不算未认领不等于不报 —— 它仍然进差异列表");
+    }
+
+    @Test
+    @DisplayName("一单多认领 → 不算未认领")
+    void unclaimed_duplicateClaimDoesNotCount() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00")),
+                List.of(proof(1L, NO_A, "8.00", PaymentProofStatus.SUBMITTED.name(), null),
+                        proof(2L, NO_A, "8.00", PaymentProofStatus.SUBMITTED.name(), null)));
+
+        assertEquals(0, plan.billUnclaimedCount(),
+                "钱收到了，只是有两条凭证抢它 —— 那是归属的疑点，不是「这笔钱没到」");
+        assertEquals(0, BigDecimal.ZERO.compareTo(plan.billUnclaimedAmount()));
+    }
+
+    @Test
+    @DisplayName("重传同一份账单 → 已被之前批次认领的不算未认领")
+    void unclaimed_skippedOnReuploadDoesNotCount() {
+        ReconcilePlan plan = ReconcileMatcher.match(
+                List.of(bill(NO_A, "8.00")),
+                List.of(proof(1L, NO_A, "8.00", PaymentProofStatus.SUBMITTED.name(), 999L)));
+
+        assertEquals(1, plan.billSkipped(), "上一批已经对走了");
+        assertEquals(0, plan.billUnclaimedCount(),
+                "**这是本次改动存在的理由**：跳过的那笔钱在上一个批次里就对上了。"
+                        + "把它算进未认领的话，重传一次就会报出一笔并不存在的差额 —— "
+                        + "而「bill_amount − matched_amount」那种现算方式正是这么错的");
+        assertEquals(0, BigDecimal.ZERO.compareTo(plan.billUnclaimedAmount()));
+    }
+
+    // ==================================================================
     // 测试数据构造
     // ==================================================================
 

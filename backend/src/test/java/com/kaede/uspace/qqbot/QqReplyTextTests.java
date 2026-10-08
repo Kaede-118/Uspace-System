@@ -3,7 +3,9 @@ package com.kaede.uspace.qqbot;
 import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.BillingRulesVo;
+import com.kaede.uspace.billing.event.FreePeriodChangeAction;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.notice.NoticePublishMode;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.dto.InstoreUserVo;
 import com.kaede.uspace.order.dto.MonthSpentVo;
@@ -11,8 +13,11 @@ import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.product.dto.ProductOrderVo;
+import com.kaede.uspace.product.dto.ProductVo;
+import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
+import com.kaede.uspace.space.event.ClosureChangeAction;
 import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -38,6 +43,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 一条「封顶 4E+1 元」会一直躺在群里，直到有人翻聊天记录时才发现。
  */
 class QqReplyTextTests {
+
+    // ==================================================================
+    // 凭证被驳回的提醒
+    // ==================================================================
+
+    @Test
+    @DisplayName("凭证驳回提醒：带上原因与入口，且开头留一个空格给 @ 段")
+    void proofRejected_carriesReasonAndLink() {
+        String text = QqReplyText.proofRejected("截图看不清金额", "http://host/#/orders");
+
+        assertTrue(text.contains("截图看不清金额"),
+                "原因是管理员写给顾客看的那句话，必须原样出现 —— 少了它用户不知道该改什么");
+        assertTrue(text.contains("http://host/#/orders"), "要给一个点得进去的入口");
+        assertTrue(text.startsWith(" "),
+                "开头那个空格是给 @ 段留的：不留的话群里会显示成"
+                        + "「@张三你的付款凭证……」两截挤在一起");
+    }
+
+    @Test
+    @DisplayName("凭证驳回提醒：引导用户重新上传")
+    void proofRejected_guidesResubmit() {
+        String text = QqReplyText.proofRejected("金额对不上", "http://host/#/orders");
+
+        assertTrue(text.contains("重新上传"),
+                "驳回会把订单退回待支付，用户可以自助重交 —— 提醒里就要说清楚该做什么。"
+                        + "（这条用例 2026-10-04 翻过一次：在此之前系统对「已支付 + 已驳回」"
+                        + "明确拒绝重交，文案只能写「点这里看看」，因为喊了也做不到）");
+    }
 
     // ==================================================================
     // 时长格式化
@@ -195,6 +228,170 @@ class QqReplyTextTests {
     }
 
     // ==================================================================
+    // 包场与公告的群播报（新增包场 / 发布公告时主动推的那两条）
+    // ==================================================================
+
+    @Test
+    @DisplayName("包场播报：日期用相对说法，时段写法与 /包场 指令逐字一致")
+    void bookingActivated_usesScheduleFormat() {
+        String text = QqReplyText.bookingActivated(
+                LocalDateTime.of(2026, 10, 5, 14, 0),
+                LocalDateTime.of(2026, 10, 5, 18, 0),
+                LocalDate.of(2026, 10, 4));
+
+        assertEquals("📅 已安排包场：明天 14:00 – 18:00，该时段仅限包场人与被邀请者入场。", text,
+                "与 /包场 指令同一套日期与时刻写法 —— 两处不一致的话，"
+                        + "同一场包场在群里会有两种说法");
+    }
+
+    @Test
+    @DisplayName("包场播报：不带金额、不带包场人")
+    void bookingActivated_noAmountNoHost() {
+        String text = QqReplyText.bookingActivated(
+                LocalDateTime.of(2026, 10, 4, 14, 0),
+                LocalDateTime.of(2026, 10, 4, 18, 0),
+                LocalDate.of(2026, 10, 4));
+
+        assertTrue(text.contains("今天 14:00 – 18:00"), text);
+        assertFalse(text.contains("¥"),
+                "群消息所有人可见，这场收了多少钱属经营信息，只进店主群：" + text);
+    }
+
+    @Test
+    @DisplayName("商品购买播报：昵称、商品名、数量与剩余量都在")
+    void productPurchased_carriesQuantityAndStock() {
+        String text = QqReplyText.productPurchased("Kaede", "魔爪", 2, 3);
+
+        assertTrue(text.contains("Kaede"), text);
+        assertTrue(text.contains("魔爪"), text);
+        assertTrue(text.contains("×2"), "只报商品名的话群里看不出买了几件：" + text);
+        assertTrue(text.contains("还剩 3"), "「还剩多少」报的是可售量，与商城页、/菜单 同一口径：" + text);
+        assertFalse(text.contains("¥"), "这条对所有群播同一份文本，金额不进群：" + text);
+    }
+
+    @Test
+    @DisplayName("商品购买播报：查不到剩余量时降级为不带「还剩」的一版")
+    void productPurchased_withoutStockDegrades() {
+        String text = QqReplyText.productPurchased("Kaede", "魔爪", 1, null);
+
+        assertTrue(text.contains("魔爪"), text);
+        assertFalse(text.contains("还剩"),
+                "查不到就如实不说 —— 编一个数出来，群里没人分得清真假：" + text);
+    }
+
+    @Test
+    @DisplayName("商品购买播报：数量为 null 时按 1 件说，不能印出 ×null")
+    void productPurchased_nullQuantityFallsBackToOne() {
+        String text = QqReplyText.productPurchased("Kaede", "魔爪", null, 3);
+
+        assertTrue(text.contains("×1"), text);
+        assertFalse(text.contains("null"), "「×null」会直接发到群里，而没有任何地方会报错：" + text);
+    }
+
+    @Test
+    @DisplayName("停业播报：新增带原因与时段，日期写法与包场播报一致")
+    void closureChanged_createdCarriesReason() {
+        String text = QqReplyText.closureChanged(ClosureChangeAction.CREATED,
+                LocalDateTime.of(2026, 10, 5, 10, 0),
+                LocalDateTime.of(2026, 10, 5, 14, 0),
+                "设备维护", LocalDate.of(2026, 10, 4));
+
+        assertEquals("🚧 门店停业安排：明天 10:00 – 14:00（设备维护），该时段不接待新顾客。", text);
+    }
+
+    @Test
+    @DisplayName("停业播报：撤销带原时段、不重复原因 —— 撤的是哪一段要认得出")
+    void closureChanged_deletedCarriesRange() {
+        String text = QqReplyText.closureChanged(ClosureChangeAction.DELETED,
+                LocalDateTime.of(2026, 10, 5, 10, 0),
+                LocalDateTime.of(2026, 10, 5, 14, 0),
+                "设备维护", LocalDate.of(2026, 10, 4));
+
+        assertEquals("🚧 停业安排已撤销：明天 10:00 – 14:00，该时段恢复正常接待。", text);
+    }
+
+    @Test
+    @DisplayName("免费活动播报：没填名称时不印出空括号")
+    void freePeriodChanged_createdWithoutReason() {
+        String text = QqReplyText.freePeriodChanged(FreePeriodChangeAction.CREATED,
+                LocalDateTime.of(2026, 10, 5, 20, 0),
+                LocalDateTime.of(2026, 10, 5, 22, 0),
+                null, LocalDate.of(2026, 10, 4));
+
+        assertEquals("🎉 免费活动：明天 20:00 – 22:00，该时段内消费全免。", text,
+                "名称是选填的，没填时不能印出「（）」—— 那像是系统出了错");
+    }
+
+    @Test
+    @DisplayName("免费活动播报：撤销明说「恢复按时长计费」")
+    void freePeriodChanged_deleted() {
+        String text = QqReplyText.freePeriodChanged(FreePeriodChangeAction.DELETED,
+                LocalDateTime.of(2026, 10, 5, 20, 0),
+                LocalDateTime.of(2026, 10, 5, 22, 0),
+                "周年庆", LocalDate.of(2026, 10, 4));
+
+        assertEquals("🎉 免费活动已撤销：明天 20:00 – 22:00，该时段恢复按时长计费。", text);
+    }
+
+    @Test
+    @DisplayName("包场撤销播报：时段写法与「已安排包场」逐字同一套")
+    void bookingRevoked_matchesScheduleFormat() {
+        String text = QqReplyText.bookingRevoked(
+                LocalDateTime.of(2026, 10, 5, 14, 0),
+                LocalDateTime.of(2026, 10, 5, 18, 0),
+                LocalDate.of(2026, 10, 4));
+
+        assertEquals("📅 包场已撤销：明天 14:00 – 18:00，该时段恢复开放。", text,
+                "要与几天前那条生效消息对得上，否则读不出这两条说的是同一场包场");
+    }
+
+    @Test
+    @DisplayName("公告播报：手写公告带正文与详情链接")
+    void noticePublished_manualCarriesContentAndLink() {
+        String text = QqReplyText.noticePublished(NoticePublishMode.MANUAL,
+                "本周六场地维护", "10:00–14:00 暂停营业", "http://host/#/notices");
+
+        assertEquals("📢 门店公告：本周六场地维护\n10:00–14:00 暂停营业\n详情 → http://host/#/notices",
+                text);
+    }
+
+    @Test
+    @DisplayName("公告播报：手写公告没填正文时只发标题与链接")
+    void noticePublished_manualWithoutContent() {
+        String text = QqReplyText.noticePublished(NoticePublishMode.MANUAL,
+                "仅标题", null, "http://host/#/notices");
+
+        assertEquals("📢 门店公告：仅标题\n详情 → http://host/#/notices", text,
+                "正文是选填的，没填时不该留一个空行");
+    }
+
+    @Test
+    @DisplayName("公告播报：自动公告只发标题 —— 标题本身已是完整的事件描述")
+    void noticePublished_autoIsTitleOnly() {
+        String text = QqReplyText.noticePublished(NoticePublishMode.AUTO,
+                "拍拍机 1 号 由 良好 转为 维护中", null, "http://host/#/notices");
+
+        assertEquals("📢 拍拍机 1 号 由 良好 转为 维护中", text);
+        assertFalse(text.contains("详情"),
+                "自动公告没有正文，点进去也只是列表页，链接是多余的：" + text);
+    }
+
+    @Test
+    @DisplayName("公告播报：长正文压成一行并截断到 60 字")
+    void noticePublished_flattensAndTruncates() {
+        String content = "一".repeat(30) + "\n" + "二".repeat(40);
+
+        String text = QqReplyText.noticePublished(NoticePublishMode.MANUAL,
+                "标题", content, "http://host/#/notices");
+
+        String expectedBody = "一".repeat(30) + " " + "二".repeat(29) + "…";
+        assertTrue(text.contains(expectedBody),
+                "换行压成空格、按字符截到 60 字再加省略号 —— 按字节截会切出半个汉字"
+                        + "（群里显示成乱码方块），不压平则一条播报铺满整屏：" + text);
+        assertFalse(text.contains("\n\n"), "不该在群里铺成多行：" + text);
+    }
+
+    // ==================================================================
     // 价格
     // ==================================================================
 
@@ -207,6 +404,79 @@ class QqReplyTextTests {
         assertTrue(text.contains("元/小时"), text);
         assertTrue(text.contains("封顶"), text);
         assertTrue(text.contains("分钟免费"), text);
+    }
+
+    // ==================================================================
+    // 商城菜单
+    // ==================================================================
+
+    @Test
+    @DisplayName("菜单：报可售量（不是实际库存），卖完显示余 0")
+    void menu_listsAvailableStockAndSoldOut() {
+        ProductVo water = new ProductVo();
+        water.setName("矿泉水");
+        water.setPrice(new BigDecimal("2.00"));
+        water.setStock(20);
+        water.setAvailableStock(18);   // 有两件被未支付的单子占着
+        water.setSoldOut(false);
+
+        ProductVo chips = new ProductVo();
+        chips.setName("薯片");
+        chips.setPrice(new BigDecimal("5.00"));
+        chips.setStock(0);
+        chips.setAvailableStock(0);
+        chips.setSoldOut(true);
+
+        String text = QqReplyText.menu(List.of(water, chips), "http://x/#/mall");
+
+        assertTrue(text.contains("矿泉水 --- ¥2.00 -- 余（18）"),
+                "报的是可售量（18）而不是实际库存（20）—— 与下单校验同一口径，"
+                        + "否则会出现「群里说还剩 20 件、下单却说卖完了」：" + text);
+        assertTrue(text.contains("薯片 --- ¥5.00 -- 余（0）"),
+                "卖完就是余（0），不另起一个「售罄」的说法：" + text);
+        assertTrue(text.contains("共 2 种"), text);
+        assertTrue(text.contains("http://x/#/mall"), "要给下单入口：" + text);
+    }
+
+    @Test
+    @DisplayName("菜单：没有上架商品时回一句人话")
+    void menu_saysSoWhenEmpty() {
+        assertEquals("店里暂时没有上架的商品。",
+                QqReplyText.menu(List.of(), "http://x/#/mall"));
+    }
+
+    // ==================================================================
+    // 月卡说明
+    // ==================================================================
+
+    @Test
+    @DisplayName("月卡：报卡种、价格与覆盖时段，价格保留两位")
+    void cardTypes_listsTypesAndPrices() {
+        CardTypeVo allDay = new CardTypeVo();
+        allDay.setLabel("全天月卡");
+        allDay.setPrice(new BigDecimal("600.00"));
+        allDay.setPeriodText("不限时段");
+        allDay.setValidDays(30);
+
+        CardTypeVo night = new CardTypeVo();
+        night.setLabel("夜间月卡");
+        night.setPrice(new BigDecimal("320.00"));
+        night.setPeriodText("22:00 – 次日 10:00");
+        night.setValidDays(30);
+
+        String text = QqReplyText.cardTypes(List.of(allDay, night), "http://x/#/cards");
+
+        assertTrue(text.contains("月卡（有效期 30 天）"), "有效期从数据里来，不写死：" + text);
+        assertTrue(text.contains("全天月卡 --- ¥600.00 -- 不限时段"), text);
+        assertTrue(text.contains("夜间月卡 --- ¥320.00 -- 22:00 – 次日 10:00"), text);
+        assertTrue(text.contains("http://x/#/cards"), "要给出买卡入口：" + text);
+    }
+
+    @Test
+    @DisplayName("月卡：没有在售卡种时回一句人话")
+    void cardTypes_saysSoWhenEmpty() {
+        assertEquals("月卡暂时没有开放售卖，问一下店主吧。",
+                QqReplyText.cardTypes(List.of(), "http://x/#/cards"));
     }
 
     // ==================================================================
@@ -228,6 +498,18 @@ class QqReplyTextTests {
         assertFalse(readOnly.contains("/结账"));
         assertFalse(readOnly.contains("/买个"), "商品下单也是写指令，同样要藏起来");
         assertTrue(readOnly.contains("/在店"), "只读指令照常列出");
+    }
+
+    @Test
+    @DisplayName("帮助：按「你想干什么」分组，四段标题都在")
+    void help_isGroupedByPurpose() {
+        String text = QqReplyText.help(true);
+
+        assertTrue(text.contains("【看店里】"), "指令到十来条之后，不分组就得逐行读完才能找到要的那条：" + text);
+        assertTrue(text.contains("【我自己的】"), text);
+        assertTrue(text.contains("【常用】"), text);
+        assertTrue(text.contains("【其他】"), text);
+        assertTrue(text.contains("/月卡"), "月卡说明要列出来，否则没人知道有这条：" + text);
     }
 
     // ==================================================================

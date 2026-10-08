@@ -270,6 +270,27 @@ public class OrderService {
         //    这道校验必须在【下发密码之前】—— 放在后面就等于白白消耗一次额度。
         Order unsettled = orderMapper.selectUnsettledByUser(userId);
         if (unsettled != null) {
+            /*
+             * 三种状态三种提示，因为它们对用户的动作完全不同：
+             *   REJECTED        重新上传一张付款截图（钱多半已经付过了）
+             *   PENDING_PAYMENT 去支付
+             *   IN_USE          去点「结束使用」
+             * 合并任何一个，用户都只能对着一句模糊提示猜自己该点哪里 ——
+             * 而「凭证被驳回」误报成「未支付」，他会再付一次钱。
+             */
+            if (OrderStatus.REJECTED.name().equals(unsettled.getStatus())) {
+                /*
+                 * ⚠️ 文案里**刻意不带单号**（用 ErrorCode 里的默认那句）。
+                 *
+                 * 他名下可能同时有好几笔被驳回的，而这个提示只报得出最先查到的
+                 * 那一笔 —— 报一个单号反而像是在说「就是这一笔」。
+                 * 何况那串字符用户本来就认不出是哪一个。
+                 *
+                 * 这里要说清的只是「有这回事、你该做什么」，
+                 * 至于「是哪几笔」，首页那条提醒会逐条列给他看。
+                 */
+                return BizResult.fail(ErrorCode.ORDER_PROOF_REJECTED);
+            }
             if (OrderStatus.PENDING_PAYMENT.name().equals(unsettled.getStatus())) {
                 return BizResult.fail(ErrorCode.ORDER_UNPAID_EXISTS,
                         "你有一笔未支付的订单（" + unsettled.getOrderNo() + "），请先完成支付");

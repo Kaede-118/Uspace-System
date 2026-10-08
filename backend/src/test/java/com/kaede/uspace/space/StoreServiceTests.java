@@ -49,12 +49,13 @@ class StoreServiceTests {
     private final FakeBookingMapper bookingMapper = new FakeBookingMapper();
 
     private final ClosureService closureService =
-            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper());
+            new ClosureService(closureMapper.asMapper(), storeMapper.asMapper(), event -> { });
 
     private final BookingService bookingService = new BookingService(
             bookingMapper.asMapper(), storeMapper.asMapper(), closureService,
             new FakeSysUserMapper().asMapper(),
-            new FakeBookingParticipantMapper(bookingMapper).asMapper());
+            new FakeBookingParticipantMapper(bookingMapper).asMapper(),
+            event -> { });
 
     /** 被测服务 */
     private final StoreService storeService =

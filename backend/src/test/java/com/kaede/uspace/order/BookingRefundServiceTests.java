@@ -2,6 +2,7 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.order.event.BookingRevokedEvent;
 import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.FakeBookingMapper;
 import com.kaede.uspace.space.dto.BookingVo;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -40,11 +43,16 @@ class BookingRefundServiceTests {
     private FakePaymentGateway paymentGateway;
     private BookingRefundService service;
 
+    /** 捕获服务发布的事件，供断言使用 */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     @BeforeEach
     void setUp() {
         bookingMapper = new FakeBookingMapper();
         paymentGateway = new FakePaymentGateway();
-        service = new BookingRefundService(bookingMapper.asMapper(), paymentGateway);
+        publishedEvents.clear();
+        service = new BookingRefundService(bookingMapper.asMapper(), paymentGateway,
+                publishedEvents::add);
     }
 
     /**
@@ -115,6 +123,37 @@ class BookingRefundServiceTests {
         assertEquals(expectedRefundNo, result.getData().getRefundNo(),
                 "退款单号要落库，对账时要凭它去平台查这笔退款");
         assertEquals(expectedRefundNo, bookingMapper.get(booking.getId()).getRefundNo());
+    }
+
+    /* ---------------- 群播报 ---------------- */
+
+    @Test
+    @DisplayName("撤销成功：发布「包场已撤销」事件 —— 群里那条「已安排包场」才有了下文")
+    void revoke_publishesRevokedEvent() {
+        Booking booking = seedBooking(BookingStatus.PAID.name(), "WXPAY_JSAPI", "wx_txn_001");
+
+        assertTrue(service.revoke(booking.getId(), "MANUAL", ADMIN_ID).isSuccess());
+
+        assertEquals(1, publishedEvents.size(),
+                "撤销成功要播一条 —— 不然群里那条「已安排包场」永远过期不掉");
+        BookingRevokedEvent event = (BookingRevokedEvent) publishedEvents.get(0);
+        assertEquals(booking.getBookingNo(), event.bookingNo());
+        assertEquals(booking.getStartAt(), event.startAt(),
+                "时段要能与几天前那条生效消息对上号，否则读不出这两条说的是同一场");
+        assertEquals(booking.getEndAt(), event.endAt());
+    }
+
+    @Test
+    @DisplayName("退款失败（状态已回滚）时不发撤销事件 —— 那场包场仍然有效")
+    void revoke_doesNotPublishWhenRefundFails() {
+        Booking booking = seedBooking(BookingStatus.PAID.name(), "WXPAY_JSAPI", "wx_txn_001");
+        paymentGateway.failNextRefund("原订单超过可退款期限");
+
+        BizResult<BookingVo> result = service.revoke(booking.getId(), "ONLINE", ADMIN_ID);
+
+        assertEquals(ErrorCode.PAYMENT_GATEWAY_UNAVAILABLE, result.getError());
+        assertEquals(0, publishedEvents.size(),
+                "撤销没成，群里那条「已安排包场」依然有效 —— 播「已撤销」就是假消息");
     }
 
     @Test

@@ -254,11 +254,13 @@ export function listBookings(params = {}) {
  * <p>创建出来是 {@code PENDING_PAYMENT} —— <b>包场只做排期，收款归模块 8</b>。
  * 付款后才生成邀请令牌、才产生排他性。
  *
- * <p>⚠️ <b>开始时刻必须是将来</b>（后端校验，返回 {@code BOOKING_START_IN_PAST} 40911）——
- * 排一场已经开始的包场没有意义，邀请链接刚生成就只剩一半可用。
- * 注意这与「改期」不同：{@link updateBooking} <b>刻意不校验过去的时间</b>，
- * 把一场已经开始的场次往后挪是合理诉求。所以 {@code datetime-local} 上的
- * {@code min} 只给新建表单加，别顺手加到改期表单上。
+ * <p>⚠️ <b>开始时刻可以是过去</b>（2026-10-04 放开了后端的 40911 校验）——
+ * 排一场已经开始的包场是做测试与补录的唯一途径，而它本身不破坏任何数据。
+ * 提示交给了页面：提交时若开始时刻已过去会弹一次确认层
+ * （{@code BookingManageView} 的 pastWarning），确认后照常创建。
+ *
+ * <p>「改期」那边本就不校验过去的时间（把一场已经开始的场次往后挪是合理诉求），
+ * 两边口径现在一致，都只由同一个确认层提醒。
  *
  * @param {object} data
  * @param {number|string} data.hostUserId 包场人用户 ID
@@ -267,7 +269,7 @@ export function listBookings(params = {}) {
  * @param {number|string} data.price 包场费
  * @param {string} [data.remark] 备注
  * @returns {Promise}
- * @throws 40911 开始时刻在过去；40912 与既有包场重叠；40913 与停业区间重叠
+ * @throws 40912 与既有包场重叠；40913 与停业区间重叠
  */
 export function createBooking(data) {
   return http.post('/api/admin/bookings', data)

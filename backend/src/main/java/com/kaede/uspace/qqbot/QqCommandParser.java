@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>{@code /在店} / {@code fw在店} / {@code /instore} / {@code /rs} → {@link QqCommand.Kind#INSTORE}</li>
  *   <li>{@code /验证 123456} → {@link QqCommand.Kind#VERIFY_CODE}</li>
- *   <li>{@code /开门} / {@code /结账} / {@code /包场} / {@code /看看自己} / {@code /营业} / {@code /价格} → 各自对应</li>
+ *   <li>{@code /开门} / {@code /结账} / {@code /包场} / {@code /看看自己} / {@code /营业} / {@code /价格} / {@code /月卡} → 各自对应</li>
  *   <li>{@code /买个可乐} / {@code /买2个可乐} / {@code /可乐-2} → {@link QqCommand.Kind#PRODUCT_ORDER}</li>
  *   <li>带了前缀但认不出 → {@link QqCommand.Kind#UNKNOWN_COMMAND}</li>
  *   <li><b>没有前缀 → 一律 {@link QqCommand.Kind#IGNORE}</b></li>
@@ -65,8 +65,14 @@ public final class QqCommandParser {
      * <p>去掉前导 {@code /} 后再比较，所以集合里都是不带斜杠的形式。
      * 「看看里面」是口语化的那一个 —— 群里问「里面有人吗」比「在店」自然，
      * 而它**依然走精确匹配**，所以「看看里面那个人是谁」这种闲聊不会误触发。
+     *
+     * <p>{@code kklm} 是「看看里面」的拼音首字母（2026-10-04 由用户要求加）——
+     * 全在英文键盘上，不必切中文输入法就能发。它只在解析器里认，
+     * {@code /帮助} 不列（那边只给最好记的两三种写法）。
+     * （同日删掉了 {@code rs}：它不缩写任何中文，记不住也用不上。）
      */
-    private static final Set<String> INSTORE_ALIASES = Set.of("在店", "instore", "rs", "看看里面");
+    private static final Set<String> INSTORE_ALIASES =
+            Set.of("在店", "instore", "看看里面", "kklm");
 
     /** 同上 */
     private static final Set<String> HELP_ALIASES = Set.of("帮助", "help", "?");
@@ -127,6 +133,16 @@ public final class QqCommandParser {
      * 正是这套设计最想避免的那类失败。
      */
     private static final Set<String> PRICE_ALIASES = Set.of("价格", "价目", "price", "pricing");
+
+    /**
+     * 查月卡说明。
+     *
+     * <p>别名给 {@code pass}（月卡在英文里就是 monthly pass）与 {@code card} ——
+     * 与 {@code me} / {@code price} 这些英文别名同一风格。
+     * ⚠️ 仍靠「必须带前缀 + 整条精确匹配」两道挡住闲聊：
+     * 「我先 pass 这局」既没有前缀、整条也不相等，不会触发。
+     */
+    private static final Set<String> CARD_ALIASES = Set.of("月卡", "pass", "card");
 
     /**
      * 查商城商品与价格。
@@ -295,6 +311,9 @@ public final class QqCommandParser {
         }
         if (PRICE_ALIASES.contains(lower)) {
             return QqCommand.price();
+        }
+        if (CARD_ALIASES.contains(lower)) {
+            return QqCommand.cardTypes();
         }
         if (MENU_ALIASES.contains(lower)) {
             return QqCommand.productMenu();

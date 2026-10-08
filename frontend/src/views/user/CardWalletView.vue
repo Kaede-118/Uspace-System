@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 我的月卡。
+ * 月卡。
  *
  * <p>后端一次给出三样：{@code active}（生效中）/ {@code pending}（待支付）/ {@code history}（历史）。
  * <b>三者互不重叠</b>，按字段名分渲染即可 —— 不要自己拿状态和日期去判断某张卡该放哪边，
@@ -75,7 +75,7 @@ onMounted(load)
 
 <template>
   <div class="page">
-    <NavBar title="我的月卡" />
+    <NavBar title="月卡" />
 
     <LoadingMask :loading="loading" />
 

@@ -62,13 +62,43 @@ public interface ProductOrderMapper extends BaseMapper<ProductOrder> {
                    paid_at        = #{paidAt},
                    updated_at     = NOW()
              WHERE id = #{id}
-               AND status = 'PENDING_PAYMENT'
+               AND status IN ('PENDING_PAYMENT', 'REJECTED')
                AND deleted = 0
             """)
     int markPaid(@Param("id") Long id,
                  @Param("paymentMethod") String paymentMethod,
                  @Param("paymentNo") String paymentNo,
                  @Param("paidAt") LocalDateTime paidAt);
+
+    /**
+     * 把一笔已支付的购买单标记为「凭证未通过」（管理员驳回付款凭证）。
+     *
+     * <p>与 {@code ProductPaymentTargetHandler#revertDelivery} 配套。那条状态守卫
+     * （{@code AND status = 'PAID'}）是全部要害：两个管理员同时驳回时只有一个能改成功，
+     * 另一个拿到 0 行，调用方据此不再冲减第二次累计消费。
+     *
+     * <p>状态取 {@code REJECTED} 而不是 {@code PENDING_PAYMENT}，理由与订单那条相同
+     *（见 {@code OrderMapper#markRejected}）：后者会让「还没付钱」与
+     * 「付了但凭证没通过」混成一个状态，而两者的处置动作完全不同。
+     *
+     * <p>支付三列一并清空：一份状态是「凭证未通过」却挂着 {@code paid_at}
+     * 的单子自相矛盾。流水号并不丢，它在凭证表里留着。
+     *
+     * @param id 购买单 ID
+     * @return 受影响行数；0 表示单据不是已支付状态，或记录不存在
+     */
+    @Update("""
+            UPDATE biz_product_order
+               SET status         = 'REJECTED',
+                   payment_method = NULL,
+                   payment_no     = NULL,
+                   paid_at        = NULL,
+                   updated_at     = NOW()
+             WHERE id = #{id}
+               AND status = 'PAID'
+               AND deleted = 0
+            """)
+    int markRejected(@Param("id") Long id);
 
     /**
      * 关闭待支付的购买单（用户主动取消）。

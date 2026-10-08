@@ -2,7 +2,9 @@ package com.kaede.uspace.qqbot.protocol;
 
 import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -58,6 +60,47 @@ public class OneBotAction {
         params.put("group_id", groupId);
         params.put("message", text);
         params.put("auto_escape", true);
+
+        OneBotAction action = new OneBotAction();
+        action.setAction(ACTION_SEND_GROUP_MSG);
+        action.setParams(params);
+        action.setEcho(echo);
+        return action;
+    }
+
+    /**
+     * 构造一个「发送群消息并 @ 某人」的动作。
+     *
+     * <p><b>与纯文本重载的唯一区别是 {@code message} 传段数组而不是字符串</b> ——
+     * 这是主动 @ 人的唯一途径：{@code auto_escape=true} 会把 CQ 码转义成字面文本，
+     * 所以 {@code [CQ:at,qq=…]} 那种写法发出去只会显示成一行字符。
+     *
+     * <p>⚠️ <b>不要为了 @ 人而把 {@code auto_escape} 关掉</b>：那是上面那个重载
+     * 取 true 的全部理由 —— 播报文案里含<b>用户昵称</b>，而昵称是用户自己填的
+     * 任意文本，起名叫 {@code [CQ:at,qq=12345]} 就能让机器人替他在群里 @ 人。
+     * <b>段数组没有这个洞</b>：数组里的 text 段按定义就是纯文本，不解析 CQ 码。
+     *
+     * <p>段数组形态下<b>刻意不传 {@code auto_escape}</b>：它只对字符串形式的
+     * {@code message} 有效，传了会让人误以为这里也在转义。这里的安全性由
+     * 「用段而不是用字符串」保证，不由那个参数保证。
+     *
+     * @param groupId 群号
+     * @param atQq    要 @ 的 QQ 号；为 null 或空串时退化成只发文本
+     *                （用于「这个人没绑 QQ」的情形）
+     * @param text    @ 之后的文本，按纯文本段发送
+     * @param echo    回显串，供日志追踪
+     * @return 可直接序列化发送的动作对象
+     */
+    public static OneBotAction sendGroupMessageWithAt(Long groupId, String atQq, String text, String echo) {
+        List<OneBotMessageSegment> segments = new ArrayList<>(2);
+        if (atQq != null && !atQq.isBlank()) {
+            segments.add(OneBotMessageSegment.at(atQq));
+        }
+        segments.add(OneBotMessageSegment.text(text));
+
+        Map<String, Object> params = new HashMap<>(4);
+        params.put("group_id", groupId);
+        params.put("message", segments);
 
         OneBotAction action = new OneBotAction();
         action.setAction(ACTION_SEND_GROUP_MSG);

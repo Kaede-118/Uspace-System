@@ -133,6 +133,7 @@ public class FakeOrderMapper implements InvocationHandler {
             case "updateSettlement" -> updateSettlement(args);
             case "updateAdjustment" -> updateAdjustment(args);
             case "markPaid" -> markPaid(args);
+            case "markRejected" -> markRejected((Long) args[0]);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -429,8 +430,41 @@ public class FakeOrderMapper implements InvocationHandler {
      * @param args 依次为 id、paymentMethod、paymentNo、paidAt、confirmedBy
      * @return 受影响行数
      */
+    /**
+     * 标记为「凭证未通过」（管理员复核未通过）。
+     *
+     * <p>与 {@code markPaid} 对称，用同一个 {@code guard} 守状态。
+     * 「先查再改」在这里是安全的：假 Mapper 单线程，而真库上的并发
+     * 由 SQL 里那句 {@code WHERE status = 'PAID'} 负责 —— 两者的行为
+     * 必须一致，否则单测绿而线上会重复冲减累计消费。
+     *
+     * <p>状态取 {@code REJECTED} 而不是 {@code PENDING_PAYMENT}：后者会让
+     * 「还没付钱」与「付了但凭证没通过」混成同一个状态，两者的处置动作不同。
+     *
+     * @param id 订单 ID
+     * @return 受影响行数；状态不是已支付时为 0
+     */
+    private int markRejected(Long id) {
+        Order order = guard(id, OrderStatus.PAID.name()::equals);
+        if (order == null) {
+            return 0;
+        }
+        order.setStatus(OrderStatus.REJECTED.name());
+        order.setPaymentMethod(null);
+        order.setPaymentNo(null);
+        order.setPaidAt(null);
+        order.setConfirmedBy(null);
+        return 1;
+    }
+
     private int markPaid(Object[] args) {
-        Order order = guard((Long) args[0], OrderStatus.PENDING_PAYMENT.name()::equals);
+        // 守卫与 SQL 里那句 WHERE status IN ('PENDING_PAYMENT', 'REJECTED') 逐字对应。
+        // 少了 REJECTED 这一支，用户重传凭证之后落账会被静默挡掉 ——
+        // 提交接口返回成功，而订单还停在「凭证未通过」上（这个 bug 是被
+        // resubmitAfterRejectForOrder 逮住的）
+        Order order = guard((Long) args[0],
+                s -> OrderStatus.PENDING_PAYMENT.name().equals(s)
+                        || OrderStatus.REJECTED.name().equals(s));
         if (order == null) {
             return 0;
         }

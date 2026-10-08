@@ -1,5 +1,6 @@
 package com.kaede.uspace.order.dto;
 
+import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.PaymentTargetType;
 import lombok.Data;
 
@@ -27,6 +28,20 @@ public class PaymentTarget {
 
     /** 待支付状态名。订单与包场用的是同一个字面量 */
     public static final String STATUS_PENDING_PAYMENT = "PENDING_PAYMENT";
+
+    /**
+     * 「凭证未通过」状态名。
+     *
+     * <p>订单与商品的<b>购买单</b>都用这个字面量。包场与月卡不走这条 ——
+     * 它们提交凭证时并未交付任何东西，驳回后本来就还停在待支付上。
+     *
+     * <p>⚠️ <b>它刻意是本类的字面量，而不是某个枚举的 {@code name()}</b>：
+     * 订单与商品各有自己的状态枚举（{@code OrderStatus} / {@code ProductOrderStatus}），
+     * 那两个 {@code REJECTED} 互不相干。引用其中一个，就等于让「商品被驳回」
+     * 取决于两个枚举恰好同名 —— 而那种依赖断裂时没有任何编译错误，
+     * 表现只是「重传凭证被当成非法状态拒掉」。
+     */
+    public static final String STATUS_REJECTED = "REJECTED";
 
     /** 目标类型 */
     private PaymentTargetType type;
@@ -89,5 +104,28 @@ public class PaymentTarget {
      */
     public boolean isPendingPayment() {
         return STATUS_PENDING_PAYMENT.equals(status);
+    }
+
+    /**
+     * 是否处于「凭证未通过」状态（等待用户重新提交）。
+     *
+     * <p>只有订单会进入这个状态 —— 商品的购买单被驳回时退回的是「待支付」，
+     * 因为商品的处置动作与它一样（重新提交凭证），不必再多一个状态。
+     *
+     * <p>⚠️ <b>它刻意不算「待支付」</b>：{@code PENDING_PAYMENT} 的处置动作是
+     * 「去付款」，而这个是「重新上传一张截图」。{@code PaymentProofService#submit}
+     * 靠这个区分放不放行 —— 两者都该放行，但页面上的提示与入口完全不同，
+     * 混在一起用户会再付一次钱。
+     *
+     * <p>⚠️ <b>比较用的是本类的字面量常量，不是某个枚举的 {@code name()}</b>：
+     * 订单与商品各有自己的状态枚举（{@code OrderStatus} / {@code ProductOrderStatus}），
+     * 那两个 {@code REJECTED} 是互不相干的常量。引用其中一个，就等于让
+     * 「商品被驳回」这件事取决于两个枚举的字面量恰好同名 —— 而那种依赖一旦断裂，
+     * 表现是「商品驳回后重传凭证被当成非法状态拒掉」，不报错、也查不出原因。
+     *
+     * @return 凭证未通过返回 true
+     */
+    public boolean isRejected() {
+        return STATUS_REJECTED.equals(status);
     }
 }
