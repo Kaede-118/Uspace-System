@@ -69,6 +69,24 @@ public class OneBotMessageSegment {
     }
 
     /**
+     * 造一个图片段。
+     *
+     * <p><b>{@code file} 用 {@code base64://} 内联</b>：OneBot v11 的 image 段
+     * 认三种来源 —— {@code http(s)://}（协议端去下载）、{@code file://}（本机路径）、
+     * {@code base64://}（数据内联）。名册图是「看一眼就过期」的即时快照：
+     * 传 URL 要图床、写文件要维护清理，而它只有几十 KB —— 内联最省事，
+     * 且不引入「机器人与 NapCat 不在同一台机器」时路径失效的问题。
+     *
+     * <p>与 {@link #at} 同一条规矩：调用方保证参数有值（{@code Map.of} 不接受 null）。
+     *
+     * @param file 图片数据，如 {@code base64://iVBORw0KGgo…}
+     * @return 图片段
+     */
+    public static OneBotMessageSegment image(String file) {
+        return of(TYPE_IMAGE, Map.of("file", file));
+    }
+
+    /**
      * 造一个段。
      *
      * <p>用 {@code Map.of} 意味着 data 里的值不能为 null ——

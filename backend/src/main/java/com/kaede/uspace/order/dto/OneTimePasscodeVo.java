@@ -5,7 +5,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 一次性密码的发放结果（模块 11 的群指令 {@code /开门} 用）。
+ * 一次性密码的发放结果（模块 11 的群指令 {@code fw开门} 用）。
  *
  * <p>⚠️ <b>它只在 {@code qqbot} 包内部消费，绝不能出现在任何 Controller 的返回体里</b> ——
  * 这是本系统里唯一一处「密码可以离开服务端」的地方，而它离开的方式只有一条：

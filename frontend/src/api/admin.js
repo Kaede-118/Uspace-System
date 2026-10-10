@@ -547,6 +547,22 @@ export function updateProduct(id, data) {
 }
 
 /**
+ * 只改库存。
+ *
+ * <p>与 {@link updateProduct} 的分工：那一条是<b>全量替换</b>（改名称、调价、
+ * 换封面走它，得把整条记录带上）；这一条<b>只动库存一列</b>，其余字段一个都不碰。
+ * 补货与盘点走这条 —— 走全量替换的话要先读整条记录再原样传回，
+ * 中间若有别人改了名称就会被静默覆盖。
+ *
+ * @param {number|string} id 商品 ID
+ * @param {number} stock 新的库存值（不是增减量，0 表示售罄）
+ * @returns {Promise}
+ */
+export function updateProductStock(id, stock) {
+  return http.put(`/api/admin/products/${id}/stock`, { stock })
+}
+
+/**
  * 删商品（逻辑删除）。
  *
  * @param {number|string} id 商品 ID

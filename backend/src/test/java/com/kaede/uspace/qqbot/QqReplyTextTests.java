@@ -93,7 +93,10 @@ class QqReplyTextTests {
     @Test
     @DisplayName("名册：没有人时说一句人话，而不是空表")
     void instore_saysSoWhenEmpty() {
-        assertEquals("现在店里没人。", QqReplyText.instore(List.of(), Map.of(), 30));
+        // 只断言「有回话」，不锁具体句子 —— 措辞改了不该让这条红，
+        // 但回一句空消息（群里等于哑巴）必须红
+        assertFalse(QqReplyText.instore(List.of(), Map.of(), 30).isBlank(),
+                "没人时也要回一句话，不能返回空串");
     }
 
     @Test
@@ -203,8 +206,9 @@ class QqReplyTextTests {
     @Test
     @DisplayName("包场：没有安排时说一句人话")
     void bookingSchedule_saysSoWhenEmpty() {
-        assertEquals("近期没有包场安排，随时可以来。",
-                QqReplyText.bookingSchedule(List.of(), Duration.ofMinutes(15), LocalDate.of(2026, 10, 4)));
+        assertFalse(QqReplyText.bookingSchedule(
+                        List.of(), Duration.ofMinutes(15), LocalDate.of(2026, 10, 4)).isBlank(),
+                "没有包场时也要回一句话，不能返回空串");
     }
 
     @Test
@@ -232,16 +236,16 @@ class QqReplyTextTests {
     // ==================================================================
 
     @Test
-    @DisplayName("包场播报：日期用相对说法，时段写法与 /包场 指令逐字一致")
+    @DisplayName("包场播报：日期用相对说法，时段写法与 fw包场 指令逐字一致")
     void bookingActivated_usesScheduleFormat() {
         String text = QqReplyText.bookingActivated(
                 LocalDateTime.of(2026, 10, 5, 14, 0),
                 LocalDateTime.of(2026, 10, 5, 18, 0),
                 LocalDate.of(2026, 10, 4));
 
-        assertEquals("📅 已安排包场：明天 14:00 – 18:00，该时段仅限包场人与被邀请者入场。", text,
-                "与 /包场 指令同一套日期与时刻写法 —— 两处不一致的话，"
-                        + "同一场包场在群里会有两种说法");
+        assertTrue(text.contains("明天 14:00 – 18:00"),
+                "日期用相对说法、时段写法要与 fw包场 指令一致 —— "
+                        + "两处不一致的话，同一场包场在群里会有两种说法：" + text);
     }
 
     @Test
@@ -265,7 +269,7 @@ class QqReplyTextTests {
         assertTrue(text.contains("Kaede"), text);
         assertTrue(text.contains("魔爪"), text);
         assertTrue(text.contains("×2"), "只报商品名的话群里看不出买了几件：" + text);
-        assertTrue(text.contains("还剩 3"), "「还剩多少」报的是可售量，与商城页、/菜单 同一口径：" + text);
+        assertTrue(text.contains("当前剩余 3"), "「还剩多少」报的是可售量，与商城页、fw菜单 同一口径：" + text);
         assertFalse(text.contains("¥"), "这条对所有群播同一份文本，金额不进群：" + text);
     }
 
@@ -296,7 +300,8 @@ class QqReplyTextTests {
                 LocalDateTime.of(2026, 10, 5, 14, 0),
                 "设备维护", LocalDate.of(2026, 10, 4));
 
-        assertEquals("🚧 门店停业安排：明天 10:00 – 14:00（设备维护），该时段不接待新顾客。", text);
+        assertTrue(text.contains("明天 10:00 – 14:00"), "时段要带上：" + text);
+        assertTrue(text.contains("设备维护"), "原因要带上，让群里知道为什么不开：" + text);
     }
 
     @Test
@@ -307,7 +312,9 @@ class QqReplyTextTests {
                 LocalDateTime.of(2026, 10, 5, 14, 0),
                 "设备维护", LocalDate.of(2026, 10, 4));
 
-        assertEquals("🚧 停业安排已撤销：明天 10:00 – 14:00，该时段恢复正常接待。", text);
+        assertTrue(text.contains("明天 10:00 – 14:00"),
+                "撤销也要带上原时段 —— 群里可能积着好几条停业安排，"
+                        + "只说「已撤销」没人知道撤的是哪一段：" + text);
     }
 
     @Test
@@ -318,8 +325,9 @@ class QqReplyTextTests {
                 LocalDateTime.of(2026, 10, 5, 22, 0),
                 null, LocalDate.of(2026, 10, 4));
 
-        assertEquals("🎉 免费活动：明天 20:00 – 22:00，该时段内消费全免。", text,
-                "名称是选填的，没填时不能印出「（）」—— 那像是系统出了错");
+        assertTrue(text.contains("明天 20:00 – 22:00"), text);
+        assertFalse(text.contains("（）"),
+                "名称是选填的，没填时不能印出空括号 —— 那像是系统出了错：" + text);
     }
 
     @Test
@@ -330,7 +338,9 @@ class QqReplyTextTests {
                 LocalDateTime.of(2026, 10, 5, 22, 0),
                 "周年庆", LocalDate.of(2026, 10, 4));
 
-        assertEquals("🎉 免费活动已撤销：明天 20:00 – 22:00，该时段恢复按时长计费。", text);
+        assertTrue(text.contains("明天 20:00 – 22:00"), text);
+        assertTrue(text.contains("计费"),
+                "撤销要明说恢复计费，免得有人以为还能白玩：" + text);
     }
 
     @Test
@@ -341,8 +351,8 @@ class QqReplyTextTests {
                 LocalDateTime.of(2026, 10, 5, 18, 0),
                 LocalDate.of(2026, 10, 4));
 
-        assertEquals("📅 包场已撤销：明天 14:00 – 18:00，该时段恢复开放。", text,
-                "要与几天前那条生效消息对得上，否则读不出这两条说的是同一场包场");
+        assertTrue(text.contains("明天 14:00 – 18:00"),
+                "时段写法要与几天前那条生效消息对得上，否则读不出这两条说的是同一场包场：" + text);
     }
 
     @Test
@@ -351,8 +361,9 @@ class QqReplyTextTests {
         String text = QqReplyText.noticePublished(NoticePublishMode.MANUAL,
                 "本周六场地维护", "10:00–14:00 暂停营业", "http://host/#/notices");
 
-        assertEquals("📢 门店公告：本周六场地维护\n10:00–14:00 暂停营业\n详情 → http://host/#/notices",
-                text);
+        assertTrue(text.contains("本周六场地维护"), "标题要在：" + text);
+        assertTrue(text.contains("10:00–14:00 暂停营业"), "手写公告的正文才是重点：" + text);
+        assertTrue(text.contains("http://host/#/notices"), "要给详情链接：" + text);
     }
 
     @Test
@@ -361,8 +372,10 @@ class QqReplyTextTests {
         String text = QqReplyText.noticePublished(NoticePublishMode.MANUAL,
                 "仅标题", null, "http://host/#/notices");
 
-        assertEquals("📢 门店公告：仅标题\n详情 → http://host/#/notices", text,
-                "正文是选填的，没填时不该留一个空行");
+        assertTrue(text.contains("仅标题"), text);
+        assertTrue(text.contains("http://host/#/notices"), text);
+        assertFalse(text.contains("\n\n"),
+                "正文是选填的，没填时不该留一个空行：" + text);
     }
 
     @Test
@@ -371,7 +384,7 @@ class QqReplyTextTests {
         String text = QqReplyText.noticePublished(NoticePublishMode.AUTO,
                 "拍拍机 1 号 由 良好 转为 维护中", null, "http://host/#/notices");
 
-        assertEquals("📢 拍拍机 1 号 由 良好 转为 维护中", text);
+        assertTrue(text.contains("拍拍机 1 号 由 良好 转为 维护中"), text);
         assertFalse(text.contains("详情"),
                 "自动公告没有正文，点进去也只是列表页，链接是多余的：" + text);
     }
@@ -427,7 +440,7 @@ class QqReplyTextTests {
         chips.setAvailableStock(0);
         chips.setSoldOut(true);
 
-        String text = QqReplyText.menu(List.of(water, chips), "http://x/#/mall");
+        String text = QqReplyText.menu(List.of(water, chips), "http://x/#/mall", true);
 
         assertTrue(text.contains("矿泉水 --- ¥2.00 -- 余（18）"),
                 "报的是可售量（18）而不是实际库存（20）—— 与下单校验同一口径，"
@@ -441,8 +454,8 @@ class QqReplyTextTests {
     @Test
     @DisplayName("菜单：没有上架商品时回一句人话")
     void menu_saysSoWhenEmpty() {
-        assertEquals("店里暂时没有上架的商品。",
-                QqReplyText.menu(List.of(), "http://x/#/mall"));
+        assertFalse(QqReplyText.menu(List.of(), "http://x/#/mall", true).isBlank(),
+                "没有商品时也要回一句话，不能返回空串");
     }
 
     // ==================================================================
@@ -475,8 +488,8 @@ class QqReplyTextTests {
     @Test
     @DisplayName("月卡：没有在售卡种时回一句人话")
     void cardTypes_saysSoWhenEmpty() {
-        assertEquals("月卡暂时没有开放售卖，问一下店主吧。",
-                QqReplyText.cardTypes(List.of(), "http://x/#/cards"));
+        assertFalse(QqReplyText.cardTypes(List.of(), "http://x/#/cards").isBlank(),
+                "没有在售卡种时也要回一句话，不能返回空串");
     }
 
     // ==================================================================
@@ -486,30 +499,50 @@ class QqReplyTextTests {
     @Test
     @DisplayName("帮助：写明前缀要求，写指令关掉时不列出那两条")
     void help_mentionsPrefixAndHidesDisabledWrites() {
-        String withWrites = QqReplyText.help(true);
-        assertTrue(withWrites.contains("/ 或 fw"), "必须写清前缀要求，否则用户裸发指令什么都得不到");
-        assertTrue(withWrites.contains("/开门"), withWrites);
-        assertTrue(withWrites.contains("/结账"), withWrites);
-        assertTrue(withWrites.contains("/验证"), "验证码那条也要说明 —— 它是注册流程的一环");
-        assertTrue(withWrites.contains("/买个"), "手机下单那条路要给出写法，否则没人知道怎么买：" + withWrites);
+        String withWrites = QqReplyText.help(true, false, null);
+        assertTrue(withWrites.contains("前缀 fw"),
+                "必须写清前缀要求，否则用户裸发指令什么都得不到：" + withWrites);
+        assertFalse(withWrites.contains("/ 或 fw"),
+                "⚠️ `/` 自 2026-10-09 起已不是前缀（发了会被当闲聊静默），"
+                        + "帮助里再写它等于教人发一条没有反应的指令：" + withWrites);
+        assertTrue(withWrites.contains("fw开门"), withWrites);
+        assertTrue(withWrites.contains("fw结账"), withWrites);
+        assertTrue(withWrites.contains("fw验证"), "验证码那条也要说明 —— 它是注册流程的一环");
+        assertTrue(withWrites.contains("fw买个"), "手机下单那条路要给出写法，否则没人知道怎么买：" + withWrites);
 
-        String readOnly = QqReplyText.help(false);
-        assertFalse(readOnly.contains("/开门"), "列出来却发不动，用户只会以为机器人坏了");
-        assertFalse(readOnly.contains("/结账"));
-        assertFalse(readOnly.contains("/买个"), "商品下单也是写指令，同样要藏起来");
-        assertTrue(readOnly.contains("/在店"), "只读指令照常列出");
+        String readOnly = QqReplyText.help(false, false, null);
+        assertFalse(readOnly.contains("fw开门"), "列出来却发不动，用户只会以为机器人坏了");
+        assertFalse(readOnly.contains("fw结账"));
+        assertFalse(readOnly.contains("fw买个"), "商品下单也是写指令，同样要藏起来");
+        assertTrue(readOnly.contains("fw在店"), "只读指令照常列出");
     }
 
     @Test
-    @DisplayName("帮助：按「你想干什么」分组，四段标题都在")
-    void help_isGroupedByPurpose() {
-        String text = QqReplyText.help(true);
+    @DisplayName("帮助：常用的几条指令都要列出来，否则没人知道有")
+    void help_listsKeyCommands() {
+        String text = QqReplyText.help(true, true, null);
 
-        assertTrue(text.contains("【看店里】"), "指令到十来条之后，不分组就得逐行读完才能找到要的那条：" + text);
-        assertTrue(text.contains("【我自己的】"), text);
-        assertTrue(text.contains("【常用】"), text);
-        assertTrue(text.contains("【其他】"), text);
-        assertTrue(text.contains("/月卡"), "月卡说明要列出来，否则没人知道有这条：" + text);
+        // 只断言【指令名在不在】—— 那是功能可见性，指令名不会随文案改；
+        // 分组标题、措辞那些属排版，不在这里锁
+        assertTrue(text.contains("fw月卡"), "月卡说明要列出来，否则没人知道有这条：" + text);
+        assertTrue(text.contains("fw价格"), "计费规则同理：" + text);
+        assertTrue(text.contains("fw菜单"), "商品目录同理：" + text);
+    }
+
+    @Test
+    @DisplayName("帮助：调整库存那条只对管理员列出")
+    void help_listsStockAdjustOnlyForAdmin() {
+        String admin = QqReplyText.help(true, true, null);
+        assertTrue(admin.contains("fw可乐5"), "管理员要能看到这条，否则没人知道有：" + admin);
+        assertTrue(admin.contains("仅管理员"), "标注清楚它只对管理员开放：" + admin);
+
+        String normal = QqReplyText.help(true, false, null);
+        assertFalse(normal.contains("fw可乐5"),
+                "它对普通顾客本来就发不动（执行时会拒绝），列出来只会让人问「为什么我不能用」：" + normal);
+
+        String readOnly = QqReplyText.help(false, true, null);
+        assertFalse(readOnly.contains("fw可乐5"),
+                "写指令总开关关掉时管理员也不该看到 —— 发了没有任何反应：" + readOnly);
     }
 
     // ==================================================================
@@ -517,18 +550,26 @@ class QqReplyTextTests {
     // ==================================================================
 
     @Test
-    @DisplayName("网页端地址：原样给出配置里那一项，不加工")
+    @DisplayName("网页端地址：拆成两条，第二条只有网址（方便复制）")
     void web_givesAddressAsConfigured() {
-        assertEquals("网页端：https://uspace.example.com\n下单、查看账单、买月卡都在这里。",
-                QqReplyText.web("https://uspace.example.com"),
-                "地址原样来自配置 —— 加工过一次的话，群里看到的与配置里那一项就对不上了");
+        List<String> messages = QqReplyText.web("https://uspace.example.com");
+
+        assertEquals(2, messages.size(), "一条讲解、一条纯网址 —— 网址单独一条才好长按复制");
+        assertEquals("https://uspace.example.com", messages.get(1),
+                "⚠️ 第二条必须【只有网址】：混进「网页端：」这类前缀的话，"
+                        + "长按复制会连前缀一起带走，粘到浏览器里就打不开了");
     }
 
     @Test
     @DisplayName("网页端地址：没配置时给一句人话，而不是空白")
     void web_handlesMissingConfig() {
-        assertTrue(QqReplyText.web(null).contains("还没配置"));
-        assertTrue(QqReplyText.web("   ").contains("还没配置"));
+        List<String> missing = QqReplyText.web(null);
+        assertFalse(missing.isEmpty(), "没配置也要回话，不能一条都不发");
+        assertFalse(missing.get(0).isBlank(), "那一条也不能是空白");
+
+        List<String> blank = QqReplyText.web("   ");
+        assertFalse(blank.isEmpty(), "只有空白也算没配置，同样要回话");
+        assertFalse(blank.get(0).isBlank());
     }
 
     @Test
@@ -546,8 +587,8 @@ class QqReplyTextTests {
         assertTrue(text.contains("¥7.00"), "金额保留两位小数：" + text);
         assertTrue(text.contains("PD202610040127111234"), text);
         assertTrue(text.contains("http://x/#/product-orders"), "付款入口不能少：" + text);
-        assertTrue(text.contains("付款截图发到群里"), "群内传图那条路的入口要说明：" + text);
-        assertTrue(text.contains("到店自取"),
+        assertTrue(text.contains("付款截图直接发送到群里"), "群内传图那条路的入口要说明：" + text);
+        assertTrue(text.contains("付款后请自行取货"),
                 "无人值守店里没有店员，不写这一句他会站在店里等店员递给他：" + text);
     }
 
@@ -568,13 +609,13 @@ class QqReplyTextTests {
     }
 
     @Test
-    @DisplayName("商品名对不上：把名字原样回显，并指去 /菜单")
+    @DisplayName("商品名对不上：把名字原样回显，并指去 fw菜单")
     void productNotFound_echoesTheName() {
         String text = QqReplyText.productNotFound("可乐500ml");
 
         assertTrue(text.contains("可乐500ml"),
                 "原样回显他打的那个名字，他才看得出自己少打了一个空格：" + text);
-        assertTrue(text.contains("/菜单"), "要给一个能做的动作，而不是一句「不存在」：" + text);
+        assertTrue(text.contains("fw菜单"), "要给一个能做的动作，而不是一句「不存在」：" + text);
     }
 
     @Test
@@ -584,7 +625,7 @@ class QqReplyTextTests {
                         ErrorCode.PRODUCT_SOLD_OUT, "该商品仅剩 2 件", "http://x")
                 .contains("仅剩 2 件"), "服务端算出来的剩余量要带给用户，他才知道能买几件");
         assertTrue(QqReplyText.productOrderFailure(
-                ErrorCode.PRODUCT_STATUS_INVALID, null, "http://x").contains("不卖了"));
+                ErrorCode.PRODUCT_STATUS_INVALID, null, "http://x").contains("已下架"));
         assertTrue(QqReplyText.productOrderFailure(
                         ErrorCode.PARAM_INVALID, "单次最多买 99 件、至少 1 件", "http://x")
                 .contains("99"), "范围提示要原样带出来");
@@ -592,13 +633,53 @@ class QqReplyTextTests {
                 "未知错误码时要把服务端给的话带出来");
     }
 
+    // ==================================================================
+    // 调整库存
+    // ==================================================================
+
+    @Test
+    @DisplayName("调整库存：报出「原 → 新」，并把商品名原样回显")
+    void stockAdjusted_reportsBeforeAndAfter() {
+        String text = QqReplyText.stockAdjusted("可乐 500ml", 20, 2, 2);
+
+        assertTrue(text.contains("可乐 500ml"),
+                "名字要原样回显 —— 他才能看出这个名字切得对不对：" + text);
+        assertTrue(text.contains("20 件"),
+                "⚠️ 原值必须报：把「补货到 20」手快发成「fw可乐2」这种错，"
+                        + "全靠这一句当场发现 —— 不报的话要等下次清点才知道：" + text);
+        assertTrue(text.contains("→ 2 件"), "新值：" + text);
+    }
+
+    @Test
+    @DisplayName("调整库存：有未付款订单占着货时，把可售量也说出来")
+    void stockAdjusted_mentionsAvailabilityOnlyWhenDifferent() {
+        String occupied = QqReplyText.stockAdjusted("可乐", 5, 5, 3);
+        assertTrue(occupied.contains("可售 3"),
+                "不说这一句，管理员会奇怪「明明设成 5 了，顾客怎么还说买不了」：" + occupied);
+
+        String clear = QqReplyText.stockAdjusted("可乐", 5, 5, 5);
+        assertFalse(clear.contains("可售"),
+                "两者相同时不重复报同一个数 —— 那只会让人多读一行：" + clear);
+    }
+
+    @Test
+    @DisplayName("调整库存：非管理员要被告知「能改发什么」")
+    void stockAdjustForbidden_pointsToTheBuyCommand() {
+        String text = QqReplyText.stockAdjustForbidden();
+
+        assertTrue(text.contains("仅限管理员"), text);
+        assertTrue(text.contains("fw可乐-2"),
+                "⚠️ 发这条的多半是想买可乐、漏打了横杠的顾客 —— "
+                        + "只回一句「仅限管理员」，他不知道自己该发什么：" + text);
+    }
+
     @Test
     @DisplayName("认不出指令：给一个能做的动作，而不是一句「不明白」")
     void unknownCommand_givesAnAction() {
         String text = QqReplyText.unknownCommand();
 
-        assertTrue(text.contains("没认出这条指令"), text);
-        assertTrue(text.contains("/帮助"), "要说清下一步能做什么：" + text);
+        assertTrue(text.contains("无法识别该指令"), text);
+        assertTrue(text.contains("fw帮助"), "要说清下一步能做什么：" + text);
     }
 
     // ==================================================================
@@ -608,20 +689,32 @@ class QqReplyTextTests {
     @Test
     @DisplayName("开门：新建订单时不重复说「已开始计时」（播报已经说了）")
     void openPasscode_doesNotRepeatBroadcast() {
-        String text = QqReplyText.openPasscode("123456", true, 0, "http://x/#/orders/1");
+        String text = QqReplyText.openPasscode("123456", true, 0, false, "http://x/#/orders/1");
 
         assertFalse(text.contains("已开始计时"), "到店播报已经说过一次，这里再说就是两条重复消息：" + text);
         assertTrue(text.contains("门锁密码：123456"), text);
-        assertTrue(text.contains("用一次即作废"), text);
-        assertTrue(text.contains("http://x/#/orders/1"), "私聊失败时的兜底指路不能少");
+        assertTrue(text.contains("仅可使用一次"), text);
+        assertTrue(text.contains("http://x/#/orders/1"), "固定密码的兜底指路不能少");
     }
 
     @Test
     @DisplayName("开门：已有订单时要补一句状态（那时没有播报）")
     void openPasscode_reportsStatusWhenNoBroadcast() {
-        String text = QqReplyText.openPasscode("123456", false, 80, "http://x/#/orders/1");
+        String text = QqReplyText.openPasscode("123456", false, 80, false, "http://x/#/orders/1");
 
         assertTrue(text.contains("你已在计时中（1 小时 20 分）"), text);
+    }
+
+    @Test
+    @DisplayName("开门：私聊开关关着时，文案绝不能还承诺「已私聊发你」")
+    void openPasscode_respectsPrivatePasscodeSwitch() {
+        String off = QqReplyText.openPasscode("123456", true, 0, false, "http://x/#/orders/1");
+        String on = QqReplyText.openPasscode("123456", true, 0, true, "http://x/#/orders/1");
+
+        assertFalse(off.contains("已私聊发你"),
+                "⚠️ 开关关着还写「已私聊发你」的话，用户会去翻一个永远空的私聊窗口：" + off);
+        assertTrue(off.contains("请前往网页端查看"), off);
+        assertTrue(on.contains("已通过私聊发送"), on);
     }
 
     @Test
@@ -646,7 +739,7 @@ class QqReplyTextTests {
         assertFalse(QqReplyText.settleDone(new BigDecimal("12"), false, "http://x/settle")
                         .contains("12"),
                 "⚠️ 金额开关关掉时不能报数 —— 回复是群消息，全群可见");
-        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "u").contains("付款截图发到群里"),
+        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "u").contains("付款截图直接发送到群里"),
                 "「群内传图」那条路的入口只在这里说明，少了它没人会想到可以发图");
     }
 
@@ -660,7 +753,7 @@ class QqReplyTextTests {
         assertTrue(text.contains("OD202610040116074492"), text);
         assertTrue(text.contains("http://x/#/orders/2516"),
                 "这是「截图等超时了」之后唯一的回头路，没有入口这条回复就白说了：" + text);
-        assertTrue(text.contains("付款截图发到群里"), "回头路上要再说明一次可以发图：" + text);
+        assertTrue(text.contains("付款截图直接发送到群里"), "回头路上要再说明一次可以发图：" + text);
     }
 
     @Test
@@ -711,8 +804,8 @@ class QqReplyTextTests {
         assertTrue(text.contains("¥128.00"), text);
         assertTrue(text.contains("再消费 ¥72.00"), text);
         assertTrue(text.contains("¥1234.50"), text);
-        assertTrue(text.contains("累计在店 12 小时 30 分 · 本月 3 小时 20 分"), text);
-        assertTrue(text.contains("有一笔还没付款：¥3.00"), text);
+        assertTrue(text.contains("累计在店 12 小时 30 分（本月 3 小时 20 分）"), text);
+        assertTrue(text.contains("有一笔未付款订单：¥3.00"), text);
         assertTrue(text.contains("OD202610040116074492"), text);
         assertTrue(text.contains("偏好：拍拍机"), text);
         assertFalse(text.contains("密码"), "这条回复是群消息，里头绝不能出现密码");
@@ -741,7 +834,7 @@ class QqReplyTextTests {
 
         String inStore = QqReplyText.me(namedUser(), null, null, null, null, null, preview, true);
         assertTrue(inStore.contains("当前在店 1 小时 20 分，预计 ¥12.00"), inStore);
-        assertTrue(inStore.contains("/当前订单"), "告诉他还有更详细的可以看：" + inStore);
+        assertTrue(inStore.contains("fw当前订单"), "告诉他还有更详细的可以看：" + inStore);
 
         String notInStore = QqReplyText.me(namedUser(), null, null, null, null, null, null, true);
         assertFalse(notInStore.contains("当前在店"), notInStore);
@@ -791,9 +884,9 @@ class QqReplyTextTests {
         assertTrue(text.contains("已玩 1 小时 20 分"), text);
         assertTrue(text.contains("当前应付 ¥9.00"), text);
         assertTrue(text.contains("还有 12 分 30 秒，进入下一档 ¥12.00"), text);
-        assertTrue(text.contains("计时照走"),
+        assertTrue(text.contains("计时照常进行"),
                 "⚠️ 不写这句，用户会以为发一条指令就把账结了，然后接着玩：" + text);
-        assertTrue(text.contains("/结账"), "要指路到真正结账的那一条：" + text);
+        assertTrue(text.contains("fw结账"), "要指路到真正结账的那一条：" + text);
     }
 
     @Test
@@ -830,7 +923,7 @@ class QqReplyTextTests {
 
         assertFalse(text.contains("当前应付"), "金额开关管的是【他自己的消费额】：" + text);
         assertTrue(text.contains("进入下一档 ¥8.00"),
-                "档位价是价目表上的数，群里任何人发 /价格 都查得到，不受这个开关管：" + text);
+                "档位价是价目表上的数，群里任何人发 fw价格 都查得到，不受这个开关管：" + text);
     }
 
     @Test
@@ -839,12 +932,96 @@ class QqReplyTextTests {
         String text = QqReplyText.noActiveOrder("OD1", new BigDecimal("3"), true,
                 "http://x/#/orders");
 
-        assertTrue(text.contains("没有在计时的订单"), text);
+        assertTrue(text.contains("没有正在计时的订单"), text);
         assertTrue(text.contains("¥3.00"), text);
         assertTrue(text.contains("http://x/#/orders"), text);
         assertFalse(text.contains("截图"),
-                "⚠️「截图发群里」是发过 /结账 才有的待遇（那道闸要撑起来）——"
+                "⚠️「截图发群里」是发过 fw结账 才有的待遇（那道闸要撑起来）——"
                         + "这里说了，用户会发一张石沉大海的图：" + text);
+    }
+
+    // ==================================================================
+    // 未付款清单与取消（2026-10-10）
+    // ==================================================================
+
+    @Test
+    @DisplayName("未付款清单：四类都列出来，状态里带下一步动作")
+    void unpaidBills_listsAllTypes() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false),
+                new UnpaidBill("包场", "BK202610101200005678", new BigDecimal("60.00"), "待付款", true),
+                new UnpaidBill("商品", "PD202610101200009012", new BigDecimal("3.50"),
+                        "凭证未通过，请重新上传付款截图", true));
+
+        String text = QqReplyText.unpaidBills(bills, true, "http://localhost:5173/#/orders");
+
+        assertTrue(text.contains("3 笔"), text);
+        assertTrue(text.contains("OD202610101200001234"), text);
+        assertTrue(text.contains("BK202610101200005678"), text);
+        assertTrue(text.contains("PD202610101200009012"), text);
+        assertTrue(text.contains("¥60.00"), text);
+        assertTrue(text.contains("凭证未通过，请重新上传付款截图"),
+                "状态要带下一步动作，否则用户知道出了事但不知道做什么：" + text);
+        assertTrue(text.contains("fw取消"), "有可取消的单子时要给出取消入口：" + text);
+    }
+
+    @Test
+    @DisplayName("未付款清单：全是计时订单时不提取消（欠费不能自消，那条提示是空话）")
+    void unpaidBills_omitsCancelHintWhenNothingCancelable() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false));
+
+        String text = QqReplyText.unpaidBills(bills, true, "http://localhost:5173/#/orders");
+
+        assertFalse(text.contains("fw取消"),
+                "⚠️ 提示了却没一条能取消 —— 用户照做只会被拒，那比不提更糟：" + text);
+    }
+
+    @Test
+    @DisplayName("未付款清单：没有未付款单时回一句人话")
+    void unpaidBills_empty() {
+        String text = QqReplyText.unpaidBills(List.of(), true, "http://localhost:5173/#/orders");
+
+        assertTrue(text.contains("没有"), text);
+    }
+
+    @Test
+    @DisplayName("未付款清单：金额开关关掉时不报数，单号照给")
+    void unpaidBills_hidesAmountsWhenDisabled() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false));
+
+        String text = QqReplyText.unpaidBills(bills, false, "http://localhost:5173/#/orders");
+
+        assertFalse(text.contains("8.00"), "金额关掉时不该出现数字（群消息全群可见）：" + text);
+        assertTrue(text.contains("OD202610101200001234"), "单号要留着 —— 下一步动作靠它：" + text);
+    }
+
+    @Test
+    @DisplayName("取消：成功文案报出释放了什么；计时订单的拒绝文案指路 fw结账")
+    void cancelDoneAndRefused() {
+        String done = QqReplyText.cancelDone("商品", "PD202610101200009012", "占用的库存已释放");
+        assertTrue(done.contains("已取消"), done);
+        assertTrue(done.contains("PD202610101200009012"), done);
+        assertTrue(done.contains("库存已释放"), done);
+
+        String refused = QqReplyText.cancelOrderRefused("http://localhost:5173/#/orders");
+        assertTrue(refused.contains("不支持"), refused);
+        assertTrue(refused.contains("fw结账"),
+                "「不行」之外必须指路，否则用户下一步无从下手：" + refused);
+    }
+
+    @Test
+    @DisplayName("取消：失败文案按错误码分两档（找不到 vs 状态不对）")
+    void cancelFailed_splitsByErrorCode() {
+        String notFound = QqReplyText.cancelFailed(ErrorCode.PRODUCT_ORDER_NOT_FOUND, null);
+        assertTrue(notFound.contains("没找到"), notFound);
+        assertTrue(notFound.contains("fw未付款"), "要指路去核对单号：" + notFound);
+
+        String wrongState = QqReplyText.cancelFailed(
+                ErrorCode.BOOKING_NOT_EDITABLE, "该购买单不是待支付状态，无法取消");
+        assertTrue(wrongState.contains("不支持取消"), wrongState);
+        assertTrue(wrongState.contains("不是待支付状态"), "服务端给的原因要转述出来：" + wrongState);
     }
 
     // ==================================================================

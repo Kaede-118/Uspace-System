@@ -5,17 +5,21 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.product.dto.CreateProductOrderRequest;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductSaveRequest;
 import com.kaede.uspace.product.dto.ProductVo;
 import com.kaede.uspace.product.entity.Product;
 import com.kaede.uspace.product.entity.ProductOrder;
+import com.kaede.uspace.product.event.ProductOrderCancelledEvent;
 import com.kaede.uspace.product.mapper.ProductMapper;
 import com.kaede.uspace.product.mapper.ProductOrderMapper;
 import com.kaede.uspace.product.mapper.ProductPendingCount;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -50,12 +54,23 @@ public class ProductService {
     /** 商品配置：待支付单的存活时长 */
     private final ProductProperties properties;
 
+    /**
+     * 事件发布器：未付款的购买单被取消时发一条，由 {@code order} 包记进交易流水。
+     *
+     * <p>走事件而不是直接调用 {@code TradeLogService}：流水住在 {@code order} 包，
+     * 直接引用会让本包反向依赖它，与「业务包依赖单向」那条规矩相抵
+     * （见 {@link ProductOrderCancelledEvent} 的类注释）。
+     */
+    private final ApplicationEventPublisher events;
+
     public ProductService(ProductMapper productMapper,
                           ProductOrderMapper orderMapper,
-                          ProductProperties properties) {
+                          ProductProperties properties,
+                          ApplicationEventPublisher events) {
         this.productMapper = productMapper;
         this.orderMapper = orderMapper;
         this.properties = properties;
+        this.events = events;
     }
 
     // ==================================================================
@@ -99,7 +114,7 @@ public class ProductService {
     }
 
     /**
-     * 按名字查一件商品 —— <b>群里的下单指令走这条</b>（{@code /可乐-2}）。
+     * 按名字查一件商品 —— <b>群里的下单指令走这条</b>（{@code fw可乐-2}）。
      *
      * <p>群里没有地方填商品 ID，顾客打出来的就是名字，所以名字必须能定位到唯一一件 ——
      * 这正是 {@code uk_name} 那条唯一键存在的理由。
@@ -150,6 +165,11 @@ public class ProductService {
      * 那一笔支付转入人工处理 —— 而不是在回调里抛异常，
      * 那会让支付平台不断重推一笔永远处理不了的通知。
      *
+     * <p><b>另有一道「一笔没了结就不给下新的」</b>（2026-10-10 加）：名下有
+     * {@code PENDING_PAYMENT} 或 {@code REJECTED} 的商品单时直接拒绝，
+     * 两种状态给不同的错误码。它是「欠费拦截」在商品上的对应物，
+     * 详细口径见方法体开头那段注释 —— 与「超时不占库存」是两回事。
+     *
      * <p>本方法<b>不加事务</b>：这道软检查本来就不保证原子性，
      * 套上 {@code @Transactional} 只会让人误以为这里有更强的保证。
      *
@@ -169,7 +189,7 @@ public class ProductService {
         int quantity = request.getQuantity() == null ? 1 : request.getQuantity();
         // ⚠️ 数量范围必须在这里再挡一道：Bean Validation 的 @Min/@Max 只作用于
         // Controller 入参，而【群里的下单指令直接调本方法】—— 少了这一道，
-        // /可乐-0 会建出一笔 0 元的单、/可乐--5 会算出一笔负金额的订单，
+        // fw可乐-0 会建出一笔 0 元的单、fw可乐--5 会算出一笔负金额的订单，
         // 而且两者都不报任何错
         if (quantity < 1 || quantity > CreateProductOrderRequest.MAX_QUANTITY) {
             return BizResult.fail(ErrorCode.PARAM_INVALID,
@@ -179,6 +199,30 @@ public class ProductService {
         if (available < quantity) {
             return BizResult.fail(ErrorCode.PRODUCT_SOLD_OUT,
                     available <= 0 ? "该商品已售罄" : "该商品仅剩 " + available + " 件");
+        }
+
+        // 一笔没了结就不给下新的（2026-10-10 加）：查的是 PENDING_PAYMENT + REJECTED
+        // 两种状态，对应两件处置方式不同的事，错误码与提示都分开给 ——
+        //   · PENDING_PAYMENT 是「下单了没付钱」：群里连发几条 fw可乐-2
+        //     就能挂起一串待支付单，每笔都占着库存，而货还在货架上没人动；
+        //   · REJECTED 是「付过但凭证没通过」：他还欠着这笔钱，要先重传凭证。
+        // 出口是现成的：付款，或取消（网页端「商品订单」页、群里的 fw取消）。
+        //
+        // ⚠️ 这道校验与「超时不占库存」的口径刻意不同：那个时间窗管的是
+        // 「还占不占库存」，这里管的是「能不能再下单」—— 两天前没付的单子
+        // 今天照样挡人，否则「欠着费接着买」正好从这道缝里漏过去。
+        //
+        // 位置与其他校验一致（放在创建之前、商品各项检查之后）：坏商品名、
+        // 已下架、售罄这些先报 —— 它们说的是「这次请求本身有问题」，
+        // 而欠费说的是「你的账号有笔账没了结」，后者在请求本身成立时才轮到说。
+        ProductOrder unsettled = orderMapper.selectUnsettledByUser(userId);
+        if (unsettled != null) {
+            if (ProductOrderStatus.REJECTED.name().equals(unsettled.getStatus())) {
+                return BizResult.fail(ErrorCode.PRODUCT_PROOF_REJECTED);
+            }
+            return BizResult.fail(ErrorCode.PRODUCT_UNPAID_EXISTS,
+                    "你有一笔未付款的商品单（" + unsettled.getOrderNo()
+                            + "），请先完成支付或取消该单");
         }
 
         ProductOrder order = new ProductOrder();
@@ -207,11 +251,22 @@ public class ProductService {
      * <p>非本人的订单一律按「不存在」处理，不用 403：403 等于承认
      * 「这个单子存在，只是不归你」，可以被用来枚举单号。
      *
+     * <p>成功之后发一条 {@link ProductOrderCancelledEvent} —— 由
+     * {@code order} 包的 {@code TradeLogListener} 记进交易流水。
+     * 钱一分没动，但「那笔挂着的单后来怎么了」值得留档。
+     *
+     * <p><b>本方法加 {@code @Transactional}</b>：取消本身只是一条 UPDATE，
+     * 事务是为<b>流水那一行与它同生共死</b>而加的（监听器是同步的、跑在同一个
+     * 事务里）。少了这层事务，会出现「取消成功、流水插入失败」——
+     * 那笔单从账上消失得无影无踪，而两边都不报错。
+     *
      * @param userId  当前登录用户
      * @param orderId 购买单 ID
+     * @param source  来源渠道（网页端 / 群内），只进流水，不参与任何判断
      * @return 成功返回空数据；单子不存在、不归本人、或已不是待支付状态时返回对应错误码
      */
-    public BizResult<Void> cancelOrder(Long userId, Long orderId) {
+    @Transactional
+    public BizResult<Void> cancelOrder(Long userId, Long orderId, TradeSource source) {
         ProductOrder order = orderMapper.selectById(orderId);
         if (order == null || !order.getUserId().equals(userId)) {
             return BizResult.fail(ErrorCode.PRODUCT_ORDER_NOT_FOUND);
@@ -220,7 +275,35 @@ public class ProductService {
             return BizResult.fail(ErrorCode.PRODUCT_STATUS_INVALID, "该购买单不是待支付状态，无法取消");
         }
         log.info("[商品] 用户 {} 取消了商品购买单 {}", userId, order.getOrderNo());
+        events.publishEvent(new ProductOrderCancelledEvent(
+                order.getOrderNo(), userId, order.getAmount(), source));
         return BizResult.ok(null);
+    }
+
+    /**
+     * 按<b>单号</b>取消未付款的购买单 —— 群里的 {@code fw取消 <单号>} 走这条。
+     *
+     * <p>网页端的取消接口按 ID 走（REST 语义），而群里没有地方填 ID，
+     * 用户手里只有单号，所以另开一个入口。两条最终汇进 {@link #cancelOrder}，
+     * 守卫（本人 + 待支付）与流水只有一份。
+     *
+     * <p><b>本方法自己带 {@code @Transactional}</b>：内部调 {@link #cancelOrder}
+     * 属于同类自调用，那个方法上的事务注解不会生效 —— 少了这一层，
+     * 「取消成功、流水插入失败」会分成两个独立事务，那笔单从账上消失得
+     * 无影无踪，而两边都不报错。
+     *
+     * @param userId  当前用户（必须是这张单的主人）
+     * @param orderNo 购买单号
+     * @param source  来源渠道（网页端 / 群内），只进流水
+     * @return 成功返回空数据；单号不存在、不归本人、或已不是待支付状态时返回对应错误码
+     */
+    @Transactional
+    public BizResult<Void> cancelOrderByNo(Long userId, String orderNo, TradeSource source) {
+        ProductOrder order = orderMapper.selectByOrderNo(orderNo);
+        if (order == null || !order.getUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.PRODUCT_ORDER_NOT_FOUND);
+        }
+        return cancelOrder(userId, order.getId(), source);
     }
 
     /**
@@ -235,6 +318,18 @@ public class ProductService {
     public BizResult<PageResult<ProductOrderVo>> myOrders(Long userId, long pageNum,
                                                           long pageSize, String status) {
         return listOrders(pageNum, pageSize, userId, status);
+    }
+
+    /**
+     * 列出某人全部未付款的购买单 —— 群里的 {@code fw未付款} 用。
+     *
+     * @param userId 用户 ID
+     * @return 未付款的购买单，最近的在前；没有时返回空列表
+     */
+    public BizResult<List<ProductOrderVo>> listUnpaidOrders(Long userId) {
+        return BizResult.ok(orderMapper.selectUnpaidByUser(userId).stream()
+                .map(ProductOrderVo::from)
+                .toList());
     }
 
     // ==================================================================
@@ -318,6 +413,46 @@ public class ProductService {
 
         log.info("[商品] 修改商品 id={} 名称={} 价格={} 库存={} 上架={}",
                 id, product.getName(), product.getPrice(), product.getStock(), product.getEnabled());
+        return BizResult.ok(ProductVo.from(product, pendingQuantityOf(id)));
+    }
+
+    /**
+     * 把库存<b>设成给定的值</b> —— 后台的「只改库存」与群里的库存指令走这一条。
+     *
+     * <p>与 {@link #update} 的区别是「改多少东西」：那一条是全量替换，得把名称、
+     * 封面、描述、价格一并带上；这一条只动 {@code stock} 一列，其余字段一个都不碰。
+     * 拿全量替换来做补货的话，调用方必须先读整条记录、改完再传回，中间若有别人
+     * 改了名称就会被静默覆盖 —— 与模块 4「机台单独改状况」是同一个取舍。
+     *
+     * <p>⚠️ <b>数量在这里再挡一道</b>：Bean Validation 的 {@code @Min(0)} 只作用于
+     * Controller 入参，而<b>群里的指令是直接调本方法的</b> —— 少了这一道，
+     * 负数会把库存写成负值，此后可售量与「是否售罄」的判断全部失真。
+     * （与 {@link #createOrder} 里挡数量范围是同一条理由。）
+     *
+     * @param id    商品 ID
+     * @param stock 新的库存值
+     * @return 调整后的商品（含可售量）；商品不存在时返回
+     *         {@link ErrorCode#PRODUCT_NOT_FOUND}
+     */
+    public BizResult<ProductVo> updateStock(Long id, int stock) {
+        if (stock < 0) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "库存不能为负数");
+        }
+        Product product = productMapper.selectById(id);
+        if (product == null) {
+            return BizResult.fail(ErrorCode.PRODUCT_NOT_FOUND);
+        }
+        int before = product.getStock() == null ? 0 : product.getStock();
+        // 影响行数为 0 = 查出来之后被人删掉了（并发）。不判的话这里会回一句
+        // 「已调整」而库里什么都没变 —— 与「报告成功但没做」相比，多这一次判断便宜得多。
+        // ⚠️ 这里依赖驱动默认的「返回匹配行数」语义：把库存改成本来就相同的值时仍算
+        // 1 行。若将来给 JDBC URL 加上 useAffectedRows=true（返回实际改变的行数），
+        // 同值更新会返回 0 —— 那时这一句就会把「改成同一个数」误报成「商品不存在」
+        if (productMapper.updateStock(id, stock) == 0) {
+            return BizResult.fail(ErrorCode.PRODUCT_NOT_FOUND);
+        }
+        product.setStock(stock);
+        log.info("[商品] 调整库存 id={} 名称={} {} → {}", id, product.getName(), before, stock);
         return BizResult.ok(ProductVo.from(product, pendingQuantityOf(id)));
     }
 

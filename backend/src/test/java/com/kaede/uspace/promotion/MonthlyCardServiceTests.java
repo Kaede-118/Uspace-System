@@ -6,6 +6,7 @@ import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.CardScope;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
@@ -63,7 +64,7 @@ class MonthlyCardServiceTests {
     @BeforeEach
     void setUp() {
         service = new MonthlyCardService(cardMapper.asMapper(), orderMapper.asMapper(),
-                properties, billingProperties);
+                properties, billingProperties, event -> { });
     }
 
     // ==================================================================
@@ -182,16 +183,16 @@ class MonthlyCardServiceTests {
         MonthlyCardOrder paid = orderMapper.seed(
                 orderOf(USER_ID, CardOrderStatus.PAID, LocalDateTime.now()));
 
-        assertTrue(service.cancelPurchase(USER_ID, mine.getId()).isSuccess(),
+        assertTrue(service.cancelPurchase(USER_ID, mine.getId(), TradeSource.WEB).isSuccess(),
                 "本人的待支付单可以取消");
         assertEquals(CardOrderStatus.CLOSED.name(), orderMapper.get(mine.getId()).getStatus());
 
         assertEquals(ErrorCode.CARD_NOT_FOUND,
-                service.cancelPurchase(USER_ID, others.getId()).getError(),
+                service.cancelPurchase(USER_ID, others.getId(), TradeSource.WEB).getError(),
                 "他人的单按「不存在」处理 —— 403 等于承认它存在，可以被用来枚举单号");
 
         assertEquals(ErrorCode.CARD_STATUS_INVALID,
-                service.cancelPurchase(USER_ID, paid.getId()).getError(),
+                service.cancelPurchase(USER_ID, paid.getId(), TradeSource.WEB).getError(),
                 "已支付的单不能取消：关掉它会造成「单子关闭、卡还生效」");
         assertEquals(CardOrderStatus.PAID.name(), orderMapper.get(paid.getId()).getStatus(),
                 "被拒绝的取消不该改动任何状态");

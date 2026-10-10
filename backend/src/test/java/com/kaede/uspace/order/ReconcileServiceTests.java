@@ -85,7 +85,8 @@ class ReconcileServiceTests {
                 storeFake.asMapper(),
                 userFake.asMapper(),
                 new ReconcileBillStorage(properties, uploadProperties),
-                properties);
+                properties,
+                new TradeLogService(new FakeTradeLogMapper().asMapper()));
 
         Store store = new Store();
         store.setId(1L);

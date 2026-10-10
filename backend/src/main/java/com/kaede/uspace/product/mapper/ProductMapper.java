@@ -47,13 +47,13 @@ public interface ProductMapper extends BaseMapper<Product> {
      * 因为读代码的人会以为那种情况真的会发生。
      *
      * <p>⚠️ <b>不筛 {@code enabled}</b>：调用方要能区分「没有这个商品」与
-     * 「这个商品已下架」—— 前者让用户去发 {@code /菜单} 看准确名称，
+     * 「这个商品已下架」—— 前者让用户去发 {@code fw菜单} 看准确名称，
      * 后者要告诉他等上架。两句话不一样，所以状态交给调用方判。
      *
      * <p>名字<b>精确匹配</b>（去掉首尾空白之后）。刻意不做「忽略空格 / 大小写」的
      * 模糊匹配：商品名里带空格是常事（「王老吉 250ml（绿）」），
      * 一旦放宽就同时放宽了「匹配到两件」的可能，而唯一键管不住那种模糊等价。
-     * 名字写不准确时由 {@code /菜单} 兜住 —— 那里给的是可复制的准确名称。
+     * 名字写不准确时由 {@code fw菜单} 兜住 —— 那里给的是可复制的准确名称。
      *
      * @param name 商品名，调用方先去首尾空白
      * @return 商品；不存在或已逻辑删除时返回 null
@@ -177,8 +177,9 @@ public interface ProductMapper extends BaseMapper<Product> {
      * <p>不用「先查库存、再判断、再更新」的写法：那中间的窗口足够
      * 让两次请求都读到「还有 1 件」，然后双双扣成 -1。
      *
-     * <p><b>本方法是本表唯一的写入口</b>，后台改商品时传的是「新的库存值」
-     * 而不是「扣减量」，两者不要混。
+     * <p>⚠️ <b>别与 {@link #updateStock} 搞混</b>：那一条把库存<b>设成</b>给定值
+     * （盘点、补货走它），这一条按量<b>扣减</b>（卖出走它）。传错的表现极像 ——
+     * 「补货到 20 件」与「再进 20 件」差之毫厘，库存数却从此一路错下去，且不报任何错。
      *
      * @param id       商品 ID
      * @param quantity 扣减数量，必须为正
@@ -193,4 +194,30 @@ public interface ProductMapper extends BaseMapper<Product> {
                AND deleted = 0
             """)
     int deductStock(@Param("id") Long id, @Param("quantity") Integer quantity);
+
+    /**
+     * 把库存<b>设成给定的值</b> —— 后台盘点与群里的库存指令走这一条。
+     *
+     * <p>⚠️ <b>与 {@link #deductStock} 的区别是语义，不是写法</b>：
+     * 那一条按数量<b>扣减</b>（卖出去几件减几件，带 {@code stock >= ?} 条件），
+     * 这一条是「盘点后是多少就是多少」。两者传错了的表现很接近 ——
+     * 「补货到 20 件」与「再进 20 件」差之毫厘，而库存数从此一路错下去，
+     * 且不会报任何错。调用方认准自己的语义再调。
+     *
+     * <p><b>为什么不走 {@code updateById}</b>：那是全量替换的语义，而这里只动一列。
+     * 走它得先把整条商品读出来再原样传回，中间若有别人改了名称就会被静默覆盖 ——
+     * 与模块 4「机台单独改状况」是同一个理由（见 {@code DeviceMapper#updateStatus}）。
+     *
+     * @param id    商品 ID
+     * @param stock 新的库存值，调用方保证非负
+     * @return 受影响行数；0 表示商品不存在或已逻辑删除
+     */
+    @Update("""
+            UPDATE biz_product
+               SET stock      = #{stock},
+                   updated_at = NOW()
+             WHERE id = #{id}
+               AND deleted = 0
+            """)
+    int updateStock(@Param("id") Long id, @Param("stock") Integer stock);
 }

@@ -186,4 +186,57 @@ public interface ProductOrderMapper extends BaseMapper<ProductOrder> {
             """)
     List<ProductPendingCount> countPendingByProduct(@Param("productIds") List<Long> productIds,
                                                     @Param("since") LocalDateTime since);
+
+    /**
+     * 查这个用户名下「还没了结」的购买单 —— 下单前的互斥校验用它。
+     *
+     * <p><b>只认两种状态，各有各的理由</b>：
+     * <ul>
+     *   <li>{@code PENDING_PAYMENT} 是「下单了没付钱」：再下一单就是同时挂着两笔，
+     *       每笔占着库存，而货多半没人动</li>
+     *   <li>{@code REJECTED} 是「付过但凭证没通过」：他还欠着这笔钱，
+     *       要先重新传凭证 —— 与房间订单的欠费拦截同一条理由</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>刻意不带 {@code created_at} 时间窗</b>（与 {@link #countPendingByProduct}
+     * 正好相反）：那个窗口管的是「还占不占库存」，这里管的是「能不能再下单」。
+     * 一笔两天前没付的单子今天照样挡人 —— 要么付掉，要么取消。
+     * 两处口径不同是有意的，改任一处之前先读这一段。
+     *
+     * <p>只取最近的一条：调用方只需要「有没有、是哪一笔」，逐笔罗列由
+     * 「我的商品订单」页负责。
+     *
+     * @param userId 用户 ID
+     * @return 最近的一条未了结单；没有时返回 null
+     */
+    @Select("""
+            SELECT *
+              FROM biz_product_order
+             WHERE user_id = #{userId}
+               AND status IN ('PENDING_PAYMENT', 'REJECTED')
+               AND deleted = 0
+             ORDER BY id DESC
+             LIMIT 1
+            """)
+    ProductOrder selectUnsettledByUser(@Param("userId") Long userId);
+
+    /**
+     * 查某人全部未付款的购买单（{@code PENDING_PAYMENT} 或 {@code REJECTED}）。
+     *
+     * <p>与 {@link #selectUnsettledByUser} 的区别只有「复数」一处 ——
+     * 那个取最近一笔（下单前的互斥校验只需要知道「有没有」），
+     * 本方法要列全（群里的 {@code fw未付款} 把账一次说清）。
+     *
+     * @param userId 用户 ID
+     * @return 未付款的购买单，最近的在前；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_product_order
+             WHERE user_id = #{userId}
+               AND status IN ('PENDING_PAYMENT', 'REJECTED')
+               AND deleted = 0
+             ORDER BY id DESC
+            """)
+    List<ProductOrder> selectUnpaidByUser(@Param("userId") Long userId);
 }

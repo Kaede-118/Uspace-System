@@ -59,7 +59,7 @@ class InstoreServiceTests {
     private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
     private final MonthlyCardService monthlyCardService = new MonthlyCardService(
             cardMapper.asMapper(), cardOrderMapper.asMapper(),
-            new PromotionProperties(), new BillingProperties());
+            new PromotionProperties(), new BillingProperties(), event -> { });
 
     private final InstoreService service = new InstoreService(
             orderMapper.asMapper(), storeMapper.asMapper(),

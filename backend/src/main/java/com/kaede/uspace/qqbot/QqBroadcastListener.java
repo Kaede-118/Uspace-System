@@ -9,6 +9,7 @@ import com.kaede.uspace.order.dto.InstoreUserVo;
 import com.kaede.uspace.order.event.BookingRevokedEvent;
 import com.kaede.uspace.order.event.OrderEnteredEvent;
 import com.kaede.uspace.order.event.OrderLeftEvent;
+import com.kaede.uspace.order.event.PaymentProofPendingEvent;
 import com.kaede.uspace.order.event.PaymentProofRejectedEvent;
 import com.kaede.uspace.order.event.ProductPurchasedEvent;
 import com.kaede.uspace.product.ProductService;
@@ -182,10 +183,10 @@ public class QqBroadcastListener {
                     + "，本次 " + QqReplyText.duration(event.stayMinutes());
 
             // 不含金额的版本：能说的是「要不要付」，不能说「付多少」
-            String plain = event.free() ? head + "（无需支付）" : head + "，请到网页端完成支付";
+            String plain = event.free() ? head + "（无需支付）" : head + "，请前往网页端完成支付";
             // 含金额的版本，只进店主群
             String withAmount = head + "，消费 ¥" + event.amount().toPlainString()
-                    + (event.free() ? "（无需支付）" : "，请到网页端完成支付");
+                    + (event.free() ? "（无需支付）" : "，请前往网页端完成支付");
 
             broadcast(plain, withAmount);
             log.debug("[QQ机器人] 已播报离店 orderNo={} source={}", event.orderNo(), event.source());
@@ -206,7 +207,7 @@ public class QqBroadcastListener {
      * 驳回不回退订单状态，所以用户端看到的仍是「已支付」。少了这条提醒，
      * 那个结论永远到不了用户那里，复核环节等于白设。
      *
-     * <p>⚠️ <b>它也受播报开关管</b>（与两条写指令同一条纪律）：关掉播报的
+     * <p>⚠️ <b>它也受播报开关管</b>（与写指令同一条纪律）：关掉播报的
      * 部署形态下，群里一个字都不发。理由不是省事 —— 在一条从不说话的群里
      * 突然 @ 一个人，比不发更让人困惑。
      *
@@ -229,6 +230,40 @@ public class QqBroadcastListener {
         } catch (Throwable t) {
             // 见类注释：这里的异常绝不能冒回复核那边去
             log.error("[QQ机器人] 驳回提醒失败 proofId={}", event.proofId(), t);
+        }
+    }
+
+    /**
+     * 一笔付款凭证进了人工复核队列（2026-10-10 加）。
+     *
+     * <p><b>只推店主群</b>：这条一定带金额（管理员要据此判断该不该认），
+     * 而金额可见性只由 {@link QqbotProperties#isAmountVisible} 决定 ——
+     * 这里不复用 {@link #broadcast} 那条「所有群 + 店主群双版本」的路子，
+     * 因为这条播报在顾客群里<b>没有能说的版本</b>：它整条都是运营内务。
+     *
+     * <p>与驳回提醒同一条纪律：受播报总开关管（关掉时群里一个字都不发）。
+     *
+     * @param event 待复核事件
+     */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onProofPending(PaymentProofPendingEvent event) {
+        try {
+            if (!properties.getBroadcast().isEnabled()) {
+                return;
+            }
+            String text = QqReplyText.proofPending(event.targetType(), event.orderNo(),
+                    event.amount(), event.reason(),
+                    webProperties.normalizedBaseUrl() + "/#/admin/payments");
+            for (Long groupId : properties.effectiveGroups()) {
+                if (properties.isAmountVisible(groupId)) {
+                    client.sendGroupMessage(groupId, text);
+                }
+            }
+            log.debug("[QQ机器人] 已播报待复核凭证 proofId={} 单号={} 原因={}",
+                    event.proofId(), event.orderNo(), event.reason());
+        } catch (Throwable t) {
+            // 见类注释：这里的异常绝不能冒回复核那边去
+            log.error("[QQ机器人] 待复核播报失败 proofId={}", event.proofId(), t);
         }
     }
 
@@ -268,7 +303,7 @@ public class QqBroadcastListener {
      *
      * <p>这条播报<b>不带金额</b>，所有群同一份文本 —— 与到店、包场播报同理。
      * 「还剩多少」报的是<b>可售量</b>（库存 − 未支付的待支付单占掉的），
-     * 与商城页、{@code /菜单} 同一口径 —— 报实际库存会造出
+     * 与商城页、{@code fw菜单} 同一口径 —— 报实际库存会造出
      * 「群里说还剩 5 件、下单却说卖完了」。
      *
      * @param event 商品购买事件
@@ -513,7 +548,7 @@ public class QqBroadcastListener {
     /**
      * 数一下此刻店里还有几个人。
      *
-     * <p>复用 {@link InstoreService}（与 Web 端在店名册、群里 {@code /在店} 同一个方法），
+     * <p>复用 {@link InstoreService}（与 Web 端在店名册、群里 {@code fw在店} 同一个方法），
      * 所以三处的口径必然一致。
      *
      * @return 在店人数；查询失败时返回 null，调用方据此省掉这一句，而不是播报一个 0
@@ -531,7 +566,7 @@ public class QqBroadcastListener {
      * 把分钟数拼成人话。
      *
      * <p>原本这里有一份与 {@code QqCommandService} 重复的实现，注释写着
-     * 「第三次出现时抽」—— 加了 {@code /看看自己} 与 {@code /结账} 之后
+     * 「第三次出现时抽」—— 加了 {@code fw看看自己} 与 {@code fw结账} 之后
      * 第三次如约而至，已统一到 {@link QqReplyText#duration(int)}。
      * 两处各写一份的代价是「改了这处忘了那处」，表现是同一个时长在两处说法不一致。
      *

@@ -116,12 +116,14 @@ public class FakePaymentProofMapper implements InvocationHandler {
             case "upsert" -> upsert((PaymentProof) args[0]);
             case "selectPageForAdmin" -> selectPageForAdmin(args);
             case "confirm" -> confirm((Long) args[0], (Long) args[1]);
+            case "autoConfirm" -> autoConfirm((Long) args[0]);
             case "reject" -> reject((Long) args[0], (Long) args[1], (String) args[2]);
             case "countByPaymentNo" -> countByPaymentNo((String) args[0]);
             case "markDuplicateByPaymentNo" -> markDuplicateByPaymentNo((String) args[0]);
             case "selectCandidatesForReconcile" ->
                     selectCandidatesForReconcile((LocalDateTime) args[0], (LocalDateTime) args[1]);
             case "markReconciled" -> markReconciled((Long) args[0], asLongList(args[1]));
+            case "selectByReconcileBatch" -> selectByReconcileBatch((Long) args[0]);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -244,6 +246,24 @@ public class FakePaymentProofMapper implements InvocationHandler {
     }
 
     /**
+     * 这条凭证能不能被驳回 —— 与真 SQL 的状态守卫逐字一致（2026-10-10 放宽）。
+     *
+     * <p>两种可驳回：<b>待复核的</b>，以及 <b>机器自动通过的</b>
+     * （已核对且复核人为空）。后者是「免人工复核」那条路的出口：机器读到的
+     * 单号可能读错，管理员必须能推翻它。人工确认过的（复核人有值）不在其列。
+     *
+     * @param proof 凭证
+     * @return 可驳回返回 true
+     */
+    private static boolean canReject(PaymentProof proof) {
+        if (isSubmitted(proof)) {
+            return true;
+        }
+        return PaymentProofStatus.CONFIRMED.name().equals(proof.getVerifyStatus())
+                && proof.getConfirmedBy() == null;
+    }
+
+    /**
      * 复核通过。
      *
      * <p><b>公开是刻意的</b>：测试要能直接制造出「已核对」这个前置状态，
@@ -267,6 +287,31 @@ public class FakePaymentProofMapper implements InvocationHandler {
     }
 
     /**
+     * 自动通过（2026-10-10 加）：置为已核对，<b>复核人留空</b>。
+     *
+     * <p>与真 SQL 一致地带状态守卫（只改 SUBMITTED 的）——
+     * 「并发的第二次拿到 0 行」那条路径才有意义。
+     *
+     * <p>{@code confirmedBy} 置空是这一步的语义本身：它不是某个管理员认下的，
+     * 而是「识别到了有效交易单号」的结果（见
+     * {@code PaymentProofMapper#autoConfirm}）。
+     *
+     * @param id 凭证 ID
+     * @return 受影响行数；0 表示已被处理过或不存在
+     */
+    private int autoConfirm(Long id) {
+        PaymentProof proof = selectById(id);
+        if (proof == null || !isSubmitted(proof)) {
+            return 0;
+        }
+        proof.setVerifyStatus(PaymentProofStatus.CONFIRMED.name());
+        proof.setConfirmedBy(null);
+        proof.setConfirmedAt(LocalDateTime.now());
+        proof.setRejectReason(null);
+        return 1;
+    }
+
+    /**
      * 复核不通过。公开的理由同 {@link #confirm(Long, Long)}。
      *
      * @param id      凭证 ID
@@ -276,7 +321,7 @@ public class FakePaymentProofMapper implements InvocationHandler {
      */
     public int reject(Long id, Long adminId, String reason) {
         PaymentProof proof = selectById(id);
-        if (proof == null || !isSubmitted(proof)) {
+        if (proof == null || !canReject(proof)) {
             return 0;
         }
         proof.setVerifyStatus(PaymentProofStatus.REJECTED.name());
@@ -399,6 +444,18 @@ public class FakePaymentProofMapper implements InvocationHandler {
             }
         }
         return affected;
+    }
+
+    /**
+     * 取某个批次认领下来的凭证。
+     *
+     * @param batchId 批次 ID
+     * @return 该批次认领的凭证
+     */
+    private List<PaymentProof> selectByReconcileBatch(Long batchId) {
+        return rows.values().stream()
+                .filter(p -> batchId.equals(p.getReconcileBatchId()))
+                .toList();
     }
 
     /**

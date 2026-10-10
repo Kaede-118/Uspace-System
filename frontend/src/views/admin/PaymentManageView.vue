@@ -655,7 +655,15 @@ onMounted(() => {
             <div class="proof__main">
               <div class="proof__line">
                 <span class="proof__no">{{ p.orderNo }}</span>
-                <span :class="statusClassOf(p.verifyStatus)">{{ p.verifyStatusLabel }}</span>
+                <span class="proof__badges">
+                  <span :class="statusClassOf(p.verifyStatus)">{{ p.verifyStatusLabel }}</span>
+                  <!--
+                    「对账确认」与「到账」是两件事（见 AdminProofVo#reconcileBatchId）：
+                    到账 = 管理员/机器认下了这张截图；已对账 = 它与收款账单勾稽上了。
+                    管理员先认了、账单隔月才导出，两者本来就会错开 —— 分开显示
+                  -->
+                  <span v-if="p.reconcileBatchId" class="proof__reconciled">已对账</span>
+                </span>
               </div>
 
               <div class="proof__meta">
@@ -679,11 +687,15 @@ onMounted(() => {
               <!--
                 机器读出的单号 vs 用户确认的单号。两者不一致时标出来 ——
                 要么用户改过（他知道原号不对），要么机器读错了；
-                无论哪一种，都正是管理员在这一行上要看的那一眼
+                无论哪一种，都正是管理员在这一行上要看的那一眼。
+
+                ⚠️ 用户【没填】时不标「不一致」（2026-10-10 修）：那是拿空白去比，
+                必然误报。群内传图那条路没有填单号的表单，走这条路的凭证
+                paymentNo 恒为空 —— 机器替他认出来是件好事，不是异常
               -->
               <div v-if="p.ocrPaymentNo" class="proof__meta">
                 <span>识别单号 {{ p.ocrPaymentNo }}</span>
-                <span v-if="p.ocrPaymentNo !== p.paymentNo" class="proof__warn">（与提交的不一致）</span>
+                <span v-if="p.paymentNo && p.ocrPaymentNo !== p.paymentNo" class="proof__warn">（与提交的不一致）</span>
               </div>
 
               <!--
@@ -699,6 +711,19 @@ onMounted(() => {
               <div class="proof__meta">{{ formatDateTime(p.createdAt) }}</div>
 
               <!--
+                复核来源：机器自动通过（confirmedBy 为空）与管理员核对分开说 ——
+                前者是「识别到单号、金额相符、无重复引用」时系统当场放的
+                （三道闸见 PaymentProofService），看到这个标记就知道
+                「这张图没有被人工看过」，觉得可疑可以补一次驳回
+              -->
+              <div v-if="p.verifyStatus === 'CONFIRMED' && p.confirmedAt" class="proof__meta">
+                <span :class="{ 'proof__warn': p.confirmedBy == null }">
+                  {{ p.confirmedBy == null ? '机器自动通过（未人工核对）' : '管理员核对' }}
+                </span>
+                · {{ formatDateTime(p.confirmedAt) }}
+              </div>
+
+              <!--
                 「提交即结清」的提示：这两类（订单 / 商品）在用户提交那一刻
                 就已经落账了，驳回不会自动回退 —— 必须让管理员看见，
                 否则他点完「未通过」会以为事情结束了
@@ -712,8 +737,23 @@ onMounted(() => {
               <p v-if="p.rejectReason" class="proof__flag">未通过原因：{{ p.rejectReason }}</p>
             </div>
 
-            <div v-if="p.verifyStatus === 'SUBMITTED'" class="proof__ops">
-              <button class="proof__op" :disabled="reviewingId === p.id" @click="onConfirmProof(p)">
+            <!--
+              待复核的可以「确认 / 未通过」；机器自动通过（CONFIRMED 且复核人为空）
+              只剩「未通过」—— 它已经确认过了，但那次没有人看过图，
+              管理员补一次驳回是合法动作（后端驳回守卫同样认这个区分）。
+              管理员亲手核对过的不可覆盖：复核是唯一的资金结论
+            -->
+            <div
+              v-if="p.verifyStatus === 'SUBMITTED'
+                || (p.verifyStatus === 'CONFIRMED' && p.confirmedBy == null)"
+              class="proof__ops"
+            >
+              <button
+                v-if="p.verifyStatus === 'SUBMITTED'"
+                class="proof__op"
+                :disabled="reviewingId === p.id"
+                @click="onConfirmProof(p)"
+              >
                 确认
               </button>
               <button
@@ -1445,6 +1485,26 @@ onMounted(() => {
   font-size: 12px;
   color: var(--c-text);
   word-break: break-all;
+}
+
+/* 状态与「已对账」并排成一组靠右 —— proof__line 是 space-between 的两栏布局 */
+.proof__badges {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+/*
+ * 「已对账」标记。中性色 —— 它是一条补充信息（与账单勾稽上了），
+ * 不是状态变更：到账与否看左边那个状态标签
+ */
+.proof__reconciled {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--c-card);
+  color: var(--c-text-sub);
+  font-size: 11px;
 }
 
 .proof__meta {

@@ -2,6 +2,7 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.CreatePaymentRequest;
 import com.kaede.uspace.order.dto.PaymentCreateCommand;
 import com.kaede.uspace.order.dto.PaymentCreateResult;
@@ -53,14 +54,24 @@ public class PaymentService {
     private final List<PaymentTargetHandler> handlers;
     private final SysUserMapper userMapper;
 
+    /**
+     * 交易流水。到账那一刻记一行 ——（2026-10-10 加）
+     *
+     * <p>两条到账路径（凭证落账与线上回调）都汇到本类，所以流水也只在这里写，
+     * 不会漏也不会重。
+     */
+    private final TradeLogService tradeLogService;
+
     public PaymentService(PaymentGateway paymentGateway,
                           PaymentProperties properties,
                           List<PaymentTargetHandler> handlers,
-                          SysUserMapper userMapper) {
+                          SysUserMapper userMapper,
+                          TradeLogService tradeLogService) {
         this.paymentGateway = paymentGateway;
         this.properties = properties;
         this.handlers = handlers;
         this.userMapper = userMapper;
+        this.tradeLogService = tradeLogService;
     }
 
     // ==================================================================
@@ -346,6 +357,11 @@ public class PaymentService {
         // 这里是唯一一处「所有收款共用」的写库点，写错列不会有任何报错，
         // 只会让两个累计口径悄悄错位
         accumulatePaid(handler, target);
+        // 到账流水。线上回调没有具体操作人，来源记 SYSTEM；
+        // 平台交易号原样留下 —— 对账时要靠它与账单勾稽
+        tradeLogService.recordPayReceived(target.getType(), target.getOutTradeNo(),
+                target.getUserId(), target.getAmount(), notify.getTransactionNo(),
+                TradeSource.SYSTEM, null, "线上通道回调");
         log.info("[支付] 支付完成并已累加用户{} outTradeNo={} userId={} 金额={}",
                 handler.paidCategory().getLabel(), notify.getOutTradeNo(),
                 target.getUserId(), target.getAmount());
@@ -415,12 +431,15 @@ public class PaymentService {
      *
      * @param target      支付目标
      * @param channel     实际收款通道，凭证路径恒为 {@link PaymentChannel#QR_UPLOAD}
-     * @param paymentNo   用户填写的交易流水号，可空
+     * @param paymentNo   用户填写的交易流水号（或识别结果替他填上的那一串），可空
      * @param confirmedBy 确认人：系统自动落账传 null，管理员复核传其 ID
+     * @param source      来源渠道：「提交即落账」的两类传提交时的渠道
+     *                    （网页端 / 群内），管理员复核落账传 {@code ADMIN} ——
+     *                    只进流水，不参与任何判断
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public void settleByProof(PaymentTarget target, PaymentChannel channel,
-                              String paymentNo, Long confirmedBy) {
+                              String paymentNo, Long confirmedBy, TradeSource source) {
         // 已经落过账的直接返回。走到这里有两种情形，都是正常的：
         // 并发双击的第二次；或者管理员复核一笔「提交即交付」的凭证 ——
         // 那笔在用户提交那一刻就已经落过账了，复核只是登记
@@ -449,6 +468,11 @@ public class PaymentService {
         }
 
         accumulatePaid(handler, target);
+        // 到账流水。备注写明这笔是怎么到账的 —— 同一条「收款到账」，
+        // 包场与月卡是管理员复核的结果，订单与商品是提交那刻自动落的
+        tradeLogService.recordPayReceived(target.getType(), target.getOutTradeNo(),
+                target.getUserId(), target.getAmount(), paymentNo, source, confirmedBy,
+                confirmedBy == null ? "识别到交易单号，自动结清（免人工复核）" : "管理员复核通过");
         log.info("[支付] 凭证落账完成 outTradeNo={} 通道={} 类型={} 金额={} 累计={} 确认人={}",
                 target.getOutTradeNo(), channel, target.getType(), target.getAmount(),
                 handler.paidCategory().getLabel(),

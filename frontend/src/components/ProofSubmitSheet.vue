@@ -59,6 +59,13 @@ const ocrText = ref('')
 const lastAutoNo = ref('')
 const loadingQrs = ref(false)
 const submitting = ref(false)
+/**
+ * 是否停在「确认提交」这一步（同层换视图，不叠弹层）。
+ *
+ * <p>2026-10-10 由用户定：提交前先让用户看一眼自己传的是哪张图、单号填没填。
+ * 传错图的代价是走一轮「等管理员处理」再被驳回 —— 而这一步只花两秒。
+ */
+const confirming = ref(false)
 
 /** 选中的收款码对象；一张都没配时为 null */
 const selectedQr = computed(() => qrs.value.find((q) => q.id === selectedQrId.value) || null)
@@ -219,6 +226,7 @@ watch(
       ocrAmount.value = null
       ocrText.value = ''
       lastAutoNo.value = ''
+      confirming.value = false
       loadQrs()
     }
   }
@@ -228,6 +236,47 @@ watch(
 <template>
   <div v-if="visible" class="sheet-mask" @click.self="onClose">
     <div class="sheet">
+      <!--
+        第二步：提交前的确认（同层换视图，不叠弹层 —— 与后台包场页的
+        「过去时间确认」同一个模式）。让用户把「传的是哪张图、单号填没填」
+        再看一眼：传错的代价是等一轮复核再被驳回，而这一步只花两秒
+      -->
+      <template v-if="confirming">
+        <p class="sheet__title">确认提交付款凭证</p>
+
+        <div class="sheet__amount">
+          <span class="sheet__money">¥{{ amount ?? '0.00' }}</span>
+        </div>
+
+        <img v-if="proofUrl" class="sheet__confirm-shot" :src="proofUrl" alt="付款截图" />
+        <p v-if="paymentNo.trim()" class="sheet__confirm-line">
+          交易单号：{{ paymentNo.trim() }}
+        </p>
+        <p v-else class="sheet__confirm-line sheet__confirm-line--muted">
+          未填交易单号（选填）—— 填上便于对账，不填也能提交
+        </p>
+
+        <p class="sheet__note">
+          请先确认截图清晰、金额与单号可辨认 —— 看不清的话管理员会驳回，届时可以重新上传。
+        </p>
+        <p class="sheet__note">
+          提交后系统会先自动核对：识别到单号且金额相符的将当场结清；
+          其余进入人工复核，管理员确认后生效。
+        </p>
+
+        <button class="btn btn-primary" :disabled="submitting" @click="onSubmit">
+          {{ submitting ? '提交中…' : '确认提交' }}
+        </button>
+        <button
+          class="btn btn-ghost sheet__cancel"
+          :disabled="submitting"
+          @click="confirming = false"
+        >
+          返回修改
+        </button>
+      </template>
+
+      <template v-else>
       <p class="sheet__title">扫码付款</p>
 
       <div class="sheet__amount">
@@ -293,10 +342,11 @@ watch(
         提交后管理员会核对到账情况。订单与商品提交即结清，包场与月卡需等确认。
       </p>
 
-      <button class="btn btn-primary" :disabled="!canSubmit" @click="onSubmit">
-        {{ submitting ? '提交中…' : '提交付款凭证' }}
+      <button class="btn btn-primary" :disabled="!canSubmit" @click="confirming = true">
+        提交付款凭证
       </button>
       <button class="btn btn-ghost sheet__cancel" @click="onClose">稍后再说</button>
+      </template>
     </div>
   </div>
 </template>
@@ -431,6 +481,29 @@ watch(
   margin-top: var(--sp-2);
   font-size: 12px;
   line-height: 1.6;
+  color: var(--c-text-muted);
+}
+
+/* 确认页的截图缩略 —— 让人再看一眼传的是哪张（contain 而不是 cover：看全图） */
+.sheet__confirm-shot {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  margin-top: var(--sp-3);
+  object-fit: contain;
+  border-radius: var(--r-btn);
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+}
+
+.sheet__confirm-line {
+  margin-top: var(--sp-2);
+  font-size: 13px;
+  color: var(--c-text);
+  word-break: break-all;
+}
+
+.sheet__confirm-line--muted {
   color: var(--c-text-muted);
 }
 

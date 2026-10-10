@@ -2,6 +2,7 @@ package com.kaede.uspace.qqbot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kaede.uspace.qqbot.protocol.OneBotAction;
+import com.kaede.uspace.qqbot.protocol.OneBotMessageSegment;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -9,6 +10,8 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 
+import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -171,9 +174,55 @@ public class OneBotClient {
     }
 
     /**
+     * 往群里发一张图片（可附一句文本）。
+     *
+     * <p>图片按 <b>base64 内联</b>（{@code base64://}）—— 名册图是「看一眼就过期」
+     * 的即时快照：传 URL 要图床、写文件要维护清理，而它只有几十 KB，
+     * 一次帧就发完了。理由详见 {@code OneBotMessageSegment#image}。
+     *
+     * <p>失败处置与 {@link #sendGroupMessage} 完全一致（绝不抛异常）——
+     * 调用方据此回落纯文本版（名册那条指令的降级路径）。
+     *
+     * @param groupId 群号
+     * @param image   PNG 字节
+     * @param text    图片之前的文本；为 null 或空串时只发图片
+     * @return 帧确实发出去了返回 true
+     */
+    public boolean sendGroupMessageImage(Long groupId, byte[] image, String text) {
+        return image == null
+                ? false
+                : sendGroupMessageImages(groupId, List.of(image), text);
+    }
+
+    /**
+     * 往群里发一组图片 —— <b>全部塞在同一条消息里</b>（2026-10-10 由用户定）。
+     *
+     * <p>名册每 4 人一张图，逐张各发一条会把群刷屏；段数组支持一条消息多图，
+     * 客户端渲染成图集。失败处置与 {@link #sendGroupMessage} 完全一致
+     * （绝不抛异常），调用方据此回落纯文本名册。
+     *
+     * @param groupId 群号
+     * @param images  PNG 字节列表，至少一张
+     * @param text    图片之前的文本；为 null 或空串时只发图
+     * @return 帧确实发出去了返回 true
+     */
+    public boolean sendGroupMessageImages(Long groupId, List<byte[]> images, String text) {
+        if (groupId == null || images == null || images.isEmpty()) {
+            return false;
+        }
+        List<String> files = images.stream()
+                .map(image -> "base64://" + Base64.getEncoder().encodeToString(image))
+                .toList();
+        String echo = "uspace-" + echoSequence.incrementAndGet();
+        int bytes = images.stream().mapToInt(image -> image.length).sum();
+        return dispatch(OneBotAction.sendGroupMessageWithImages(groupId, files, text, echo), echo,
+                "群图片x" + images.size() + " groupId=" + groupId + " bytes=" + bytes);
+    }
+
+    /**
      * 给某个人发一条私聊消息。
      *
-     * <p>目前唯一的用途是群指令 {@code /开门}：把<b>固定的限时密码</b>单独发给本人 ——
+     * <p>目前唯一的用途是群指令 {@code fw开门}：把<b>固定的限时密码</b>单独发给本人 ——
      * 群消息所有人可见，密码不能出现在那里。
      *
      * <p>⚠️ <b>返回 true 只代表「帧发出去了」，不代表对方收到了</b>：
@@ -220,12 +269,32 @@ public class OneBotClient {
         try {
             current.sendMessage(new TextMessage(objectMapper.writeValueAsString(action)));
             log.info("[QQ机器人] 已发送 {} echo={} 内容={}",
-                    description, echo, action.getParams().get("message"));
+                    description, echo, summarize(action.getParams().get("message")));
             return true;
         } catch (Exception e) {
             log.error("[QQ机器人] 发送失败 {} echo={}", description, echo, e);
             return false;
         }
+    }
+
+    /**
+     * 把出站消息压成一行日志内容。
+     *
+     * <p><b>段数组只报「段类型」不报内容</b>：图片段里是一整串 base64
+     *（几十 KB），照原样打出来会把日志淹掉，而那张图本来就能在群里看到。
+     * 纯文本消息照旧原样打印 —— 它是排查指令问题时唯一的第一手材料。
+     *
+     * @param message 动作里的 {@code message} 字段（字符串或段数组）
+     * @return 可直接打日志的对象：字符串原样返回、段数组给出类型列表
+     */
+    private static Object summarize(Object message) {
+        if (!(message instanceof List<?> segments)) {
+            return message;
+        }
+        return segments.stream()
+                .map(segment -> segment instanceof OneBotMessageSegment seg
+                        ? seg.getType() : "?")
+                .toList();
     }
 
     /**

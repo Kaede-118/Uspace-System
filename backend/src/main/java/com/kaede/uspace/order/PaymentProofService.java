@@ -6,6 +6,7 @@ import com.kaede.uspace.common.config.UploadProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.AdminProofVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
@@ -13,6 +14,7 @@ import com.kaede.uspace.order.dto.ProofSubmitVo;
 import com.kaede.uspace.order.dto.RejectedProofVo;
 import com.kaede.uspace.order.entity.PayQr;
 import com.kaede.uspace.order.entity.PaymentProof;
+import com.kaede.uspace.order.event.PaymentProofPendingEvent;
 import com.kaede.uspace.order.event.PaymentProofRejectedEvent;
 import com.kaede.uspace.order.mapper.PayQrMapper;
 import com.kaede.uspace.order.mapper.PaymentProofMapper;
@@ -45,14 +47,33 @@ import java.util.stream.Collectors;
  * <table border="1">
  *   <caption>提交之后</caption>
  *   <tr><th>类型</th><th>提交时</th><th>管理员复核时</th></tr>
- *   <tr><td>订单 / 商品</td><td><b>当场落账</b>（订单转已支付、库存当场扣减）</td>
- *       <td>纯登记 —— 钱早就算收到了，复核只是留个结论</td></tr>
+ *   <tr><td>订单 / 商品</td><td><b>识别到有效交易单号时当场落账</b>
+ *       （订单转已支付、库存当场扣减），并自动置为已核对</td>
+ *       <td>没自动通过的那些才轮到人 —— 复核通过时才落账</td></tr>
  *   <tr><td>包场 / 月卡</td><td>只落凭证</td>
  *       <td><b>此刻才落账</b>（生成邀请令牌、发卡）</td></tr>
  * </table>
  * 这条差异不是这里硬编码的，而是问 {@link PaymentTargetHandler#deliverOnSubmit} ——
  * 对包场与月卡来说「放行」与「落账」是同一件事（邀请令牌与卡只在
  * {@code markPaid} 里产生），所以它们必须等复核。
+ *
+ * <h3>小额收款的自动通过（2026-10-10 加）</h3>
+ *
+ * <p>扫码转账是投产时唯一的收款方式，管理员就是唯一的对账环节。
+ * 把「逐条看」降成「只看对不上的」，靠的是两条：
+ * <ol>
+ *   <li><b>自动通过</b> —— 订单与商品（{@code deliverOnSubmit} 为 true 的两类）
+ *       在识别到有效交易单号时当场结清并置为已核对，不打扰任何人。
+ *       三道闸见 {@link #canAutoApprove}：有单号、单号未被别的凭证引用、
+ *       识别金额与应付一致（识别不出金额不拦）</li>
+ *   <li><b>进队列就播报</b> —— 没自动通过的一律落到人工复核，同时推一条到
+ *       店主群（{@link PaymentProofPendingEvent}），把「记得去后台看一眼」
+ *       交给播报 —— 人工复核最大的风险不是看错，是没人记得看</li>
+ * </ol>
+ *
+ * <p>⚠️ <b>「没识别到交易单号就不算结清」是刻意的</b>：只有一串能对得上账的
+ * 单号才证明「钱真的进了这个收款账号」；没有它的时候，用户交上来的
+ * 可能只是一张随手拍的图。代价是那一笔要等人 —— 由上面第二条兜住。
  *
  * <p><b>由此带来的风险要说清楚</b>：订单与商品是「先交付后复核」，
  * 若复核不通过，系统<b>不能自动回退</b>（订单已 PAID、库存已扣、累计消费已加），
@@ -106,6 +127,14 @@ public class PaymentProofService {
     private final ApplicationEventPublisher events;
 
     /**
+     * 交易流水。提交与驳回各记一行 ——（2026-10-10 加）
+     *
+     * <p>到账那一行不在这里：它由 {@link #paymentService} 的落账方法写
+     *（两条到账路径都汇到那里）。
+     */
+    private final TradeLogService tradeLogService;
+
+    /**
      * 构造器注入。
      *
      * @param proofMapper      凭证数据访问
@@ -115,6 +144,7 @@ public class PaymentProofService {
      * @param handlers         全部支付目标处理器，按类型找对应的那一个
      * @param paymentService   支付服务，落账走它的 {@code settleByProof}
      * @param events           事件发布器，驳回之后通知本人
+     * @param tradeLogService  交易流水
      */
     public PaymentProofService(PaymentProofMapper proofMapper,
                                PayQrMapper payQrMapper,
@@ -122,7 +152,8 @@ public class PaymentProofService {
                                UploadProperties uploadProperties,
                                List<PaymentTargetHandler> handlers,
                                PaymentService paymentService,
-                               ApplicationEventPublisher events) {
+                               ApplicationEventPublisher events,
+                               TradeLogService tradeLogService) {
         this.proofMapper = proofMapper;
         this.payQrMapper = payQrMapper;
         this.userMapper = userMapper;
@@ -130,6 +161,7 @@ public class PaymentProofService {
         this.handlers = handlers;
         this.paymentService = paymentService;
         this.events = events;
+        this.tradeLogService = tradeLogService;
     }
 
     // ==================================================================
@@ -148,11 +180,13 @@ public class PaymentProofService {
      *
      * @param userId  当前登录用户 ID
      * @param request 凭证内容
+     * @param source  来源渠道（网页端 / 群内），只进交易流水，不参与任何判断
      * @return 成功时返回提交结果（含「是否已交付」）；目标不存在或不属于该用户、
      *         图片路径不合法、已被驳回时返回对应的失败码
      */
     @Transactional
-    public BizResult<ProofSubmitVo> submit(Long userId, ProofSubmitRequest request) {
+    public BizResult<ProofSubmitVo> submit(Long userId, ProofSubmitRequest request,
+                                           TradeSource source) {
         PaymentTargetHandler handler = handlerOf(request.getTargetType());
         if (handler == null) {
             return BizResult.fail(ErrorCode.PARAM_INVALID, "不支持的收款类型");
@@ -182,10 +216,21 @@ public class PaymentProofService {
                         target.getType(), target.getId());
                 return BizResult.fail(ErrorCode.PAYMENT_ALREADY_PAID);
             }
-            // ② 已核对：幂等返回，绝不覆盖 —— 覆盖会把一条已核对的凭证打回待复核，
-            //    管理员白干一次，而用户看不出任何异常
-            if (PaymentProofStatus.CONFIRMED.name().equals(existing.getVerifyStatus())) {
-                log.info("[凭证] 重复提交，该笔已核对，幂等返回 target={}#{}",
+            /*
+             * ② 已核对 —— 分两种，这是 2026-10-10 特意分开的（由用户提出要区分）：
+             *
+             *   · 人工确认过（confirmed_by 有值）：幂等返回，绝不覆盖 ——
+             *     覆盖会把一个管理员的结论打回待复核，而用户看不出任何异常
+             *   · 机器自动通过（confirmed_by 为空）：**放行重交**。
+             *     「免人工复核」本来就不该等于「人工确认过」：用户发现自己
+             *     流水号填错了一个字，就该能自己改回来，而不是非等管理员推翻。
+             *     重交之后凭证落回待复核（upsert 那一步会翻状态），
+             *     由人再看一眼 —— 这正是「机器放行的可以被人推翻」那条规矩
+             *     在提交侧的镜像
+             */
+            if (PaymentProofStatus.CONFIRMED.name().equals(existing.getVerifyStatus())
+                    && existing.getConfirmedBy() != null) {
+                log.info("[凭证] 重复提交，该笔已由管理员核对，幂等返回 target={}#{}",
                         target.getType(), target.getId());
                 return BizResult.ok(ProofSubmitVo.of(target.getType().name(), target.getId(),
                         PaymentProofStatus.CONFIRMED, true));
@@ -219,7 +264,17 @@ public class PaymentProofService {
             return BizResult.fail(ErrorCode.PARAM_INVALID, "收款码不存在，请刷新页面重新扫码");
         }
 
+        // 用户没填流水号时，用识别到的那一串补上（2026-10-10 加）：
+        // 群内传图那条路根本没有填单号的表单，不补的话它的 payment_no 恒为空 ——
+        // 而对账正是靠这个号把账单与凭证勾稽起来（没号就是一屏「没填流水号」的差异）。
+        // ocr_payment_no 那一列照旧保留：它记的是「机器读到什么」，
+        // payment_no 记的是「我们照它填了什么」，事后核对时两者分得开。
+        // 截断长度与列宽一致（VARCHAR(64)），与 applyOcrFields 用的是同一个常量
         String paymentNo = trimToNull(request.getPaymentNo());
+        if (paymentNo == null) {
+            paymentNo = truncate(trimToNull(request.getOcrPaymentNo()),
+                    MAX_OCR_PAYMENT_NO_LENGTH);
+        }
         PaymentProof proof = new PaymentProof();
         proof.setTargetType(target.getType().name());
         proof.setTargetId(target.getId());
@@ -232,21 +287,58 @@ public class PaymentProofService {
         applyOcrFields(proof, request);
         proofMapper.upsert(proof);
 
-        flagDuplicatePaymentNo(paymentNo, target);
+        boolean duplicateRisk = flagDuplicatePaymentNo(paymentNo, target);
 
-        // 提交即交付的两类（订单 / 商品）当场落账。放在 upsert 之后 ——
-        // 凭证已经在库里了，落账若失败整个事务回滚，不会出现「钱记了、凭证没有」
-        boolean delivered = targetPaid;
-        if (!targetPaid && handler.deliverOnSubmit()) {
-            paymentService.settleByProof(target, PaymentChannel.QR_UPLOAD, paymentNo, null);
-            delivered = true;
+        // 取回凭证 ID：upsert 是手写 SQL，MyBatis 不回填主键（见 Mapper 的注释），
+        // 而下面的自动通过与播报都要用它
+        PaymentProof saved = proofMapper.selectByTarget(target.getType().name(), target.getId());
+        Long proofId = saved == null ? null : saved.getId();
+        if (proofId == null) {
+            // 到不了这里：上面那条 upsert 刚写过。真出现说明有人改了写入路径
+            log.error("[凭证] 写完凭证却查不回 ID，自动通过与播报都会跳过 单号={}",
+                    target.getOutTradeNo());
         }
 
-        log.info("[凭证] 用户提交付款凭证 target={}#{} 单号={} 金额={} 流水号={} 已交付={}",
+        // 流水：提交凭证这一笔。四类收款都记 ——「提交过、后来被驳回」
+        // 与「压根没提交过」在事后是两件完全不同的事
+        tradeLogService.recordProofSubmitted(target.getType(), target.getOutTradeNo(),
+                userId, target.getAmount(), paymentNo, source);
+
+        /*
+         * 自动通过（2026-10-10 加）：小额的两类（订单与商品，即 deliverOnSubmit 为 true 的）
+         * 在「识别到有效交易单号」时当场结清、无须人工复核。
+         *
+         * 放在 upsert 之后：凭证已经在库里了，落账若失败整个事务回滚，
+         * 不会出现「钱记了、凭证没有」。
+         */
+        boolean delivered = targetPaid;
+        boolean autoApproved = false;
+        if (!targetPaid && handler.deliverOnSubmit()
+                && canAutoApprove(paymentNo, duplicateRisk, request.getOcrAmount(), target)) {
+            paymentService.settleByProof(target, PaymentChannel.QR_UPLOAD, paymentNo, null, source);
+            delivered = true;
+            autoApproved = confirmAutomatically(proofId, target);
+        }
+
+        /*
+         * 没自动通过的一律进了人工复核队列 —— 推一条到店主群，
+         * 把「记得去后台看一眼」这件事交给播报（人工复核最大的风险是没人记得看）。
+         *
+         * 已支付后换图重交的也在其列：钱早到账了，但这次改的是「这条凭证长什么样」，
+         * 仍要人看一眼。
+         */
+        if (!autoApproved) {
+            events.publishEvent(new PaymentProofPendingEvent(proofId, target.getType().name(),
+                    target.getOutTradeNo(), target.getAmount(),
+                    pendingReasonOf(paymentNo, duplicateRisk, request.getOcrAmount(), target)));
+        }
+
+        log.info("[凭证] 用户提交付款凭证 target={}#{} 单号={} 金额={} 流水号={} 已交付={} 自动通过={}",
                 target.getType(), target.getId(), target.getOutTradeNo(),
-                target.getAmount(), paymentNo, delivered);
+                target.getAmount(), paymentNo, delivered, autoApproved);
         return BizResult.ok(ProofSubmitVo.of(target.getType().name(), target.getId(),
-                PaymentProofStatus.SUBMITTED, delivered));
+                autoApproved ? PaymentProofStatus.CONFIRMED : PaymentProofStatus.SUBMITTED,
+                delivered));
     }
 
     // ==================================================================
@@ -386,6 +478,19 @@ public class PaymentProofService {
                 proofId, proof.getUserId(), proof.getOrderNo(),
                 proof.getTargetType(), reason.trim()));
 
+        // 流水：驳回这一笔（来源恒为 ADMIN，记在 TradeLogService 里）。
+        // 类型认不出时只记 error 不中断 —— 与 settleIfNeeded 同一套处置：
+        // 复核结论已经写进库了，为一条流水把它回滚掉只会让管理员白点一次
+        PaymentTargetHandler rejectedHandler = handlerOfName(proof.getTargetType());
+        if (rejectedHandler == null) {
+            log.error("[凭证] 驳回后要记流水，但收款类型认不出，未记 proofId={} targetType={}",
+                    proofId, proof.getTargetType());
+        } else {
+            tradeLogService.recordProofRejected(rejectedHandler.type(), proof.getOrderNo(),
+                    proof.getUserId(), proof.getAmount(), proof.getPaymentNo(),
+                    adminId, reason.trim());
+        }
+
         return BizResult.ok(null);
     }
 
@@ -479,7 +584,7 @@ public class PaymentProofService {
             return;
         }
         paymentService.settleByProof(target, PaymentChannel.QR_UPLOAD,
-                proof.getPaymentNo(), adminId);
+                proof.getPaymentNo(), adminId, TradeSource.ADMIN);
     }
 
     /**
@@ -495,16 +600,94 @@ public class PaymentProofService {
      *
      * @param paymentNo 本次提交的交易流水号，可为 null（没填就无从查起）
      * @param target    收款目标，仅用于日志
+     * @return 检测到重复返回 true —— 调用方据此把它挡在「自动通过」之外
      */
-    private void flagDuplicatePaymentNo(String paymentNo, PaymentTarget target) {
+    private boolean flagDuplicatePaymentNo(String paymentNo, PaymentTarget target) {
         if (paymentNo == null) {
-            return;
+            return false;
         }
         if (proofMapper.countByPaymentNo(paymentNo) > 1) {
             proofMapper.markDuplicateByPaymentNo(paymentNo);
             log.warn("[凭证] ⚠️ 同一流水号被多笔凭证引用，已标记待人工判断 paymentNo={} 本笔={}#{}",
                     paymentNo, target.getType(), target.getId());
+            return true;
         }
+        return false;
+    }
+
+    /**
+     * 这笔凭证能不能自动通过 —— 三道闸缺一不可。
+     *
+     * <p>把闸设在「识别到有效交易单号」上，是因为那正是用户交错了图时
+     * 最直接的反证：随手拍的表情包、隔壁店的收款截图，都读不出一串
+     * 能对得上账的交易单号。金额那一道是补强 —— 单号抄得对、金额明显不符，
+     * 说明这张图不是这一笔的。
+     *
+     * @param paymentNo     用户填的、或识别到替他填上的交易单号，可为 null
+     * @param duplicateRisk 该单号是否已被别的凭证引用
+     * @param ocrAmount     识别到的金额，可为 null（没识别出）
+     * @param target        收款目标（金额以它为准）
+     * @return 可以自动通过返回 true
+     */
+    private static boolean canAutoApprove(String paymentNo, boolean duplicateRisk,
+                                          BigDecimal ocrAmount, PaymentTarget target) {
+        if (paymentNo == null) {
+            return false;
+        }
+        if (duplicateRisk) {
+            return false;
+        }
+        // 识别不出金额时不拦：那只是「没读到」，不是「对不上」
+        return ocrAmount == null || target.getAmount() == null
+                || ocrAmount.compareTo(target.getAmount()) == 0;
+    }
+
+    /**
+     * 自动通过之后把凭证置成已核对（复核人留空 = 系统自动）。
+     *
+     * @param proofId 凭证 ID，可为 null（拿不到时跳过并记 error）
+     * @param target  收款目标，仅用于日志
+     * @return 真的改成功了返回 true；守卫没放行（并发的那一次）返回 false
+     */
+    private boolean confirmAutomatically(Long proofId, PaymentTarget target) {
+        if (proofId == null) {
+            log.error("[凭证] 自动通过时拿不到凭证 ID，未置为已核对 单号={}",
+                    target.getOutTradeNo());
+            return false;
+        }
+        if (proofMapper.autoConfirm(proofId) == 0) {
+            log.info("[凭证] 自动通过未改动任何记录，视为已被并发处理 proofId={}", proofId);
+            return false;
+        }
+        log.info("[凭证] 已自动通过（识别到交易单号）proofId={} 单号={} 金额={}",
+                proofId, target.getOutTradeNo(), target.getAmount());
+        return true;
+    }
+
+    /**
+     * 为什么这笔要人工复核 —— 一句短语，给播报用。
+     *
+     * <p>四种原因按「哪一道闸没过」给，管理员看一眼就知道该重点核对什么。
+     *
+     * @param paymentNo     交易单号，可为 null
+     * @param duplicateRisk 该单号是否已被别的凭证引用
+     * @param ocrAmount     识别到的金额，可为 null
+     * @param target        收款目标
+     * @return 原因短语
+     */
+    private static String pendingReasonOf(String paymentNo, boolean duplicateRisk,
+                                          BigDecimal ocrAmount, PaymentTarget target) {
+        if (paymentNo == null) {
+            return "未识别到交易单号";
+        }
+        if (duplicateRisk) {
+            return "该交易单号与另一笔凭证重复";
+        }
+        if (ocrAmount != null && target.getAmount() != null
+                && ocrAmount.compareTo(target.getAmount()) != 0) {
+            return "识别到的金额与应付不一致";
+        }
+        return "该类收款需人工复核";
     }
 
     /**

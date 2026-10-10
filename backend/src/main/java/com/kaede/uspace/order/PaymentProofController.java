@@ -2,6 +2,7 @@ package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.security.UserPrincipal;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.ProofImageVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
@@ -69,7 +70,7 @@ public class PaymentProofController {
     public ResponseEntity<ApiResult<ProofSubmitVo>> submit(
             @Valid @RequestBody ProofSubmitRequest request,
             @AuthenticationPrincipal UserPrincipal me) {
-        return ApiResult.of(paymentProofService.submit(me.id(), request));
+        return ApiResult.of(paymentProofService.submit(me.id(), request, TradeSource.WEB));
     }
 
     /**
@@ -91,8 +92,9 @@ public class PaymentProofController {
      */
     @PostMapping(value = "/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResult<ProofImageVo>> uploadImage(
-            @RequestParam(value = "file", required = false) MultipartFile file) {
-        return ApiResult.of(imageService.upload(file));
+            @RequestParam(value = "file", required = false) MultipartFile file,
+            @AuthenticationPrincipal UserPrincipal me) {
+        return ApiResult.of(imageService.upload(file, me.id()));
     }
 
     /**

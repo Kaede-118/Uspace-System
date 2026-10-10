@@ -552,12 +552,21 @@ onUnmounted(() => {
 /*
  * 营业状态 + 正在计费，同一张卡片的左右两端。
  * 没订单时右端整个不渲染，左端自然靠左。
+ *
+ * ⚠️ 窄屏下这一行很容易挤爆：两端都是可折行的中文，
+ * 而 flex 会一路把它们压到【单字宽度】才罢休 —— 表现就是
+ * 「⏱ 正在计费」竖排下来（实测踩过）。
+ * 兜底靠三处配合，缺一条就会退回竖排：
+ *   ① 右端 flex-shrink: 0 —— 不参与压缩
+ *   ② 左端 min-width     —— 压到一定程度就触发换行，而不是无限让位
+ *   ③ wrap + margin-left: auto —— 真放不下时让右端整块掉到下一行，仍靠右
  */
 .home__status-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--sp-3);
+  flex-wrap: wrap;
 }
 
 /* 有进行中订单时整张卡可点（去看密码） */
@@ -567,23 +576,64 @@ onUnmounted(() => {
 
 /* 营业状态：卡片左端 */
 .home__status-line {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
+  /*
+   * ⚠️ 这里【刻意不用 flex】。用了的话圆点与「至 16:00」会各成一列，
+   * 「至 16:00」按自己的宽度占位，把中间的正文挤到只剩几个字宽 ——
+   * 实测 390px 下正文折成 3 行、320px 下折成 6 行，一行三四个字。
+   * 改用普通文本流之后，正文能占满整行，时间跟在它后面自然折行。
+   */
+  /*
+   * basis 取 0 而不是 auto：外层 flex 判断「这一行放不放得下」用的是 flex-basis，
+   * 取 auto 的话左端拿整句话的宽度去参与计算，宽屏下也会被判为放不下、
+   * 右端白白掉到第二行（实测过）。取 0 之后左端宽度由剩余空间决定。
+   */
+  flex: 1 1 0;
+  /* 压到 8 个中文字宽为止 —— 再窄就宁可让右端换行，也不把这句话竖着排 */
+  min-width: 8em;
   font-size: 13px;
   color: var(--c-text-sub);
 }
 
 .home__status-until {
   color: var(--c-text-muted);
+  /* 「至 16:00」是一个整体，不从中间断开 */
+  white-space: nowrap;
+  /*
+   * 与前面正文的间距靠 margin 而不是空格：Vue 模板编译器会把标签之间
+   * 【含换行】的空白整个删掉（默认 whitespace: 'condense'），
+   * 靠空格的话线上就没有间距了，而在模板里看起来一切正常。
+   */
+  margin-left: var(--sp-1);
 }
 
+/*
+ * 营业状态的点。inline-block 而不是 flex item ——
+ * 它要跟正文处在同一段文本流里，正文折行时才能占满整行
+ * （理由见 .home__status-line 的注释）。
+ */
 .dot {
+  display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--c-text-muted);
-  flex-shrink: 0;
+  margin-right: var(--sp-2);
+  vertical-align: middle;
+}
+
+/*
+ * 窄屏：这两块各占一行，不并排。
+ *
+ * 手机上「包场提示」和「正在计费」各自都需要接近整行的宽度 ——
+ * 硬塞在一行里，左边那句会折成三五个字一行（实测 320px 下折了 6 行）。
+ * 并排只在宽屏（平板、桌面）保留，那里确实放得下。
+ * 两块之间的间距由 .home__status-row 的 row-gap 给（flex 换行后 gap 自动变行距）。
+ */
+@media (max-width: 480px) {
+  .home__status-line,
+  .home__running {
+    flex: 1 1 100%;
+  }
 }
 
 .dot--open {
@@ -601,6 +651,10 @@ onUnmounted(() => {
 /* 正在计费：卡片右端，两行（标签 + 金额 / 在店时长） */
 .home__running {
   text-align: right;
+  /* 不参与压缩 —— 少了这条，窄屏下「⏱ 正在计费」会被挤成一字一行 */
+  flex-shrink: 0;
+  /* 只有右端渲染时（没营业状态）也靠右，不被 space-between 甩到左边 */
+  margin-left: auto;
 }
 
 /* 第一行：标签 + 金额，靠右排 */

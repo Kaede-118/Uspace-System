@@ -6,6 +6,7 @@
   "description": "无人值守共享娱乐空间管理系统 · 前端（用户端 Web + 运营后台 Web）",
   "scripts": {
     "dev": "vite",
+    "dev:tunnel": "vite --mode tunnel",
     "build": "vite build",
     "preview": "vite preview"
   },

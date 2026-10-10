@@ -2,6 +2,7 @@ package com.kaede.uspace.promotion;
 
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.security.UserPrincipal;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
@@ -87,7 +88,7 @@ public class CardController {
     @PostMapping("/purchases/{id}/cancel")
     public ResponseEntity<ApiResult<Void>> cancelPurchase(@PathVariable Long id,
                                                           @AuthenticationPrincipal UserPrincipal me) {
-        return ApiResult.of(cardService.cancelPurchase(me.id(), id));
+        return ApiResult.of(cardService.cancelPurchase(me.id(), id, TradeSource.WEB));
     }
 
     /**

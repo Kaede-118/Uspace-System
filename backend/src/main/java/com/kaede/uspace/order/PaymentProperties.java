@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -92,6 +93,26 @@ public class PaymentProperties {
      * （配置写错一个字就启不了服务，比少收一种钱严重得多）。
      */
     private List<String> enabledChannels = List.of(PaymentChannel.QR_UPLOAD.name());
+
+    /**
+     * 同一用户两次<b>成功</b>上传付款截图之间的最小间隔（如 {@code 10s}）。
+     * {@code 0} 表示不限制。
+     *
+     * <p><b>防的是 OCR 额度被烧掉</b>：识别在上传那一刻做一次，而通用文字识别
+     *（高精度版）个人认证每月 1000 次免费 —— 正常一天三十来单用不到上限，
+     * 跑脚本或连点却可以。网页端与群内传图两条路共用这道冷却
+     *（它们走的是同一个上传方法）。
+     *
+     * <p><b>为什么是 10 秒</b>：正常用户「传错了换一张」只需要几秒，
+     * 取值要留出这个余地 —— 参考 QQ 写指令冷却从 20 秒降到 5 秒的那次教训：
+     * 挡住的多数是正常操作时，冷却就成了纯粹的麻烦。而脚本被压到
+     * 每分钟 6 次，识别额度（约每天 33 次）就算保住了。
+     *
+     * <p>⚠️ <b>只有【成功】的上传才计时</b>：文件不合法（不是图片、超大小）
+     * 在识别之前就被挡下、不花额度，若把它也计入冷却，用户换一张合法图
+     * 立刻重传会被莫名拒绝。
+     */
+    private Duration proofImageCooldown = Duration.ofSeconds(10);
 
     /** 模拟实现的参数，{@code provider=mock} 时生效 */
     private final Mock mock = new Mock();

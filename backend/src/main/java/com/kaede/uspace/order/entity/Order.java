@@ -74,11 +74,11 @@ public class Order extends BaseEntity {
     private LocalDateTime passcodeEnd;
 
     /**
-     * 群指令（{@code /开门}）下发的一次性密码，<b>用一次即焚</b>。
+     * 群指令（{@code fw开门}）下发的一次性密码，<b>用一次即焚</b>。
      *
      * <p>它与上面的 {@link #passcode} 是<b>两条独立的进门路径</b>：那一串是可反复使用的
      * 限时密码（网页端可查、私聊发一份，用于兜底）；这一串只在群里发、只能开一次门。
-     * 每次 {@code /开门} 都会重新取一串 —— 不做复用，理由见
+     * 每次 {@code fw开门} 都会重新取一串 —— 不做复用，理由见
      * {@code OneTimePasscodeService} 的类注释。
      *
      * <p><b>⚠️ 它绝不能出现在任何订单视图里</b>（{@code OrderVo} / {@code OrderOpenVo}

@@ -98,7 +98,7 @@ public class QqbotProperties {
     private List<Long> adminGroups = List.of();
 
     /**
-     * 是否允许两条<b>写指令</b>（{@code /开门}、{@code /结账}）。
+     * 是否允许两条<b>写指令</b>（{@code fw开门}、{@code fw结账}）。
      *
      * <p><b>默认关</b>，与 {@link #enabled} 默认关是同一思路：
      * 只读是安全的那一侧，而「机器人开着、却没人知道它还能建单计费」是危险的另一侧。
@@ -110,7 +110,17 @@ public class QqbotProperties {
     private boolean writeEnabled = false;
 
     /**
-     * 本人自查询的金额是否显示（{@code /看看自己} 与 {@code /结账} 的回复里）。
+     * 在店名册是否渲染成图片（{@code uspace.qqbot.instore-image-enabled}）。
+     *
+     * <p>默认 true：{@code fw在店} 回一张卡片图，比一屏文字醒目、
+     * 也不容易被群聊刷走。渲染与发送任何一步失败（本机没有中文字体、
+     * 连接问题）都会<b>自动回落文字版</b> —— 所以关掉它只是为了
+     * 「不想发图」这一种情形，不是缺字体时的兜底（那个渲染器自己会发现）。
+     */
+    private boolean instoreImageEnabled = true;
+
+    /**
+     * 本人自查询的金额是否显示（{@code fw看看自己} 与 {@code fw结账} 的回复里）。
      *
      * <p>⚠️ <b>它与 {@link #isAmountVisible} 各管一件事，不要混，更不要互相推断</b>：
      * <ul>
@@ -119,16 +129,29 @@ public class QqbotProperties {
      *   <li>本开关管的是<b>本人自查询</b> —— 用户自己发指令问自己的消费。
      *       内容是他自己的、触发也是他主动的，所以默认开</li>
      * </ul>
-     * 但两者最终都出现在同一个群里（回复也是群消息）：一条 {@code /结账} 的回复，
+     * 但两者最终都出现在同一个群里（回复也是群消息）：一条 {@code fw结账} 的回复，
      * 群里所有人都看得见金额。<b>「默认开」本身是一种取舍，用户已知情并选择</b>
      * （2026-10-04）。
      */
     private boolean selfAmountVisible = true;
 
     /**
+     * {@code fw开门} 时要不要把固定限时密码<b>私聊</b>给本人。默认关（2026-10-09 起）。
+     *
+     * <p>关掉之后群里只给一次性密码，固定密码的去处只剩网页端的「查看密码」——
+     * 群里那句话也相应改成指路网页端。
+     *
+     * <p><b>为什么默认关</b>：私聊这条路的送达<b>没有任何保证</b>
+     * （机器人不是对方好友时是异步失败的，而 {@code sendPrivateMessage} 返回 true
+     * 只代表帧发出去了）。配了却收不到时，用户看到的是群里一句「已私聊发你」
+     * 和一个空空的私聊窗口 —— 那比一开始就不承诺更糟。
+     */
+    private boolean privatePasscodeEnabled = false;
+
+    /**
      * 同一 QQ 的写指令冷却时长（如 {@code 5s}）。{@code 0} 表示不限制。
      *
-     * <p>防的是连点：每次 {@code /开门} 都会消耗 1 次门锁云额度，
+     * <p>防的是连点：每次 {@code fw开门} 都会消耗 1 次门锁云额度，
      * 而群里的连发是可能的。
      *
      * <p>⚠️ <b>它不是安全防线</b> —— 真正的幂等来自订单模块的
@@ -136,7 +159,7 @@ public class QqbotProperties {
      * 这个冷却只是省额度，挡住的那几秒里用户本来也做不成什么。
      *
      * <p><b>值取 5 秒</b>（2026-10-04 从 20 秒改下来）：商品下单
-     * （{@code /买个可乐}）同样吃这道冷却，而「连着买两样东西」是常态 ——
+     * （{@code fw买个可乐}）同样吃这道冷却，而「连着买两样东西」是常态 ——
      * 20 秒会把第二条挡成一句「操作太频繁」，用户只会以为机器人出毛病了。
      * 5 秒够挡住手抖，又不至于让人等。
      */
@@ -218,12 +241,13 @@ public class QqbotProperties {
         }
         log.info("[QQ机器人] 已启用 端点={} 生效群={} 金额可见群={}",
                 wsPath, allowedGroups, adminGroups);
-        // ⚠️ 写指令与播报的状态无条件打出来：它们是「为什么 /开门 没反应」的
+        // ⚠️ 写指令与播报的状态无条件打出来：它们是「为什么 fw开门 没反应」的
         // 第一手答案，而这类「配置写错了但没人知道」的静默失败最费排查时间
-        log.info("[QQ机器人] 写指令（/开门、/结账）={} 播报={} 自查询金额={}",
+        log.info("[QQ机器人] 写指令（开门/结账/买商品/改库存）={} 播报={} 自查询金额={} 固定密码私聊={}",
                 writeEnabled ? "已启用" : "未启用",
                 broadcast.isEnabled() ? "已启用" : "未启用",
-                selfAmountVisible ? "显示" : "不显示");
+                selfAmountVisible ? "显示" : "不显示",
+                privatePasscodeEnabled ? "已启用" : "未启用");
         if (allowedGroups.isEmpty()) {
             log.warn("[QQ机器人] 没有配置任何群（uspace.qqbot.allowed-groups），"
                     + "机器人不会响应任何群消息 —— 这是为了不把经营数据漏给任意群，不是故障");

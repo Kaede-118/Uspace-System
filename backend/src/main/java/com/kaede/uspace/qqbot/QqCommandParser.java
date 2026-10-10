@@ -1,5 +1,8 @@
 package com.kaede.uspace.qqbot;
 
+import com.kaede.uspace.device.DeviceStatus;
+
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -16,20 +19,26 @@ import java.util.regex.Pattern;
  *
  * <p>先剥掉消息<b>开头的 @ 提及</b>（群里 @机器人 再说指令是常见用法，
  * 而 {@code raw_message} 里那个 @ 是一段 {@code [CQ:at,qq=...]}），
- * 再看有没有<b>前缀</b>（{@code /} 或 {@code fw}），然后<b>整条精确匹配</b>：
+ * 再看有没有<b>前缀</b>（{@code fw}，2026-10-09 起它是唯一的一种），然后<b>整条精确匹配</b>：
  *
  * <ul>
- *   <li>{@code /在店} / {@code fw在店} / {@code /instore} / {@code /rs} → {@link QqCommand.Kind#INSTORE}</li>
- *   <li>{@code /验证 123456} → {@link QqCommand.Kind#VERIFY_CODE}</li>
- *   <li>{@code /开门} / {@code /结账} / {@code /包场} / {@code /看看自己} / {@code /营业} / {@code /价格} / {@code /月卡} → 各自对应</li>
- *   <li>{@code /买个可乐} / {@code /买2个可乐} / {@code /可乐-2} → {@link QqCommand.Kind#PRODUCT_ORDER}</li>
+ *   <li>{@code fw在店} / {@code fwinstore} / {@code fw看看里面} → {@link QqCommand.Kind#INSTORE}</li>
+ *   <li>{@code fw验证 123456} 与 {@code fw取消 &lt;单号&gt;} → 两条带参数的指令，
+ *       见 {@link QqCommand.Kind#VERIFY_CODE} 与 {@link QqCommand.Kind#CANCEL_ORDER}</li>
+ *   <li>{@code fw开门} / {@code fw结账} / {@code fw包场} / {@code fw看看自己} / {@code fw营业} / {@code fw价格} / {@code fw月卡} → 各自对应</li>
+ *   <li>{@code fw买个可乐} / {@code fw买2个可乐} / {@code fw可乐-2} → {@link QqCommand.Kind#PRODUCT_ORDER}</li>
+ *   <li>{@code fw可乐5} → {@link QqCommand.Kind#STOCK_ADJUST}（调整库存，仅管理员 ——
+ *       身份不在这里判，解析器不认人）</li>
+ *   <li>{@code fw拍拍机 1 号维护中} → {@link QqCommand.Kind#DEVICE_STATUS}
+ *       （调整机台状况，仅管理员；状况词就是 {@code DeviceStatus} 的三个中文名）</li>
  *   <li>带了前缀但认不出 → {@link QqCommand.Kind#UNKNOWN_COMMAND}</li>
- *   <li><b>没有前缀 → 一律 {@link QqCommand.Kind#IGNORE}</b></li>
+ *   <li><b>没有前缀 → 一律 {@link QqCommand.Kind#IGNORE}</b>。
+ *       唯一的例外是 {@code kklm}，见 {@link #PREFIX_FREE_ALIASES}</li>
  * </ul>
  *
  * <p>⚠️ <b>商品下单也是封闭的</b>（2026-10-04 改）：它只认<b>带关键词</b>
  * （{@code 买…个…}）或<b>带横杠</b>（{@code 名-数量}）这两种写法，
- * 而两者都显式写着数量。早先设计成「{@code /可乐} 就买一件」，
+ * 而两者都显式写着数量。早先设计成「{@code fw可乐} 就买一件」，
  * 那意味着<b>任何带前缀的未知文本都得当商品名查一遍</b> ——
  * 于是打错的指令会得到一句「没有叫「在店铺」的商品」，白白吓人一跳。
  * 名字存不存在<b>解析器不管</b>（那要查库，会破坏「纯静态」这条性质），
@@ -37,17 +46,19 @@ import java.util.regex.Pattern;
  *
  * <p>⚠️ <b>「整条精确匹配」是这里的核心决定</b>：若改成「包含关键词」，
  * 那么群里一句「我等会儿到店里」就会触发一次在店名册 —— 而群里天天有人这么说。
- * 精确匹配的代价是用户必须把指令发得干净，这个代价由 {@code /帮助} 兜住。
+ * 精确匹配的代价是用户必须把指令发得干净，这个代价由 {@code fw帮助} 兜住。
  *
  * <p>⚠️ <b>「必须带前缀」是加写指令时立下的规矩</b>（2026-10-04）：
  * 在此之前 {@code /} 可有可无，理由是「用户第一次多半不知道要加」。
- * 但 {@code /开门} 会<b>真的建一笔订单并开始计费</b> —— 群里有人喊一声「开门」
+ * 但 {@code fw开门} 会<b>真的建一笔订单并开始计费</b> —— 群里有人喊一声「开门」
  * 若被认成指令，那是一笔白扣的钱，而且当场没人会发现哪里不对。
- * 代价是用户必须知道要加前缀，由 {@code /帮助} 与 {@code UNKNOWN_COMMAND} 的提示兜住。
+ * 代价是用户必须知道要加前缀，由 {@code fw帮助} 与 {@code UNKNOWN_COMMAND} 的提示兜住。
  *
- * <p>唯一带参数的是验证码：{@code /验证 123456}。它同样要求前缀，
- * 且<b>不再接受「纯 6 位数字」</b>（早先是那样的）—— 免得群友随口发的一串数字
- * 去撞别人的验证，也让注册页能把整条指令做成一个复制按钮。
+ * <p><b>带参数的指令有两条</b>：验证码 {@code fw验证 123456} 与取消
+ * {@code fw取消 &lt;单号&gt;}。验证码同样要求前缀，且<b>不再接受「纯 6 位数字」</b>
+ * （早先是那样的）—— 免得群友随口发的一串数字去撞别人的验证，
+ * 也让注册页能把整条指令做成一个复制按钮。取消那条的单号要先过
+ * {@link #isOrderNoLike} 的形状校验（够长 + 全 ASCII 字母数字）。
  */
 public final class QqCommandParser {
 
@@ -62,17 +73,32 @@ public final class QqCommandParser {
     /**
      * 查在店名册。
      *
-     * <p>去掉前导 {@code /} 后再比较，所以集合里都是不带斜杠的形式。
+     * <p>去掉前导 {@code fw} 后再比较，所以集合里都是不带前缀的形式。
      * 「看看里面」是口语化的那一个 —— 群里问「里面有人吗」比「在店」自然，
      * 而它**依然走精确匹配**，所以「看看里面那个人是谁」这种闲聊不会误触发。
      *
      * <p>{@code kklm} 是「看看里面」的拼音首字母（2026-10-04 由用户要求加）——
      * 全在英文键盘上，不必切中文输入法就能发。它只在解析器里认，
-     * {@code /帮助} 不列（那边只给最好记的两三种写法）。
+     * {@code fw帮助} 不列（那边只给最好记的两三种写法）。
      * （同日删掉了 {@code rs}：它不缩写任何中文，记不住也用不上。）
      */
     private static final Set<String> INSTORE_ALIASES =
             Set.of("在店", "instore", "看看里面", "kklm");
+
+    /**
+     * 免前缀的别名：<b>只有 {@code kklm}</b>（2026-10-10 由用户要求）。
+     *
+     * <p>它豁免的是一次前缀体检：四个英文字母的刻意输入不像闲聊，
+     * 而且全在英文键盘上 —— 店里想瞄一眼「现在有谁在」的人不必切中文输入法。
+     *
+     * <p>⚠️ <b>豁免只给这一个，中文别名与其余英文别名都必须带 {@code fw}</b>：
+     * 「在店」「看看里面」在群聊里是常见词，放了它们等于把「指令是封闭集合」
+     * 那条决定拆掉一半 —— 而那条决定的收益是「任何一次误判都可能真的建单计费」
+     * （见类注释）。{@code kklm} 没有这个风险，它是刻意的输入，不是谁的口头话。
+     *
+     * <p>仍走<b>整条精确匹配</b>：{@code kklm一下} 不是指令，照旧当闲聊静默。
+     */
+    private static final Set<String> PREFIX_FREE_ALIASES = Set.of("kklm");
 
     /** 同上 */
     private static final Set<String> HELP_ALIASES = Set.of("帮助", "help", "?");
@@ -99,8 +125,8 @@ public final class QqCommandParser {
      *
      * <p>⚠️ <b>「买单」不是别名</b>（2026-10-04 由用户要求删掉）。它与商品下单的
      * 「买…个…」共用「买」字开头，两条语法混在一起容易被误用 ——
-     * 看到 {@code /买单} 能结账，就会以为 {@code /买可乐} 也能下单。
-     * 删掉之后 {@code /买单} 落到「没认出这条指令」，而那是个正确的反馈：
+     * 看到 {@code fw买单} 能结账，就会以为 {@code fw买可乐} 也能下单。
+     * 删掉之后 {@code fw买单} 落到「没认出这条指令」，而那是个正确的反馈：
      * 它确实不是一条指令了。
      *
      * <p>顺带一提，别名必须用<b>同一个 lower</b> 比较（见 {@code parse} 里那段说明）。
@@ -121,6 +147,15 @@ public final class QqCommandParser {
      * {@code now} 是给懒得打中文的人留的。
      */
     private static final Set<String> CURRENT_ORDER_ALIASES = Set.of("now", "当前订单");
+
+    /**
+     * 查本人未付款的单。
+     *
+     * <p>别名给「欠费」—— 群里催自己账的说法就是它；{@code unpaid} 照顾英文派。
+     * ⚠️ <b>「账单」刻意不给</b>：它更像在说「历史订单」，
+     * 而这条只讲<b>还没付钱的那几笔</b>。
+     */
+    private static final Set<String> UNPAID_ALIASES = Set.of("未付款", "欠费", "unpaid");
 
     /** 查门店营业状态 */
     private static final Set<String> STORE_STATUS_ALIASES = Set.of("营业", "营业吗", "status");
@@ -167,14 +202,12 @@ public final class QqCommandParser {
      */
     private static final Pattern VERIFY_CODE_PATTERN = Pattern.compile("^\\d{6}$");
 
-    /** 斜杠前缀。它是「我在跟机器人说话」的标志，见 {@link QqCommand.Kind} */
-    private static final char COMMAND_PREFIX = '/';
-
     /**
-     * 文字前缀 {@code fw}，与斜杠等价（{@code fw开门} 就是 {@code /开门}）。
+     * 指令前缀 {@code fw}。它是「我在跟机器人说话」的唯一标志，见 {@link QqCommand.Kind}。
      *
-     * <p>给中文输入法下懒得切符号的用户留的：打 {@code fw} 比打 {@code /} 顺手。
-     * 大小写不敏感（{@code FW开门} 也认），后面有没有空格都行。
+     * <p>⚠️ <b>2026-10-09 起它是指令的唯一入口</b>：此前 {@code /} 与 {@code fw} 等价，
+     * 按用户要求改成只认 {@code fw} —— {@code fw在店} 自此与「没前缀」走同一条路
+     * （当闲聊，静默）。大小写不敏感（{@code FW在店} 也认），后面有没有空格都行。
      */
     private static final String FW_PREFIX = "fw";
 
@@ -214,22 +247,72 @@ public final class QqCommandParser {
             Map.entry('八', 8), Map.entry('九', 9), Map.entry('十', 10));
 
     /**
-     * 验证码的关键词。它是唯一带参数的指令：{@code /验证 123456}。
+     * 验证码的关键词。它是唯一带参数的指令：{@code fw验证 123456}。
      *
-     * <p>要求带关键词是为了<b>让这条消息自解释</b>（光 {@code /123456} 看不出在干什么），
+     * <p>要求带关键词是为了<b>让这条消息自解释</b>（光 {@code fw123456} 看不出在干什么），
      * 也让注册页能把整条指令原样做成一个复制按钮 —— 用户不必理解它，复制粘贴即可。
      */
     private static final Set<String> VERIFY_KEYWORDS = Set.of("验证", "verify");
 
     /**
-     * 全角斜杠。⚠️ <b>这不是洁癖，是中文输入法下的必然产物</b> ——
-     * 用户按中文标点打出来的就是它。不归一化的话，他发 {@code ／在店}
-     * 会得不到任何回复（被当成闲聊静默），而群里没有任何报错可供排查，
-     * 他只会以为机器人坏了。这类「静默不工作」正是本项目最想消灭的东西。
+     * 取消未付款单的关键词（第二条带参数的指令）：{@code fw取消 OD2026…}。
+     *
+     * <p>与验证码同构：关键词后面跟参数（这里是单号）。要求带关键词是为了
+     * <b>让指令自解释</b>，也让「fw取消一下」这类误跟中文的写法
+     * 落回「没认出这条指令」，而不是拿「一下」去查一遍单号。
      */
-    private static final char FULL_WIDTH_SLASH = '／';
+    private static final Set<String> CANCEL_KEYWORDS = Set.of("取消", "cancel");
 
-    /** 全角空格。同上，中文输入法下极常见，而 {@code String.trim()} 不认为它是空白 */
+    /**
+     * 不能当商品名的「保留字」：所有指令的别名与关键词。
+     *
+     * <p>它是 {@code fw可乐5}（调整库存）识别时的第二道守卫 —— 名字命中这里就
+     * 判定为「不像商品名」，整条落回 {@link QqCommand.Kind#UNKNOWN_COMMAND}。
+     * 理由见 {@link #looksLikeProductName}：打错的指令不该被错怪成商品。
+     *
+     * <p>⚠️ <b>由各别名表拼出来，不手写第二份</b>：手抄一遍的话，将来加别名时
+     * 漏掉的正是新加的那几个，而失败方式是「那条指令打错时被当成商品名查」——
+     * 不报错、只是答非所问。英文别名（{@code help} / {@code ping} / {@code pass} …）
+     * 必须一并收进来，只挡中文等于豁口开在另一半。
+     *
+     * <p>它的初始化<b>必须排在所有别名表之后</b>（静态字段按声明顺序初始化，
+     * 放前面会读到还没建好的空集合）。
+     */
+    private static final Set<String> RESERVED_NAMES = buildReservedNames();
+
+    /**
+     * 把各指令的别名与关键词拼成一个保留字集合。
+     *
+     * @return 不可变的保留字集合
+     */
+    private static Set<String> buildReservedNames() {
+        Set<String> names = new HashSet<>();
+        names.addAll(INSTORE_ALIASES);
+        names.addAll(HELP_ALIASES);
+        names.addAll(PING_ALIASES);
+        names.addAll(OPEN_ALIASES);
+        names.addAll(SETTLE_ALIASES);
+        names.addAll(BOOKING_ALIASES);
+        names.addAll(ME_ALIASES);
+        names.addAll(CURRENT_ORDER_ALIASES);
+        names.addAll(UNPAID_ALIASES);
+        names.addAll(STORE_STATUS_ALIASES);
+        names.addAll(PRICE_ALIASES);
+        names.addAll(CARD_ALIASES);
+        names.addAll(MENU_ALIASES);
+        names.addAll(WEB_ALIASES);
+        names.addAll(VERIFY_KEYWORDS);
+        names.addAll(CANCEL_KEYWORDS);
+        return Set.copyOf(names);
+    }
+
+    /**
+     * 全角空格。⚠️ <b>这不是洁癖，是中文输入法下的必然产物</b> ——
+     * 用户按中文标点打出来的就是它，而 {@code String.trim()} 不认为它是空白。
+     * 不归一化的话，他发 {@code fw　在店}（中间是全角空格）会得不到任何回复
+     * （被当成闲聊静默），而群里没有任何报错可供排查，他只会以为机器人坏了。
+     * 这类「静默不工作」正是本项目最想消灭的东西。
+     */
     private static final char FULL_WIDTH_SPACE = '　';
 
     /**
@@ -254,29 +337,40 @@ public final class QqCommandParser {
             return QqCommand.ignore();
         }
 
-        // ① 剥前缀（/ 或 fw）。没有前缀的一律当闲聊 —— 见类注释里那条规矩。
-        //    剥掉的只是【一个】前缀，"//在店" 与 "fwfw在店" 都仍然认不出
+        // ⓪ 免前缀的别名（只有 kklm）—— 它不必先说「我在跟机器人说话」，
+        //    理由与边界见 PREFIX_FREE_ALIASES。放在剥前缀之前：剥不到前缀就走人了
+        if (PREFIX_FREE_ALIASES.contains(text.toLowerCase(Locale.ROOT))) {
+            return QqCommand.instore();
+        }
+
+        // ① 剥前缀（fw）。没有前缀的一律当闲聊 —— 见类注释里那条规矩。
+        //    剥掉的只是【一个】前缀，"fwfw在店" 仍然认不出
         String body = stripPrefix(text);
         if (body == null) {
             return QqCommand.ignore();
         }
         body = body.trim();
         if (body.isEmpty()) {
-            // 只发了一个 / 或 fw：他确实在跟机器人说话，只是没说完整
+            // 只发了一个 fw：他确实在跟机器人说话，只是没说完整
             return QqCommand.unknownCommand();
         }
 
-        // ② 唯一带参数的那条：/验证 123456
+        // ② 两条带参数的指令先试：fw验证 123456 与 fw取消 <单号>。
+        //    它们排在别名区之前，因为「取消PD2026…」整条不是任何别名
         String code = extractVerifyCode(body);
         if (code != null) {
             return QqCommand.verifyCode(code);
+        }
+        QqCommand cancel = extractCancelOrderNo(body);
+        if (cancel != null) {
+            return cancel;
         }
 
         // ③ 其余整条精确匹配，统一转小写再比（英文别名大小写不敏感）。
         //
         // ⚠️ 所有别名表必须用【同一个】lower —— 漏掉其中一处的话，那个指令的大写写法
         // 会落到「像指令但不认识」那一支，用户收到一句「没认出这条指令」而不知所措。
-        // 这个 bug 正是被 QqCommandParserTests 逮到的（`/INSTORE` 当时不认），
+        // 这个 bug 正是被 QqCommandParserTests 逮到的（`fwINSTORE` 当时不认），
         // 而它在手工测试里几乎不可能被发现（没人会特意发大写）。
         //
         // 用 Locale.ROOT 而不是默认 locale：土耳其语环境下 "I".toLowerCase() 会得到
@@ -306,6 +400,9 @@ public final class QqCommandParser {
         if (CURRENT_ORDER_ALIASES.contains(lower)) {
             return QqCommand.currentOrder();
         }
+        if (UNPAID_ALIASES.contains(lower)) {
+            return QqCommand.unpaidBills();
+        }
         if (STORE_STATUS_ALIASES.contains(lower)) {
             return QqCommand.storeStatus();
         }
@@ -328,9 +425,24 @@ public final class QqCommandParser {
             return product;
         }
 
+        // ⑤ 商品下单没认出来的，可能是在调整库存（fw可乐5）。
+        // ⚠️ 【顺序不能反】：parseDashForm 认的是「名-数量」，本条认的是「名+数字」，
+        // 两者对 fw可乐-2 都能切出一组结果 —— 反过来的话，「买 2 件可乐」
+        // 会静默变成「把『可乐-』的库存设成 2」，且不报任何错
+        QqCommand stock = parseStockAdjust(body);
+        if (stock != null) {
+            return stock;
+        }
+
+        // ⑥ 库存也没认出来的，可能是在改机台状况（fw拍拍机 1 号维护中）
+        QqCommand device = parseDeviceStatus(body);
+        if (device != null) {
+            return device;
+        }
+
         // 走到这里说明带了前缀但没认出来 —— 给个提示，别让用户以为机器人坏了。
         // ⚠️ 商品那条路【只认带关键词或带横杠的写法】，所以拼错的指令
-        //（/在店铺、/开门吧）仍然落在这里，不会被错怪成「没有这个商品」
+        //（fw在店铺、fw开门吧）仍然落在这里，不会被错怪成「没有这个商品」
         return QqCommand.unknownCommand();
     }
 
@@ -345,8 +457,8 @@ public final class QqCommandParser {
      * </pre>
      *
      * <p>⚠️ <b>「只写商品名」这条路刻意没有</b>（2026-10-04 与用户确认）：
-     * 早先设计成「{@code /可乐} 就买一件」，但那意味着<b>任何带前缀的未知文本
-     * 都得当成商品名去查一遍</b> —— 于是「{@code /在店铺}」这种打错的指令
+     * 早先设计成「{@code fw可乐} 就买一件」，但那意味着<b>任何带前缀的未知文本
+     * 都得当成商品名去查一遍</b> —— 于是「{@code fw在店铺}」这种打错的指令
      * 会得到一句「没有叫「在店铺」的商品」，而群里天天有人在打字。
      * 改成关键词开头之后，指令重新是个<b>封闭集合</b>：
      * 不匹配就是「没认出这条指令」，一个字都不会被错怪成商品。
@@ -385,7 +497,7 @@ public final class QqCommandParser {
         //    商品名里出现「个」很常见（「个人杯」），取最后一个会把名字切坏
         int measure = rest.indexOf(BUY_MEASURE_WORD);
         if (measure <= 0) {
-            // 没有量词（如「/买可乐」）—— 不认。宁可回一句「没认出」，
+            // 没有量词（如「fw买可乐」）—— 不认。宁可回一句「没认出」，
             // 也不要在没有数量说明的情况下替用户决定买几件
             return null;
         }
@@ -404,7 +516,7 @@ public final class QqCommandParser {
      *       {@code 冰-红茶-2} → 名字「冰-红茶」、2 件</li>
      *   <li>右边是纯数字且<b>不超过 3 位</b> → 那是数量；否则整条都不是这种写法
      *       （4 位以上更可能是名字的一部分，如「可乐-2024」）</li>
-     *   <li>左边为空（{@code /-2}）→ 也不是这种写法</li>
+     *   <li>左边为空（{@code fw-2}）→ 也不是这种写法</li>
      * </ol>
      *
      * <p>⚠️ <b>横杠是「这条消息在下单」的信号</b>：正是它把商品这条开放的路
@@ -423,6 +535,157 @@ public final class QqCommandParser {
         Integer quantity = parseQuantity(body.substring(cut + 1));
         return quantity == null || name.isEmpty()
                 ? null : QqCommand.productOrder(name, quantity);
+    }
+
+    /**
+     * 解析「调整库存」写法：{@code fw可乐5} —— 名字后面<b>直接跟数字</b>，
+     * 把该商品的库存<b>设成</b>这个数（不是增减量）。
+     *
+     * <pre>
+     *   可乐5            → 把「可乐」的库存设为 5
+     *   王老吉 250ml3    → 名字里的空格与数字都原样保留
+     *   冰-红茶2         → 名字里带横杠也认（商品下单那条先试过，右边不是纯数字故落空）
+     * </pre>
+     *
+     * <p><b>规则（与商品下单同理，必须确定 —— 同一输入两次解析要得到同一个结论）</b>：
+     * <ol>
+     *   <li>从末尾往前取连续的数字（含全角，与商品下单同一套判定），长度
+     *       1~{@value #MAX_QUANTITY_DIGITS} 位 —— 更长的数字段不算数量，
+     *       <b>整条拒绝而不是截断</b>（{@code 可乐2024} 更可能是名字；截断的话
+     *       {@code fw验证 12345} 会被吞成一条改库存指令）</li>
+     *   <li>剩下的部分 trim 后就是商品名，交给 {@link #looksLikeProductName}
+     *       过两道守卫（至少一个字母数字、不能是别的指令的别名）</li>
+     * </ol>
+     *
+     * <p>⚠️ <b>刻意不收中文数词</b>（商品下单那条收）：这是设一个具体数值、
+     * 不是口语下单；而收了的话，叫「可乐五」的商品在不带数量时会被误切。
+     *
+     * <p>⚠️ <b>调用顺序必须在 {@link #parseProductOrder} 之后</b>，
+     * 否则 {@code fw可乐-2}（买 2 件）会被切成语义相反的「名字『可乐-』、库存 2」。
+     *
+     * <p>⚠️ <b>两条已知歧义，都不报错、只会做错事</b>，靠说明与文案兜住：
+     * <ul>
+     *   <li><b>名字以数字结尾的商品改不了库存</b>：商品「可乐2」要改成 5 件，
+     *       发 {@code fw可乐25} 会被切成「名字『可乐』、库存 25」——
+     *       店里若真有叫「可乐」的另一件，改的就是它。这类商品请走网页端</li>
+     *   <li><b>带横杠的名字永远走商品下单</b>：{@code fw冰-红茶2} 是买 2 件。
+     *       横杠本身就是「我在下单」的信号（见 {@link #parseDashForm}）</li>
+     * </ul>
+     *
+     * <p>数量不做范围校验（与商品下单一致）：「库存上限多少算合理」是业务规则，
+     * 归商品模块判 —— 放在这里的话，负数与超大值的提示就没有地方可写了。
+     *
+     * @param body 剥掉前缀、去掉首尾空白后的正文（非空）
+     * @return 调整库存指令；不像这种写法时返回 null
+     */
+    private static QqCommand parseStockAdjust(String body) {
+        int cut = body.length();
+        // ⚠️ 用 Character.isDigit 而不是「半角 0~9」：全角数字在中文输入法下是常态，
+        // 而商品下单那条（parseQuantity）认它 —— 两边不一致的表现是
+        // 「fw可乐－２ 能买、fw可乐２ 改不了库存」，同一个数字两种结果，最难查
+        while (cut > 0 && Character.isDigit(body.charAt(cut - 1))) {
+            cut--;
+        }
+        int digits = body.length() - cut;
+        if (digits == 0 || digits > MAX_QUANTITY_DIGITS) {
+            return null;
+        }
+        String name = body.substring(0, cut).trim();
+        if (!looksLikeEntityName(name)) {
+            return null;
+        }
+        return QqCommand.stockAdjust(name, Integer.valueOf(body.substring(cut)));
+    }
+
+    /**
+     * 解析「调整机台状况」写法：{@code fw拍拍机 1 号维护中} —— 名字后面直接跟中文状况词。
+     *
+     * <p><b>状况词的清单就是 {@link DeviceStatus} 的三个中文名，不在这里另抄一份</b>：
+     * 将来枚举里加一态，指令自动跟着认；手抄一份的话，漏改的表现是
+     * 「那条新状况在群里永远发不出去」，而群里不会有任何报错。
+     *
+     * <p><b>规则</b>：
+     * <ol>
+     *   <li>整条以某个状况词的中文名<b>结尾</b>，且前面还有名字
+     *       （{@code fw维护中} 不算 —— 那是名字为空）</li>
+     *   <li>名字过 {@link #looksLikeEntityName} 那两道守卫 ——
+     *       {@code fw在店维护中} 这类打错的指令仍然落回「没认出这条指令」</li>
+     * </ol>
+     *
+     * <p>⚠️ <b>调用顺序排在商品两条与改库存之后</b>：本条的触发条件是
+     * 「以状况词结尾」，与「名字 + 数字」那几条语法不重叠，顺序其实无碍；
+     * 排在后面只是让「先商品、后机台」这条读起来直白。
+     *
+     * <p>⚠️ 与商品那条同一条取舍：<b>名字存不存在、是否同名多台，解析器一概不管</b>
+     * （那要查库，会破坏「纯静态」这条性质），由 {@code QqWriteCommandService}
+     * 去问设备模块。
+     *
+     * @param body 剥掉前缀、去掉首尾空白后的正文（非空）
+     * @return 调整机台状况指令；不像这种写法时返回 null
+     */
+    private static QqCommand parseDeviceStatus(String body) {
+        for (DeviceStatus status : DeviceStatus.values()) {
+            String label = status.getLabel();
+            if (body.length() <= label.length() || !body.endsWith(label)) {
+                continue;
+            }
+            String name = body.substring(0, body.length() - label.length()).trim();
+            if (!looksLikeEntityName(name)) {
+                return null;
+            }
+            return QqCommand.deviceStatus(name, status.name());
+        }
+        return null;
+    }
+
+    /**
+     * 这段文本像不像一个「群里能点名的东西」的名字（商品名，或机台名）。
+     *
+     * <p>两道守卫，都是为了守住「指令是封闭集合」那条决定（2026-10-04 立）：
+     * 改库存靠「名字 + 数字」识别、改机台状况靠「名字 + 状况词」识别，
+     * 若不设防，<b>任何带前缀的未知文本</b>都会被拿去查一次 ——
+     * 打错的指令会得到一句「没有叫「在店2」的商品」，而不是本该给的「没认出这条指令」。
+     *
+     * <ol>
+     *   <li><b>至少含一个字母或数字</b>：{@code fw-2}、{@code fw--2}、{@code fw。。2}
+     *       切出来的「名字」只剩标点，一律不认（前者正是现有测试钉着的 UNKNOWN）</li>
+     *   <li><b>不能是别的指令的别名</b>：{@code fw在店2}、{@code fw开门5}、
+     *       {@code fwhelp1}、{@code fw验证 123}、{@code fw在店维护中} 全部还原成
+     *       「没认出这条指令」——打错一条指令，反馈就该是「这条不认识」，
+     *       而不是「没有这个商品 / 没有这台机台」</li>
+     *   <li><b>不以「买」开头</b>：{@code fw买可乐5} 是打错的下单写法
+     *       （正确的是 {@code fw买5个可乐}），同样该回「没认出这条指令」</li>
+     * </ol>
+     *
+     * <p>⚠️ <b>代价要如实说</b>：真有商品叫「菜单」「开门」这类名字时，
+     * 群里这两条指令都点不到它（网页端不受影响）。这个取舍是刻意的 ——
+     * 名字撞上指令别名的概率，远低于用户把指令打错的概率。
+     *
+     * @param name 切掉尾部数字（或状况词）并 trim 之后的候选名字
+     * @return 看来像个能被点名的名字返回 true
+     */
+    private static boolean looksLikeEntityName(String name) {
+        if (name.isEmpty()) {
+            return false;
+        }
+        boolean hasLetterOrDigit = false;
+        for (int i = 0; i < name.length(); i++) {
+            if (Character.isLetterOrDigit(name.charAt(i))) {
+                hasLetterOrDigit = true;
+                break;
+            }
+        }
+        if (!hasLetterOrDigit) {
+            return false;
+        }
+        // 「买…」是下单语法的领地：fw买可乐5 这种打错的下单，该回「没认出这条指令」，
+        // 而不是一句「没有叫「买可乐」的商品」——后者会让人以为店里真有这么个东西
+        if (name.startsWith(BUY_KEYWORD)) {
+            return false;
+        }
+        // 与别名表同一套小写（Locale.ROOT）—— 两个大小写不同的比较，
+        // 漏掉的那一半就是「fwMENU2 能过、fwmenu2 被挡」这种半边防守
+        return !RESERVED_NAMES.contains(name.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -497,16 +760,13 @@ public final class QqCommandParser {
     /**
      * 剥掉前缀，返回正文。
      *
-     * <p>两种前缀等价：{@code /} 与 {@code fw}（后者大小写不敏感，后面可有空格）。
+     * <p>前缀只有 {@code fw} 一种（大小写不敏感，后面可有空格）。
      *
      * @param text 归一化后的消息文本（非空）
      * @return 剥掉前缀后的正文（可能为空串）；<b>没有前缀时返回 null</b> ——
      *         调用方据此区分「闲聊」与「前缀后没写东西」两件事
      */
     private static String stripPrefix(String text) {
-        if (text.charAt(0) == COMMAND_PREFIX) {
-            return text.substring(1);
-        }
         if (text.length() >= FW_PREFIX.length()
                 && text.regionMatches(true, 0, FW_PREFIX, 0, FW_PREFIX.length())) {
             return text.substring(FW_PREFIX.length());
@@ -537,20 +797,83 @@ public final class QqCommandParser {
     }
 
     /**
-     * 归一化：剥掉开头的 @ 提及 → 全角标点转半角 → 去掉首尾空白。
+     * 从正文里取「取消」指令的目标单号。
      *
-     * <p>三步里<b>真正会改变行为的是后两步</b>：中文输入法下打出的全角斜杠与全角空格
-     * 都很常见，而它们既不会被识别成斜杠、也不会被 {@link String#trim()} 当成空白
-     * （那个方法只处理 {@code <= U+0020} 的字符）。少了这两步，
-     * 用户发出来的指令会静默地变成一句「闲聊」，群里没有任何反馈可供他判断哪里错了。
+     * <p>接受 {@code 取消 PD2026…} / {@code 取消PD2026…} / {@code cancel …}
+     * 几种写法（前缀已由调用方剥掉）。单号原样带出、只做<b>大写归一</b>：
+     * 库里存的是大写，用户从小写键盘敲进来也要认。
+     *
+     * <p><b>形状校验只有一道</b>（见 {@link #isOrderNoLike}）：够长、且全是
+     * ASCII 字母数字。它挡的是「fw取消一下」「fw取消2」这类后面跟的不是单号的
+     * 情形 —— 它们应当落回「没认出这条指令」，而不是拿「一下」去查一遍。
+     * 至于这个单号<b>存不存在、是谁的</b>，解析器一概不管
+     *（那要查库，会破坏「纯静态」这条性质），由
+     * {@code QqWriteCommandService} 按前缀路由去问各模块。
+     *
+     * @param body 剥掉前缀后的正文
+     * @return 取消指令；不是这种写法时返回 null
+     */
+    private static QqCommand extractCancelOrderNo(String body) {
+        for (String keyword : CANCEL_KEYWORDS) {
+            if (body.length() > keyword.length()
+                    && body.regionMatches(true, 0, keyword, 0, keyword.length())) {
+                String rest = body.substring(keyword.length()).trim();
+                if (isOrderNoLike(rest)) {
+                    return QqCommand.cancelOrder(rest.toUpperCase(Locale.ROOT));
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 这段文本像不像一个单号。
+     *
+     * <p>判据只有两条，都刻意放得很宽：
+     * <ol>
+     *   <li><b>长度 6~32</b> —— 单号是 20 位（前缀 2 + 时间戳 14 + 随机 4）。
+     *       下限 6 挡「fw取消2」这类打错的指令，上限 32 挡住把一大段文本塞进来</li>
+     *   <li><b>全是 ASCII 字母或数字</b> —— 中文（「fw取消一下」）、空格、
+     *       标点一律不认。单号的字符集就是这两样</li>
+     * </ol>
+     *
+     * <p>不在这里校验前缀（{@code OD}/{@code PD}/{@code MC}/{@code BK}）：
+     * 那是路由的活（{@code PaymentTargetType.fromOrderNo}）；而且前缀对了、
+     * 后面对不上的单号照样要走到「没找到」那句提示，两处各判一次只会让
+     * 「哪种算认得出」出现两个口径。
+     *
+     * @param text 关键词后面 trim 过的剩余文本
+     * @return 像单号返回 true
+     */
+    private static boolean isOrderNoLike(String text) {
+        if (text.length() < 6 || text.length() > 32) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean ascii = (c >= '0' && c <= '9')
+                    || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+            if (!ascii) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 归一化：剥掉开头的 @ 提及 → 全角空格转半角 → 去掉首尾空白。
+     *
+     * <p>真正的含义在后两步：全角空格在中文输入法下极常见，
+     * 而 {@link String#trim()} 不认为它是空白（那个方法只处理 {@code <= U+0020} 的字符）。
+     *
+     * <p>⚠️ <b>2026-10-09 起不再转全角斜杠</b>：那一步原本是为了「中文输入法下打出的
+     * {@code ／在店} 也能认」，而 {@code /} 已不再是前缀，转了也没有用武之地。
      *
      * @param rawMessage 原始消息
      * @return 归一化后的文本，首尾无空白
      */
     private static String normalize(String rawMessage) {
         String text = LEADING_CQ_CODE.matcher(rawMessage).replaceFirst("");
-        text = text.replace(FULL_WIDTH_SLASH, COMMAND_PREFIX)
-                .replace(FULL_WIDTH_SPACE, ' ');
-        return text.trim();
+        return text.replace(FULL_WIDTH_SPACE, ' ').trim();
     }
 }

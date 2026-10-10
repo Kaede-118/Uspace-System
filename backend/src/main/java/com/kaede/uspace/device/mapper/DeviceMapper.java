@@ -137,4 +137,31 @@ public interface DeviceMapper extends BaseMapper<Device> {
                AND deleted = 0
             """)
     int updateStatus(@Param("id") Long id, @Param("status") String status);
+
+    /**
+     * 按机台名精确查（群指令点名的依据）。
+     *
+     * <p><b>返回列表而不是一台</b>：机台名没有唯一键（唯一的是「门店 + 资产编号」），
+     * 同名可能有几台。调用方按「0 台 / 1 台 / 多台」分别处置 ——
+     * 多台时<b>不能随便挑一台</b>：那会改错机器，而界面上看不出任何异常。
+     *
+     * <p>结果按 {@code id ASC} 稳定排序：多台时调用方通常只报一个数量，
+     * 但稳定顺序让日志与测试可复现。
+     *
+     * <p>空名不在这里挡：调用方（Service）已经判过非空，
+     * 真传了空串也只会查到 0 台 —— 名字列没有空值约定，不值得为此加一条分支。
+     *
+     * @param storeId 门店 ID
+     * @param name    机台名，调用方须已去掉首尾空白
+     * @return 同名机台；没有时返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_device
+             WHERE deleted = 0
+               AND store_id = #{storeId}
+               AND name = #{name}
+             ORDER BY id ASC
+            """)
+    List<Device> selectListByName(@Param("storeId") Long storeId, @Param("name") String name);
 }

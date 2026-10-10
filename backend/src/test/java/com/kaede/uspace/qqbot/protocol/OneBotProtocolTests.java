@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p><b>纯单测，只用一个 {@code ObjectMapper}</b> —— 被测的就是「JSON 进、对象出」这一件事。
  *
  * <p>⚠️ <b>这个类是被一个真实的线上故障逼出来的，它当时缺席是那个故障能溜过去的直接原因。</b>
- * 经过是这样的：机器人接上 NapCat 之后对群里发的 {@code /ping} <b>毫无反应</b>，
+ * 经过是这样的：机器人接上 NapCat 之后对群里发的 {@code fwping} <b>毫无反应</b>，
  * 日志里只有一行「收到事件 postType=null messageType=null …… 全是 null」。
  * 根因是 <b>OneBot 协议用 snake_case</b>（{@code post_type} / {@code group_id} /
  * {@code raw_message}），而 Java 字段是 camelCase，<b>Jackson 默认对不上</b> ——
@@ -44,7 +44,7 @@ class OneBotProtocolTests {
         String json = """
                 {"post_type":"message","message_type":"group","sub_type":"normal",
                  "message_id":123456,"group_id":1062204057,"user_id":1509322477,
-                 "raw_message":"/ping","self_id":2198047522,"time":1759244000,
+                 "raw_message":"fwping","self_id":2198047522,"time":1759244000,
                  "sender":{"user_id":1509322477,"nickname":"小枫","card":"","role":"member"}}""";
 
         OneBotEvent event = objectMapper.readValue(json, OneBotEvent.class);
@@ -54,7 +54,7 @@ class OneBotProtocolTests {
         assertEquals(123456L, event.getMessageId());
         assertEquals(1062204057L, event.getGroupId());
         assertEquals(1509322477L, event.getUserId());
-        assertEquals("/ping", event.getRawMessage(), "指令是从 raw_message 解析的");
+        assertEquals("fwping", event.getRawMessage(), "指令是从 raw_message 解析的");
         assertEquals(2198047522L, event.getSelfId());
         assertNotNull(event.getSender(), "sender 子对象也要映射上");
         assertEquals("小枫", event.getSender().getNickname());
@@ -66,7 +66,7 @@ class OneBotProtocolTests {
     void event_recognizesGroupMessage() throws Exception {
         OneBotEvent event = objectMapper.readValue("""
                 {"post_type":"message","message_type":"group","group_id":1062204057,
-                 "user_id":1,"raw_message":"/在店"}""", OneBotEvent.class);
+                 "user_id":1,"raw_message":"fw在店"}""", OneBotEvent.class);
 
         assertTrue(event.isGroupMessage());
         assertFalse(event.isSelfSent(), "别人发的不是「自己那一侧」发的");
@@ -76,12 +76,12 @@ class OneBotProtocolTests {
     @DisplayName("协议：私聊与缺群号都不算群消息")
     void event_rejectsNonGroupMessages() throws Exception {
         OneBotEvent privateMsg = objectMapper.readValue("""
-                {"post_type":"message","message_type":"private","user_id":1,"raw_message":"/ping"}""",
+                {"post_type":"message","message_type":"private","user_id":1,"raw_message":"fwping"}""",
                 OneBotEvent.class);
         assertFalse(privateMsg.isGroupMessage(), "私聊不在服务范围内");
 
         OneBotEvent noGroupId = objectMapper.readValue("""
-                {"post_type":"message","message_type":"group","user_id":1,"raw_message":"/ping"}""",
+                {"post_type":"message","message_type":"group","user_id":1,"raw_message":"fwping"}""",
                 OneBotEvent.class);
         assertFalse(noGroupId.isGroupMessage(),
                 "缺少 group_id 时后面所有按群号做的判断都会退化成「拿 null 去比」");
@@ -94,7 +94,7 @@ class OneBotProtocolTests {
         // 就是这个类型 —— 它是「手机上发指令、电脑上机器人回复」这条用法的前提
         OneBotEvent event = objectMapper.readValue("""
                 {"post_type":"message_sent","message_type":"group","group_id":1062204057,
-                 "user_id":2198047522,"self_id":2198047522,"raw_message":"/ping"}""",
+                 "user_id":2198047522,"self_id":2198047522,"raw_message":"fwping"}""",
                 OneBotEvent.class);
 
         assertTrue(event.isSelfSent());
@@ -107,7 +107,7 @@ class OneBotProtocolTests {
         // 兼容：某些实现不开 reportSelfMessage 也会把发送者标成自己
         OneBotEvent event = objectMapper.readValue("""
                 {"post_type":"message","message_type":"group","group_id":1062204057,
-                 "user_id":2198047522,"self_id":2198047522,"raw_message":"/ping"}""",
+                 "user_id":2198047522,"self_id":2198047522,"raw_message":"fwping"}""",
                 OneBotEvent.class);
 
         assertTrue(event.isSelfSent());
@@ -134,11 +134,11 @@ class OneBotProtocolTests {
     void event_toleratesUnknownFields() throws Exception {
         OneBotEvent event = objectMapper.readValue("""
                 {"post_type":"message","message_type":"group","group_id":1,"user_id":1,
-                 "raw_message":"/ping","font":0,"anonymous":null,
-                 "未来才有的字段":{"a":1},"message":[{"type":"text","data":{"text":"/ping"}}]}""",
+                 "raw_message":"fwping","font":0,"anonymous":null,
+                 "未来才有的字段":{"a":1},"message":[{"type":"text","data":{"text":"fwping"}}]}""",
                 OneBotEvent.class);
 
-        assertEquals("/ping", event.getRawMessage(), "不认识的字段应当被忽略，而不是让整条事件丢掉");
+        assertEquals("fwping", event.getRawMessage(), "不认识的字段应当被忽略，而不是让整条事件丢掉");
     }
 
     @Test
@@ -202,6 +202,51 @@ class OneBotProtocolTests {
         assertFalse(json.contains("\"type\":\"at\""), "没有 QQ 号就不该有 @ 段");
         assertTrue(json.contains("\"type\":\"text\""),
                 "但正文照发 —— 提醒本身比 @ 到人重要，群里的人多半能认出说的是谁");
+    }
+
+    @Test
+    @DisplayName("协议：带图消息以段数组发送，图片走 base64 内联")
+    void action_sendGroupMessageWithImageUsesSegments() throws Exception {
+        OneBotAction action = OneBotAction.sendGroupMessageWithImage(
+                1062204057L, "base64://iVBORw0KGgo", null, "uspace-11");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertTrue(json.contains("\"action\":\"send_group_msg\""), "动作名与其它群消息相同");
+        assertTrue(json.contains("\"type\":\"image\""), "图片必须走 image 段");
+        assertTrue(json.contains("\"file\":\"base64://iVBORw0KGgo\""),
+                "file 用 base64:// 内联 —— 名册图是即时快照，不落盘、不传 URL");
+        assertFalse(json.contains("\"type\":\"text\""),
+                "没传文本时不该凭空多出一个文本段");
+        assertFalse(json.contains("auto_escape"), "段数组形态下刻意不带它（同带 @ 那条）");
+    }
+
+    @Test
+    @DisplayName("协议：带图消息可以附一段文本（文本在前、图在后）")
+    void action_sendGroupMessageWithImageAndText() throws Exception {
+        OneBotAction action = OneBotAction.sendGroupMessageWithImage(
+                1062204057L, "base64://AAAA", "店内目前有 3 人。", "uspace-12");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertTrue(json.contains("\"type\":\"image\"") && json.contains("\"type\":\"text\""),
+                "图与文都要在");
+        assertTrue(json.indexOf("\"type\":\"text\"") < json.indexOf("\"type\":\"image\""),
+                "文本在前、图片在后（2026-10-10 由用户定）—— 先看到「店内目前有 X 人」，"
+                        + "再往下是卡片");
+    }
+
+    @Test
+    @DisplayName("协议：多张图塞进同一条消息（文本在前、图依次在后，不逐条刷屏）")
+    void action_sendGroupMessageWithImagesInOneMessage() throws Exception {
+        OneBotAction action = OneBotAction.sendGroupMessageWithImages(
+                1062204057L, java.util.List.of("base64://AAA", "base64://BBB", "base64://CCC"),
+                "店内目前有 13 人。", "uspace-13");
+
+        String json = objectMapper.writeValueAsString(action);
+        assertEquals(3, json.split("\"type\":\"image\"", -1).length - 1,
+                "三张图必须都在【同一条】消息里 —— 逐条发会把群刷屏（2026-10-10 由用户定）");
+        assertTrue(json.indexOf("\"type\":\"text\"") < json.indexOf("\"type\":\"image\""),
+                "文本在前、图在后");
+        assertEquals(1, json.split("\"action\"", -1).length - 1, "仍然只是一个动作");
     }
 
     @Test

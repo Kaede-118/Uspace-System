@@ -502,7 +502,7 @@ CREATE TABLE `biz_order` (
   `passcode_start`  DATETIME      DEFAULT NULL            COMMENT '密码生效时间',
   `passcode_end`    DATETIME      DEFAULT NULL            COMMENT '密码失效时间',
   -- ⚠️ 下面两列是【群指令】那条路径专用的一次性密码（模块 11），与上面三列并存：
-  --    上面那串是「可反复使用的限时密码」（网页端查看 + /开门 时私聊发一份，用于兜底），
+  --    上面那串是「可反复使用的限时密码」（网页端查看 + fw开门 时私聊发一份，用于兜底），
   --    这一串是「用一次即焚的一次性密码」（只在群里发）。两者是两条独立的进门路径。
   --    ⚠️ 结算后【不清空】，与 passcode 三列同构 —— 保留为历史痕迹；
   --       它也【绝不进任何订单视图】（OrderVo / OrderOpenVo 都不带，只有 qqbot 内部消费）。
@@ -808,7 +808,7 @@ CREATE TABLE `biz_product` (
   `deleted`     TINYINT       NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删 1=已删',
   PRIMARY KEY (`id`),
   -- ⚠️ 商品名唯一（2026-10-04 加）。加它是因为【群里的下单指令按名字找商品】：
-  --    名字一旦能重复，「/可乐-2」到底是哪一件就只能靠系统猜 ——
+  --    名字一旦能重复，「fw可乐-2」到底是哪一件就只能靠系统猜 ——
   --    而猜错的后果是给顾客下错单、扣错库存，当场还没人看得出来。
   --    与 uk_username / uk_qq 同源：唯一键【不含 deleted】，逻辑删除过的名字
   --    会被一直占着（想再用那个名字得先改已删记录）。这是刻意的取舍 ——
@@ -1114,3 +1114,59 @@ CREATE TABLE `biz_reconcile_diff` (
   KEY `idx_proof` (`proof_id`),
   KEY `idx_payment_no` (`payment_no`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '对账差异明细（系统凭证与账单勾稽出来的不一致）';
+
+-- ============================================================================
+-- 交易流水（2026-10-10 加）—— 模块 8 的支付能力
+-- ============================================================================
+-- 【它存在的理由】
+--   把「钱这件事发生过什么」收在一处。在此之前，一笔收款的痕迹散在四张表上
+--   （订单 / 商品购买单 / 包场 / 月卡购买单各记各的支付字段），而「取消了一笔
+--   没付款的单」这种没有钱发生、但同样是交易事实的动作完全没有记录 ——
+--   要回答「这一天到底发生了什么」，得把四张表都翻一遍，还得知道去哪张表翻。
+--
+-- 【四类事件】（见 TradeEventType）
+--   PROOF_SUBMITTED   提交付款凭证
+--   PAY_RECEIVED      收款到账（含「提交即落账」「复核通过」「线上回调」三种到账方式，
+--                     它们最终都汇到 PaymentService 的落账方法，所以「到账」只有一套写法）
+--   PROOF_REJECTED    凭证驳回
+--   CANCEL_UNPAID     取消未付款单（钱一分没动，但那是这笔单的结局）
+--
+-- 【本表是 append-only 的流水，没有 deleted、也没有 updated_at】
+--   与 biz_payment_proof、biz_reconcile_batch 同一条纪律：某时某刻发生过什么
+--   是既成事实，改它等于篡改账目。所以实体不继承 BaseEntity，
+--   手写 SQL 里一个 deleted = 0 都不要写（照抄别的 Mapper 会直接 Unknown column）。
+--
+-- 【为什么记 target_no 而不记 target_id】
+--   存主键会在单据被删时留下死指针，而对外单号（OD… / PD… / BK… / 月卡）永远
+--   查得回原单，运营与顾客认的也一直是它。
+--
+-- 【为什么没有外键】
+--   目标有四张表，一张流水要能指向它们全部 —— 外键得开四列（其中三列恒为 NULL），
+--   换来的是「流水写不进去」这种更糟的失败。本表用于留档与人工核对，
+--   一致性由写入方保证（与业务动作同事务），不由库保证。
+--
+-- 【operator_id 记什么】（2026-10-10 由用户提出）
+--   记「代劳的人」：管理员复核通过 / 驳回 / 在后台取消时，是他的 ID。
+--   为空表示这一行「不是管理员代劳的」—— 用户自己的提交与取消、以及系统自动的
+--   到账（线上回调、提交即落账）都为空，用 source 区分那两种情形
+--   （WEB / QQ 是用户自己，SYSTEM 是系统）。
+-- ============================================================================
+DROP TABLE IF EXISTS `biz_trade_log`;
+CREATE TABLE `biz_trade_log` (
+  `id`          BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `event_type`  VARCHAR(24)   NOT NULL                COMMENT '事件类型：PROOF_SUBMITTED / PAY_RECEIVED / PROOF_REJECTED / CANCEL_UNPAID。见 TradeEventType',
+  `target_type` VARCHAR(20)   NOT NULL                COMMENT '收款目标类型：ORDER / PRODUCT / BOOKING / MONTHLY_CARD。取值与 PaymentTargetType 一致',
+  `target_no`   VARCHAR(32)   NOT NULL                COMMENT '对外单号（订单号 / 商品购买单号 / 包场单号 / 月卡购买单号）—— 流水与业务单据之间唯一的锚',
+  `user_id`     BIGINT        NOT NULL                COMMENT '相关用户 ID。系统自动发生的动作（线上回调）也必有其人，故不为空',
+  `operator_id` BIGINT                 DEFAULT NULL   COMMENT '操作人（审核人）：管理员复核通过 / 驳回 / 后台取消时记其 ID；用户自己的动作与系统自动的动作为空，用 source 区分',
+  `amount`      DECIMAL(10,2)          DEFAULT NULL   COMMENT '金额（元）。取消未付款单时记的是它原本的应付额 —— 钱一分没动，但这个数说明关掉的是一笔多大的单',
+  `payment_no`  VARCHAR(64)            DEFAULT NULL   COMMENT '交易流水号：用户填的，或群内传图时由 OCR 识别到替他填上的；取不到就为空（对账会因此报一条「没填流水号」，那是诚实的）',
+  `source`      VARCHAR(16)   NOT NULL                COMMENT '来源渠道：WEB 网页端 / QQ 群内 / ADMIN 运营后台 / SYSTEM 系统自动。见 TradeSource',
+  `remark`      VARCHAR(255)           DEFAULT NULL   COMMENT '备注：驳回原因、复核人等这一行额外要说明的话',
+  `created_at`  DATETIME      NOT NULL                COMMENT '发生时刻。写入与业务动作同事务，它与落库时刻只差毫秒',
+  PRIMARY KEY (`id`),
+  -- 「这一单在账上发生过什么」：按单号翻是最常见的查法
+  KEY `idx_target` (`target_type`, `target_no`),
+  -- 「这个人有过哪些交易动作」
+  KEY `idx_user` (`user_id`, `id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '交易流水（append-only：提交凭证 / 收款到账 / 凭证驳回 / 取消未付款单）';

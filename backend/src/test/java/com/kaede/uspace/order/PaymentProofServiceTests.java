@@ -5,6 +5,9 @@ import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
+import com.kaede.uspace.order.entity.TradeLog;
+import com.kaede.uspace.order.event.PaymentProofPendingEvent;
 import com.kaede.uspace.order.dto.AdminProofVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
@@ -132,6 +135,10 @@ class PaymentProofServiceTests {
     private PaymentService paymentService;
     private PaymentProofService service;
 
+    /** 交易流水（2026-10-10 加）。记在内存里，供「到账 / 驳回 / 取消有没有留档」的断言读 */
+    private final FakeTradeLogMapper tradeLogMapper = new FakeTradeLogMapper();
+    private final TradeLogService tradeLogService = new TradeLogService(tradeLogMapper.asMapper());
+
     /**
      * 收集被测代码发布的事件。
      *
@@ -145,10 +152,23 @@ class PaymentProofServiceTests {
     void setUp() {
         publishedEvents.clear();
         paymentService = new PaymentService(gateway, paymentProperties,
-                handlers, userMapper.asMapper());
+                handlers, userMapper.asMapper(), tradeLogService);
         service = new PaymentProofService(proofMapper.asMapper(), payQrMapper.asMapper(),
                 userMapper.asMapper(), uploadProperties, handlers, paymentService,
-                publishedEvents::add);
+                publishedEvents::add, tradeLogService);
+    }
+
+    /**
+     * 提交凭证的测试入口 —— 统一带上「网页端」这个来源。
+     *
+     * <p>来源只进交易流水、不参与任何判断，所以绝大多数用例不关心它；
+     * 收在一处，免得四十来个调用点各写一遍。
+     *
+     * @param request 凭证内容
+     * @return 提交结果
+     */
+    private BizResult<ProofSubmitVo> submit(ProofSubmitRequest request) {
+        return service.submit(USER_ID, request, TradeSource.WEB);
     }
 
     // ==================================================================
@@ -156,16 +176,20 @@ class PaymentProofServiceTests {
     // ==================================================================
 
     @Test
-    @DisplayName("提交：订单待支付 → 写凭证并当场落账（提交即交付）")
+    @DisplayName("提交：订单待支付 + 识别到交易单号 → 当场落账并自动通过")
     void submit_orderDeliversImmediately() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setPaymentNo("WX-TX-1");
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        BizResult<ProofSubmitVo> result = submit(req);
 
         assertTrue(result.isSuccess(), "提交应当成功");
         assertTrue(result.getData().isDelivered(),
-                "订单是「提交即交付」—— 用户提交完就该能再开一单进店");
+                "识别到有效交易单号 → 当场结清，用户提交完就该能再开一单进店");
+        assertEquals(PaymentProofStatus.CONFIRMED.name(), result.getData().getVerifyStatus(),
+                "自动通过（2026-10-10 加）：小额那两类识别到单号就不打扰管理员");
         assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
                 "订单应当已经转已支付");
         assertEquals(0, userMapper.asMapper().selectById(USER_ID).getOrderPaid().compareTo(AMOUNT),
@@ -175,12 +199,32 @@ class PaymentProofServiceTests {
     }
 
     @Test
+    @DisplayName("⚠️ 守门：订单没带交易单号 → 不结清，进人工复核队列并播报")
+    void submit_orderWithoutPaymentNoWaitsForReview() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+
+        BizResult<ProofSubmitVo> result = submit(request(PaymentTargetType.ORDER, order.getId()));
+
+        assertTrue(result.isSuccess(), "提交本身仍要成功 —— 用户选了「人工审核」这条路");
+        assertEquals(PaymentProofStatus.SUBMITTED.name(), result.getData().getVerifyStatus(),
+                "没识别到单号就不自动通过");
+        assertFalse(result.getData().isDelivered(), "⚠️ 没单号就不算结清（2026-10-10 加）");
+        assertEquals(OrderStatus.PENDING_PAYMENT.name(), orderMapper.get(order.getId()).getStatus(),
+                "订单仍停在待支付 —— 等管理员看过那张截图才算数");
+        assertEquals(1, publishedEvents.size(), "进队列要发一条事件，由它推给店主群");
+        PaymentProofPendingEvent pending = (PaymentProofPendingEvent) publishedEvents.get(0);
+        assertEquals(order.getOrderNo(), pending.orderNo());
+        assertEquals("未识别到交易单号", pending.reason(), "原因要写清楚，管理员才知道该重点看什么");
+    }
+
+    @Test
     @DisplayName("提交：包场待支付 → 只写凭证，不落账（等复核）")
     void submit_bookingWaitsForReview() {
         Booking booking = seedPendingBooking(USER_ID);
         seedUser(USER_ID);
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.BOOKING, booking.getId()));
 
         assertTrue(result.isSuccess(), "提交应当成功");
@@ -194,16 +238,21 @@ class PaymentProofServiceTests {
     }
 
     @Test
-    @DisplayName("提交：目标已支付且凭证待复核 → 只更新凭证，不重复落账")
+    @DisplayName("提交：钱已到账之后再改凭证 → 只更新凭证，不重复落账")
     void submit_alreadyPaidOnlyUpdatesProof() {
-        // 订单「提交即交付」，所以用户提交完之后再补个流水号就是这条路
+        // 第一次带着流水号提交：当场结清（自动通过）
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        ProofSubmitRequest first = request(PaymentTargetType.ORDER, order.getId());
+        first.setPaymentNo("WX-TX-1");
+        submit(first);
 
+        // 再换一个流水号重交：钱早到账了，这一步改的只是凭证本身。
+        // 自动通过的那条凭证允许重交（用户自己发现单号填错了），
+        // 但落账那一步会认出来「这笔已经付过了」，绝不重复累加
         ProofSubmitRequest again = request(PaymentTargetType.ORDER, order.getId());
         again.setPaymentNo("WX-TX-2");
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, again);
+        BizResult<ProofSubmitVo> result = submit(again);
 
         assertTrue(result.isSuccess(), "改流水号是正常操作，不该被拒");
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
@@ -213,23 +262,54 @@ class PaymentProofServiceTests {
     }
 
     @Test
-    @DisplayName("提交：目标已支付且凭证已核对 → 幂等返回，不覆盖")
+    @DisplayName("提交：管理员核对过的凭证 → 幂等返回，不覆盖")
     void submit_confirmedIsIdempotent() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        // 不带流水号提交 → 进人工复核 → 管理员在后台核对。
+        // 走 service.confirm 而不是直接改假表：那一步会顺带把这笔落账（订单转已支付），
+        // 「已支付 + 人工已核对」这个组合才是这么来的
+        submit(request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
-        proofMapper.confirm(proof.getId(), ADMIN_ID);
+        service.confirm(proof.getId(), ADMIN_ID);
+        assertEquals(ADMIN_ID, proof.getConfirmedBy(),
+                "先确认它确实是被人工核对过的 —— 否则下面那条断言等于没测");
+        assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "复核通过即落账（这一笔就是这样变成已支付的）");
         proof.setProofUrl("/uploads/proof/old.jpg");
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.ORDER, order.getId()));
 
         assertTrue(result.isSuccess(), "重复提交应当幂等成功，而不是报错");
         assertEquals(PaymentProofStatus.CONFIRMED.name(), result.getData().getVerifyStatus());
         assertEquals("/uploads/proof/old.jpg",
                 proofMapper.find(PaymentTargetType.ORDER.name(), order.getId()).getProofUrl(),
-                "已核对的凭证不能被覆盖 —— 覆盖会把管理员的结论打回待复核");
+                "人工核对过的凭证不能被覆盖 —— 覆盖会把管理员的结论打回待复核");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：机器自动通过的凭证允许重交（用户自己改单号），改完落回待复核")
+    void submit_autoConfirmedCanBeResubmitted() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        ProofSubmitRequest first = request(PaymentTargetType.ORDER, order.getId());
+        first.setPaymentNo("WX-TYPO");
+        submit(first);
+
+        ProofSubmitRequest fixed = request(PaymentTargetType.ORDER, order.getId());
+        fixed.setPaymentNo("WX-FIXED");
+        BizResult<ProofSubmitVo> result = submit(fixed);
+
+        assertTrue(result.isSuccess(), "改自己的凭证不该被拒");
+        assertEquals(PaymentProofStatus.SUBMITTED.name(), result.getData().getVerifyStatus(),
+                "⚠️ 「免人工复核」不等于「人工确认过」（2026-10-10 由用户指出）："
+                        + "用户发现自己单号填错了一个字，就该能改回来 —— "
+                        + "改完落回待复核，由人再看一眼");
+        assertEquals("WX-FIXED",
+                proofMapper.find(PaymentTargetType.ORDER.name(), order.getId()).getPaymentNo());
+        assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
+                "钱早到账了，改凭证不该把它退回未支付");
     }
 
     @Test
@@ -237,7 +317,7 @@ class PaymentProofServiceTests {
     void submit_rejectedOnPaidTargetIsAllowed() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        submit(request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         proofMapper.reject(proof.getId(), ADMIN_ID, "金额对不上");
         /*
@@ -249,7 +329,7 @@ class PaymentProofServiceTests {
          */
         orderMapper.get(order.getId()).setStatus(OrderStatus.PAID.name());
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.ORDER, order.getId()));
 
         assertTrue(result.isSuccess(),
@@ -268,7 +348,7 @@ class PaymentProofServiceTests {
         Order order = seedPendingOrder(USER_ID);
         orderMapper.get(order.getId()).setStatus(OrderStatus.PAID.name());
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.ORDER, order.getId()));
 
         assertEquals(ErrorCode.PAYMENT_ALREADY_PAID, result.getError(),
@@ -280,7 +360,7 @@ class PaymentProofServiceTests {
     void submit_rejectsForeignTarget() {
         Order order = seedPendingOrder(OTHER_USER);
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        BizResult<ProofSubmitVo> result = submit(request(PaymentTargetType.ORDER, order.getId()));
 
         assertEquals(ErrorCode.ORDER_NOT_FOUND, result.getError(),
                 "少了这条校验，任何登录用户都能往别人的单子上传凭证");
@@ -301,7 +381,7 @@ class PaymentProofServiceTests {
             ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
             req.setProofUrl(bad);
 
-            BizResult<ProofSubmitVo> result = service.submit(USER_ID, req);
+            BizResult<ProofSubmitVo> result = submit(req);
 
             assertEquals(ErrorCode.PAYMENT_PROOF_IMAGE_INVALID, result.getError(),
                     "不该接受 " + bad + " —— 外链会把「谁在什么时候付款」泄露给第三方");
@@ -314,7 +394,7 @@ class PaymentProofServiceTests {
         Booking booking = seedPendingBooking(USER_ID);
         bookingMapper.get(booking.getId()).setStatus(BookingStatus.CANCELLED.name());
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.BOOKING, booking.getId()));
 
         assertEquals(ErrorCode.PAYMENT_PROOF_TARGET_INVALID, result.getError(),
@@ -330,11 +410,11 @@ class PaymentProofServiceTests {
 
         ProofSubmitRequest a = request(PaymentTargetType.ORDER, first.getId());
         a.setPaymentNo("WX-TX-SAME");
-        service.submit(USER_ID, a);
+        submit(a);
 
         ProofSubmitRequest b = request(PaymentTargetType.ORDER, second.getId());
         b.setPaymentNo("WX-TX-SAME");
-        service.submit(USER_ID, b);
+        submit(b);
 
         // 先提交的那条也要标上 —— 冲突是双向的，谁先谁后没有意义
         assertEquals("DUPLICATE_PAYMENT_NO",
@@ -353,18 +433,18 @@ class PaymentProofServiceTests {
 
         ProofSubmitRequest a = request(PaymentTargetType.ORDER, first.getId());
         a.setPaymentNo("WX-TX-SAME");
-        service.submit(USER_ID, a);
+        submit(a);
 
         ProofSubmitRequest b = request(PaymentTargetType.ORDER, second.getId());
         b.setPaymentNo("WX-TX-SAME");
-        service.submit(USER_ID, b);
+        submit(b);
 
         assertNotNull(proofMapper.find(PaymentTargetType.ORDER.name(), first.getId()).getRiskFlag(),
                 "先确认它确实被标上了，否则下面那条断言等于没测");
 
         ProofSubmitRequest fixed = request(PaymentTargetType.ORDER, first.getId());
         fixed.setPaymentNo("WX-TX-CORRECTED");
-        service.submit(USER_ID, fixed);
+        submit(fixed);
 
         assertNull(proofMapper.find(PaymentTargetType.ORDER.name(), first.getId()).getRiskFlag(),
                 "抄错一位、改对之后就该恢复正常 —— 假警报积多了，管理员会干脆不看这个标记");
@@ -376,7 +456,7 @@ class PaymentProofServiceTests {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        BizResult<ProofSubmitVo> result = submit(request(PaymentTargetType.ORDER, order.getId()));
 
         assertTrue(result.isSuccess(), "硬性必填只会逼着用户瞎填一串，比空着更糟");
         assertNull(proofMapper.find(PaymentTargetType.ORDER.name(), order.getId()).getPaymentNo(),
@@ -389,7 +469,7 @@ class PaymentProofServiceTests {
         MonthlyCardOrder order = seedPendingCardOrder();
         seedUser(USER_ID);
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
+        BizResult<ProofSubmitVo> result = submit(
                 request(PaymentTargetType.MONTHLY_CARD, order.getId()));
 
         assertTrue(result.isSuccess(), "提交应当成功");
@@ -402,16 +482,18 @@ class PaymentProofServiceTests {
     }
 
     @Test
-    @DisplayName("提交：商品提交即交付，库存当场扣减")
+    @DisplayName("提交：商品带交易单号 → 当场结清，库存当场扣减")
     void submit_productDeliversImmediately() {
         ProductOrder order = seedPendingProductOrder();
         seedUser(USER_ID);
+        ProofSubmitRequest req = request(PaymentTargetType.PRODUCT, order.getId());
+        req.setPaymentNo("WX-TX-1");
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID,
-                request(PaymentTargetType.PRODUCT, order.getId()));
+        BizResult<ProofSubmitVo> result = submit(req);
 
         assertTrue(result.isSuccess(), "提交应当成功");
-        assertTrue(result.getData().isDelivered(), "商品与订单同为「提交即交付」");
+        assertTrue(result.getData().isDelivered(),
+                "商品与订单同为「提交即交付」—— 且识别到单号时当场结清");
         assertEquals(ProductOrderStatus.PAID.name(),
                 productOrderMapper.get(order.getId()).getStatus(), "购买单应当已经转已支付");
     }
@@ -430,7 +512,7 @@ class PaymentProofServiceTests {
         req.setOcrAmount(new BigDecimal("8.00"));
         req.setOcrText("支付成功\n¥8.00\n交易单号\n4200001234202609301234567890");
 
-        service.submit(USER_ID, req);
+        submit(req);
 
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         assertEquals("4200001234202609301234567890", proof.getOcrPaymentNo(),
@@ -450,13 +532,13 @@ class PaymentProofServiceTests {
         ProofSubmitRequest first = request(PaymentTargetType.ORDER, order.getId());
         first.setOcrPaymentNo("4200001111111111111111111111");
         first.setOcrAmount(new BigDecimal("22.00"));
-        service.submit(USER_ID, first);
+        submit(first);
 
         ProofSubmitRequest second = request(PaymentTargetType.ORDER, order.getId());
         second.setProofUrl("/uploads/proof/another.jpg");
         second.setOcrPaymentNo("4200002222222222222222222222");
         second.setOcrAmount(new BigDecimal("8.00"));
-        service.submit(USER_ID, second);
+        submit(second);
 
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         assertEquals("4200002222222222222222222222", proof.getOcrPaymentNo(),
@@ -476,7 +558,7 @@ class PaymentProofServiceTests {
         req.setOcrPaymentNo("  ");
         req.setOcrText("");
 
-        service.submit(USER_ID, req);
+        submit(req);
 
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         assertNull(proof.getOcrPaymentNo(), "「没识别出」应当是 null，与列上的 DEFAULT NULL 一致");
@@ -493,7 +575,7 @@ class PaymentProofServiceTests {
         req.setOcrText("字".repeat(5000));
         req.setOcrPaymentNo("9".repeat(200));
 
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, req);
+        BizResult<ProofSubmitVo> result = submit(req);
 
         assertTrue(result.isSuccess(),
                 "辅助字段没对上格式，不该让「提交付款凭证」整个失败 —— "
@@ -513,7 +595,7 @@ class PaymentProofServiceTests {
         ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
         req.setOcrAmount(new BigDecimal("99999999999.99"));
 
-        service.submit(USER_ID, req);
+        submit(req);
 
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         assertNull(proof.getOcrAmount(),
@@ -530,7 +612,7 @@ class PaymentProofServiceTests {
     void confirm_bookingSettlesOnReview() {
         Booking booking = seedPendingBooking(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.BOOKING, booking.getId()));
+        submit(request(PaymentTargetType.BOOKING, booking.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
 
         BizResult<Void> result = service.confirm(proof.getId(), ADMIN_ID);
@@ -553,7 +635,7 @@ class PaymentProofServiceTests {
     void confirm_cardIssuedOnReview() {
         MonthlyCardOrder order = seedPendingCardOrder();
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.MONTHLY_CARD, order.getId()));
+        submit(request(PaymentTargetType.MONTHLY_CARD, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.MONTHLY_CARD.name(), order.getId());
 
         BizResult<Void> result = service.confirm(proof.getId(), ADMIN_ID);
@@ -570,7 +652,7 @@ class PaymentProofServiceTests {
     void confirm_orderDoesNotDoubleCount() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        submit(request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
 
         service.confirm(proof.getId(), ADMIN_ID);
@@ -592,7 +674,7 @@ class PaymentProofServiceTests {
     void confirm_twiceConflicts() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        submit(request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         service.confirm(proof.getId(), ADMIN_ID);
 
@@ -607,7 +689,7 @@ class PaymentProofServiceTests {
     @DisplayName("驳回：写下原因，且不改动目标状态")
     void reject_recordsReasonWithoutTouchingTarget() {
         Booking booking = seedPendingBooking(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.BOOKING, booking.getId()));
+        submit(request(PaymentTargetType.BOOKING, booking.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
 
         BizResult<Void> result = service.reject(proof.getId(), ADMIN_ID, "截图上显示 8 元，本单应付 500 元");
@@ -625,7 +707,7 @@ class PaymentProofServiceTests {
     @DisplayName("驳回 → 发一条通知事件，用户才可能知道自己的凭证没过")
     void reject_publishesNotification() {
         Booking booking = seedPendingBooking(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.BOOKING, booking.getId()));
+        submit(request(PaymentTargetType.BOOKING, booking.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
         // 提交本身不发事件，这里清一次是防御性的：将来提交若也要播报，
         // 本用例不该跟着变红
@@ -649,10 +731,14 @@ class PaymentProofServiceTests {
     void reject_revertsOrderDelivery() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        // 带流水号提交 → 自动通过（2026-10-10 起，没单号就不结清、也就没有可退的东西）。
+        // 这一条因此同时守着「自动通过之后被驳回」这条路：机器放行的也能被人推翻
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setPaymentNo("WX-TX-1");
+        submit(req);
 
         assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
-                "订单是「提交即交付」，提交完就该是已支付");
+                "带单号提交即刻结清 —— 这一条测的正是「结清之后被驳回要退得回去」");
         assertTrue(userMapper.get(USER_ID).getTotalPaid().compareTo(BigDecimal.ZERO) > 0,
                 "提交即交付，累计消费当场就记上了");
 
@@ -677,20 +763,23 @@ class PaymentProofServiceTests {
     void resubmitAfterRejectForOrder() {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setPaymentNo("WX-TX-1");
+        submit(req);
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
         service.reject(proof.getId(), ADMIN_ID, "截图看不清");
 
         ProofSubmitRequest again = request(PaymentTargetType.ORDER, order.getId());
         again.setProofUrl("/uploads/proof/clearer.jpg");
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, again);
+        again.setPaymentNo("WX-TX-1");
+        BizResult<ProofSubmitVo> result = submit(again);
 
         assertTrue(result.isSuccess(),
                 "订单被退回待支付之后，重交走的是正常的待支付路径 —— "
                         + "submit 里那道「已支付 + 已驳回 → 拒绝重交」自然走不到了。"
                         + "这正是「退状态」比「单独开一条重交通道」省事的地方");
         assertEquals(OrderStatus.PAID.name(), orderMapper.get(order.getId()).getStatus(),
-                "重交之后当场又转已支付（提交即交付）");
+                "重交之后当场又结清（带单号即自动通过）");
     }
 
     @Test
@@ -706,7 +795,9 @@ class PaymentProofServiceTests {
 
         ProductOrder productOrder = seedPendingProductOrder();
         seedUser(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.PRODUCT, productOrder.getId()));
+        ProofSubmitRequest req = request(PaymentTargetType.PRODUCT, productOrder.getId());
+        req.setPaymentNo("WX-TX-1");
+        submit(req);
         int stockAfterPay = productMapper.get(1L).getStock();
 
         PaymentProof proof = proofMapper.find(PaymentTargetType.PRODUCT.name(), productOrder.getId());
@@ -727,13 +818,13 @@ class PaymentProofServiceTests {
     @DisplayName("驳回后重交：状态翻回待复核，旧结论清空")
     void resubmitAfterReject() {
         Booking booking = seedPendingBooking(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.BOOKING, booking.getId()));
+        submit(request(PaymentTargetType.BOOKING, booking.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
         service.reject(proof.getId(), ADMIN_ID, "看不清");
 
         ProofSubmitRequest again = request(PaymentTargetType.BOOKING, booking.getId());
         again.setProofUrl("/uploads/proof/newer.jpg");
-        BizResult<ProofSubmitVo> result = service.submit(USER_ID, again);
+        BizResult<ProofSubmitVo> result = submit(again);
 
         assertTrue(result.isSuccess(), "包场等复核，驳回后用户可以重交（订单那类则要人工处置）");
         PaymentProof saved = proofMapper.find(PaymentTargetType.BOOKING.name(), booking.getId());
@@ -757,12 +848,12 @@ class PaymentProofServiceTests {
         ProofSubmitRequest a = request(PaymentTargetType.ORDER, withQr.getId());
         a.setPayQrId(qr.getId());
         a.setPaymentNo("WX-TX-DUP");
-        service.submit(USER_ID, a);
+        submit(a);
 
         Order plain = seedPendingOrder(USER_ID);
         ProofSubmitRequest b = request(PaymentTargetType.ORDER, plain.getId());
         b.setPaymentNo("WX-TX-DUP");
-        service.submit(USER_ID, b);
+        submit(b);
 
         PageResult<AdminProofVo> page = service.listForAdmin(1, 10, null);
 
@@ -788,7 +879,7 @@ class PaymentProofServiceTests {
     void listForAdmin_filtersByStatus() {
         seedUser(USER_ID);
         Order order = seedPendingOrder(USER_ID);
-        service.submit(USER_ID, request(PaymentTargetType.ORDER, order.getId()));
+        submit(request(PaymentTargetType.ORDER, order.getId()));
         PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
 
         assertEquals(1, service.listForAdmin(1, 10, PaymentProofStatus.SUBMITTED.name()).getTotal());
@@ -799,6 +890,91 @@ class PaymentProofServiceTests {
         assertEquals(0, service.listForAdmin(1, 10, PaymentProofStatus.SUBMITTED.name()).getTotal(),
                 "复核过的不该再出现在待办里");
         assertEquals(1, service.listForAdmin(1, 10, PaymentProofStatus.CONFIRMED.name()).getTotal());
+    }
+
+    // ==================================================================
+    // 交易流水（2026-10-10 加）
+    // ==================================================================
+
+    @Test
+    @DisplayName("流水：提交凭证记一行；订单当场落账，再记一行到账")
+    void submit_recordsProofAndPayReceived() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setPaymentNo("WX-TX-1");
+
+        submit(req);
+
+        assertEquals(2, tradeLogMapper.size(), "提交 + 到账，恰好两行（到账只有一处写，不会重）");
+        TradeLog submitted = tradeLogMapper.rows().get(0);
+        assertEquals(TradeEventType.PROOF_SUBMITTED.name(), submitted.getEventType());
+        assertEquals(PaymentTargetType.ORDER.name(), submitted.getTargetType());
+        assertEquals(order.getOrderNo(), submitted.getTargetNo(), "流水靠单号与业务单据对齐");
+        assertEquals(TradeSource.WEB.name(), submitted.getSource());
+        assertNull(submitted.getOperatorId(), "提交是用户自己的动作，没有代劳的人");
+
+        TradeLog received = tradeLogMapper.rows().get(1);
+        assertEquals(TradeEventType.PAY_RECEIVED.name(), received.getEventType());
+        assertEquals(order.getOrderNo(), received.getTargetNo());
+        assertEquals("识别到交易单号，自动结清（免人工复核）", received.getRemark(),
+                "⚠️ 同一条「收款到账」，订单是机器读到单号就放行、包场是管理员复核通过 —— "
+                        + "备注必须把两者分开：「免复核」只是少让管理员看几眼，"
+                        + "不等于「这笔钱被确认过」（后者要看对账那一行）");
+    }
+
+    @Test
+    @DisplayName("流水：用户没填流水号时，用识别到的那一串补上")
+    void submit_fillsPaymentNoFromOcr() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setOcrPaymentNo("4200003186202610096229905623");
+
+        submit(req);
+
+        assertEquals("4200003186202610096229905623",
+                proofMapper.find(PaymentTargetType.ORDER.name(), order.getId()).getPaymentNo(),
+                "群内传图那条路没有填单号的表单 —— 不补的话，对账永远认不出这一笔"
+                        + "（凭证没号 = 一屏「没填流水号」的差异）");
+        assertEquals("4200003186202610096229905623",
+                tradeLogMapper.rows().get(0).getPaymentNo(), "流水上也带上它");
+    }
+
+    @Test
+    @DisplayName("流水：用户填了流水号时，识别结果不覆盖他填的")
+    void submit_keepsUserPaymentNoOverOcr() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        ProofSubmitRequest req = request(PaymentTargetType.ORDER, order.getId());
+        req.setPaymentNo("USER-TYPED-1");
+        req.setOcrPaymentNo("OCR-READ-2");
+
+        submit(req);
+
+        assertEquals("USER-TYPED-1",
+                proofMapper.find(PaymentTargetType.ORDER.name(), order.getId()).getPaymentNo(),
+                "他填的以他为准 —— 识别只是「没有填写环节」时的兜底，不是替换");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：驳回记一行，带上原因与审核人")
+    void reject_recordsLedgerWithOperator() {
+        Order order = seedPendingOrder(USER_ID);
+        seedUser(USER_ID);
+        submit(request(PaymentTargetType.ORDER, order.getId()));
+        PaymentProof proof = proofMapper.find(PaymentTargetType.ORDER.name(), order.getId());
+
+        service.reject(proof.getId(), ADMIN_ID, "金额对不上");
+
+        TradeLog rejected = tradeLogMapper.rows().get(tradeLogMapper.size() - 1);
+        assertEquals(TradeEventType.PROOF_REJECTED.name(), rejected.getEventType());
+        assertEquals(order.getOrderNo(), rejected.getTargetNo());
+        assertEquals(TradeSource.ADMIN.name(), rejected.getSource());
+        assertEquals(ADMIN_ID, rejected.getOperatorId(),
+                "⚠️ 「哪个管理员判的不认」必须落在账上 —— 只说「来源=管理后台」等于没说");
+        assertEquals("金额对不上", rejected.getRemark(),
+                "原因原样留档：事后查「当时为什么驳回」就靠它");
     }
 
     // ==================================================================

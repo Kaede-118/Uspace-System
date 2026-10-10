@@ -90,15 +90,22 @@ public class ReconcileService {
     private final ReconcileProperties properties;
 
     /**
+     * 交易流水。对账认下来的每一笔记一行「账单对账确认」（2026-10-10 加）——
+     * 那是「钱确实进了口袋」的唯一凭据，与「有没有人复核过」分开记。
+     */
+    private final TradeLogService tradeLogService;
+
+    /**
      * 构造器注入。
      *
-     * @param proofMapper  凭证数据访问，用于取候选与回写认领
-     * @param batchMapper  批次数据访问
-     * @param diffMapper   差异数据访问
-     * @param storeMapper  取当前门店（批次要记在哪个店上）
-     * @param userMapper   批量补管理员昵称
-     * @param billStorage  账单原文件的留档与读取
-     * @param properties   窗口天数与候选数预警阈值
+     * @param proofMapper     凭证数据访问，用于取候选与回写认领
+     * @param batchMapper     批次数据访问
+     * @param diffMapper      差异数据访问
+     * @param storeMapper     取当前门店（批次要记在哪个店上）
+     * @param userMapper      批量补管理员昵称
+     * @param billStorage     账单原文件的留档与读取
+     * @param properties      窗口天数与候选数预警阈值
+     * @param tradeLogService 交易流水，记「账单对账确认」
      */
     public ReconcileService(PaymentProofMapper proofMapper,
                             ReconcileBatchMapper batchMapper,
@@ -106,7 +113,8 @@ public class ReconcileService {
                             StoreMapper storeMapper,
                             SysUserMapper userMapper,
                             ReconcileBillStorage billStorage,
-                            ReconcileProperties properties) {
+                            ReconcileProperties properties,
+                            TradeLogService tradeLogService) {
         this.proofMapper = proofMapper;
         this.batchMapper = batchMapper;
         this.diffMapper = diffMapper;
@@ -114,6 +122,7 @@ public class ReconcileService {
         this.userMapper = userMapper;
         this.billStorage = billStorage;
         this.properties = properties;
+        this.tradeLogService = tradeLogService;
     }
 
     // ==================================================================
@@ -238,6 +247,16 @@ public class ReconcileService {
         batchMapper.insert(batch);
 
         claimMatched(batch, plan);
+
+        // 流水：认下来的每一笔各记一行「账单对账确认」（2026-10-10 加）。
+        // 它与「收款到账」分开记 —— 那一条只说明系统按自己的记录认了这笔钱
+        //（小额收款甚至是机器读到一个单号就放行的），而这一条才说明
+        //「收款账单里也真有这一笔」。免人工复核不产生这条确认，见 TradeEventType#RECONCILED
+        for (PaymentProof proof : proofMapper.selectByReconcileBatch(batch.getId())) {
+            tradeLogService.recordReconciled(proof.getTargetType(), proof.getOrderNo(),
+                    proof.getUserId(), proof.getAmount(), proof.getPaymentNo(),
+                    adminId, "对账批次 #" + batch.getId());
+        }
 
         List<ReconcilePlan.DiffDraft> kept = dropDuplicatedDiffs(plan.diffs());
         for (ReconcilePlan.DiffDraft draft : kept) {

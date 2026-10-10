@@ -168,16 +168,55 @@ public interface PaymentProofMapper extends BaseMapper<PaymentProof> {
     int confirm(@Param("id") Long id, @Param("adminId") Long adminId);
 
     /**
+     * 自动通过（2026-10-10 加）—— 小额收款的凭证在识别到交易单号时当场置为已核对。
+     *
+     * <p><b>{@code confirmed_by} 写 NULL，表示「系统自动」</b>：这不是某个管理员的
+     * 结论，而是「识别到了有效单号」这一事实的结果。后台看这一列时，
+     * NULL 与管理员 ID 是两件事 —— 前者是机器认的，后者是人认的。
+     * 交易流水的 {@code operator_id} 同理留空。
+     *
+     * <p>状态守卫与 {@link #confirm} 一致（{@code AND verify_status = 'SUBMITTED'}）：
+     * 并发时只有一个能改成功，另一个拿到 0 行 —— 调用方按「已被处理过」处理，
+     * 不会重复落账（落账那一步另有自己的守卫）。
+     *
+     * @param id 凭证 ID
+     * @return 受影响行数；0 表示这条已被处理过，或 ID 不存在
+     */
+    @Update("""
+            UPDATE biz_payment_proof
+               SET verify_status = 'CONFIRMED',
+                   confirmed_by  = NULL,
+                   confirmed_at  = NOW(),
+                   reject_reason = NULL,
+                   updated_at    = NOW()
+             WHERE id = #{id}
+               AND verify_status = 'SUBMITTED'
+            """)
+    int autoConfirm(@Param("id") Long id);
+
+    /**
      * 复核不通过。
      *
      * <p>{@code reject_reason} 必填 —— 用户重交或申诉时要知道「哪里不对」，
      * 空着的话他只能反复试。Service 层会挡住空原因（库列也留了 200 的宽度，
      * 但那是给文案的余量，不是给空串的）。
      *
+     * <p>⚠️ <b>状态守卫收两种，是 2026-10-10 特意放宽的</b>：
+     * <pre>
+     *   verify_status = 'SUBMITTED'                        —— 待复核的，驳回它
+     *   或 (verify_status = 'CONFIRMED' AND confirmed_by IS NULL)
+     *                                                      —— 机器自动通过的，推翻它
+     * </pre>
+     * 第二种是「免人工复核」那条路的出口：机器读到一串像样的单号就放行了，
+     * 但它可能读错、也可能这张图根本不是这一笔的 —— 管理员必须能推翻它，
+     * 否则那笔钱就成了谁也动不了的既成事实。而<b>人工确认过的（{@code confirmed_by}
+     * 有值）不在其列</b>：那是另一个人的结论，要改该走退款/人工调整那条路，
+     * 不是在凭证上把它抹掉。
+     *
      * @param id      凭证 ID
      * @param adminId 复核管理员 ID
      * @param reason  未通过原因
-     * @return 受影响行数；0 表示这条已被别人复核过，或 ID 不存在
+     * @return 受影响行数；0 表示这条已被别人复核过（或已被人工确认过），或 ID 不存在
      */
     @Update("""
             UPDATE biz_payment_proof
@@ -187,7 +226,8 @@ public interface PaymentProofMapper extends BaseMapper<PaymentProof> {
                    reject_reason = #{reason},
                    updated_at    = NOW()
              WHERE id = #{id}
-               AND verify_status = 'SUBMITTED'
+               AND (verify_status = 'SUBMITTED'
+                    OR (verify_status = 'CONFIRMED' AND confirmed_by IS NULL))
             """)
     int reject(@Param("id") Long id, @Param("adminId") Long adminId,
                @Param("reason") String reason);
@@ -342,4 +382,25 @@ public interface PaymentProofMapper extends BaseMapper<PaymentProof> {
             </script>
             """)
     int markReconciled(@Param("batchId") Long batchId, @Param("proofIds") List<Long> proofIds);
+
+    /**
+     * 取某个对账批次认领下来的凭证（2026-10-10 加）。
+     *
+     * <p>供「认领之后给每笔记一行『账单对账确认』」使用 —— 那是
+     * {@code TradeLogService#recordReconciled} 的调用点。
+     *
+     * <p><b>按批次 ID 反查，而不是拿匹配计划里的 ID 列表</b>：并发时可能有几笔
+     * 被另一个批次抢先认领走了（{@link #markReconciled} 带
+     * {@code reconcile_batch_id IS NULL} 守卫），而按这一列查出来的正是
+     * <b>本批次真正认下的那些</b>，不必再去推敲差在哪几笔上。
+     *
+     * @param batchId 批次 ID
+     * @return 该批次认领的凭证；一批都没认下时返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_payment_proof
+             WHERE reconcile_batch_id = #{batchId}
+            """)
+    List<PaymentProof> selectByReconcileBatch(@Param("batchId") Long batchId);
 }

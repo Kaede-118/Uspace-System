@@ -13,7 +13,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 计费服务（模块 7）。
@@ -58,6 +60,13 @@ import java.util.List;
  * 两头都不对。代价与跨时段切段是同一类：每多切一段就多享一次宽限，
  * 所以切分只在卡的有效期边界真正落在订单区间内时发生，
  * 无卡时一段也不多切（见 {@link #splitByPeriod}）。
+ *
+ * <p>2026-10-10 的规则变化：<b>封顶按半场累计</b>。同一个半场（日场
+ * 10:00-22:00、夜场 22:00-次日 10:00）里，无论被包场剪成几截、被活动或月卡
+ * 切成几段，实收合计不超过一个封顶价 —— 起因是「有活动反而更贵」：
+ * 10:00-22:00 无活动时整段封顶 40 元，被活动切出一段后各段分别封顶，
+ * 反而能收 56 元。累计跨调用进行（{@link HalfPeriodUsage} 由调用方持有），
+ * 因为包场剪切发生在订单模块、每一次剪切各调一次本类。
  *
  * <p><b>本类为纯计算，不访问数据库、不依赖其他模块</b>，因此可直接单元测试。
  * 月度优惠所需的「当月累计实付额」由调用方查好后经参数传入 ——
@@ -183,6 +192,30 @@ public class BillingService {
     public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
                                    BigDecimal monthSpent, CardCoverage cardCoverage,
                                    List<FreeRange> freeRanges) {
+        return calculate(startTime, endTime, monthSpent, cardCoverage, freeRanges,
+                new HalfPeriodUsage());
+    }
+
+    /**
+     * 同上，但<b>半场额度由调用方持有、可跨多次调用累计</b>。
+     *
+     * <p><b>为什么需要这个重载</b>：一个订单的计费区间可能被包场剪成多截
+     *（见 {@code OrderService#billableRanges}），每截调一次本方法。
+     * 封顶自 2026-10-10 起按<b>半场</b>累计 —— 同一半场的几截共享一个封顶额度，
+     * 累计器因此必须活在这些调用的外面，由调用方创建并逐次传入。
+     * 单截区间直接用上面那个 5 参版本即可，它内部新建一个累计器。
+     *
+     * <p>⚠️ <b>两条计费线共用一个累计器、各记各的账</b>：月度优惠用户算
+     * 「本单省了多少」时要按原价把整单重算一遍，优惠价与原价各用一条线
+     *（{@link HalfPeriodUsage} 内部按优惠状态分桶）。共用一条线的话，
+     * 原价重算会读到优惠价用掉的额度，差额被记进
+     * {@link BillingResult#getDiscountAmount()} —— 封顶减免被当成月度优惠，不报任何错。
+     *
+     * @param usage 半场额度累计器；跨多次调用同一组区间时必须传同一个对象
+     */
+    public BillingResult calculate(LocalDateTime startTime, LocalDateTime endTime,
+                                   BigDecimal monthSpent, CardCoverage cardCoverage,
+                                   List<FreeRange> freeRanges, HalfPeriodUsage usage) {
         if (startTime == null || endTime == null) {
             throw new IllegalArgumentException("计费的开始时间与结束时间不能为空");
         }
@@ -204,7 +237,7 @@ public class BillingService {
         BigDecimal activityFreeAmount = BigDecimal.ZERO;
 
         for (TimeSegment segment : splitByPeriod(startTime, endTime, cardCoverage, frees)) {
-            SegmentBill bill = billSegment(segment, discounted, cardCoverage, frees);
+            SegmentBill bill = billSegment(segment, discounted, cardCoverage, frees, usage);
             segments.add(bill);
             totalAmount = totalAmount.add(bill.getAmount());
             cardFreeAmount = cardFreeAmount.add(bill.getCardFreeAmount());
@@ -220,8 +253,12 @@ public class BillingService {
                 // 差额全部落进 discountAmount —— 一笔「月卡免了 40 元」的单
                 // 会被记成「月度优惠省了 40 元」，不报任何错，
                 // 统计报表还会把它当成优惠活动的效果。
+                // ⚠️ usage 要一并传下去：原价重算走的是累计器的【另一条线】
+                //（discounted=false 那个桶），两条线互不污染。
+                // 少了它，原价重算会把优惠价已经用掉的封顶额度再吃一遍，
+                // 差额落进 discountAmount —— 与漏传 cardCoverage 是同一类错误
                 originalTotal = originalTotal.add(
-                        billSegment(segment, false, cardCoverage, frees).getAmount());
+                        billSegment(segment, false, cardCoverage, frees, usage).getAmount());
             }
         }
 
@@ -326,16 +363,43 @@ public class BillingService {
      * 新段从 0 分钟起算，新段自身还要再积累到达下一档才涨价。但<b>计价规则变了</b>
      * （夜场更便宜），这正是用户该知道的。
      *
-     * @param startTime    计费起点，通常传当前计费段的起点（已剪掉包场）
-     * @param now          计算截止时刻
-     * @param monthSpent   当月累计实付额，用于取正确的单价（优惠价还是原价）
-     * @param cardCoverage 月卡的时段覆盖范围，无卡传 null
-     * @param freeRanges   免费活动的区间，无活动传 null
+     * @param startTime     计费起点，通常传当前计费段的起点（已剪掉包场）
+     * @param now           计算截止时刻
+     * @param monthSpent    当月累计实付额，用于取正确的单价（优惠价还是原价）
+     * @param cardCoverage  月卡的时段覆盖范围，无卡传 null
+     * @param freeRanges    免费活动的区间，无活动传 null
+     * @param halfUsedBefore 本段之前、同一半场已收的金额（元），可为 null（视同 0）——
+     *                       封顶按半场累计，预告的「下一档金额」必须扣掉它，
+     *                       否则会报出一个到不了的数字。调用方用
+     *                       {@link #halfPeriodUsedBefore} 从账单里算好传入
      * @return 预告；参数缺失或 {@code now} 早于 {@code startTime} 时返回 null
      */
     public NextChange nextChange(LocalDateTime startTime, LocalDateTime now,
                                  BigDecimal monthSpent, CardCoverage cardCoverage,
+                                 List<FreeRange> freeRanges, BigDecimal halfUsedBefore) {
+        return nextChangeInternal(startTime, now, monthSpent, cardCoverage, freeRanges,
+                halfUsedBefore);
+    }
+
+    /**
+     * 不带半场已收额度的预告 —— 等价于 {@code halfUsedBefore = 0}。
+     *
+     * <p>留给「确定没有历史收钱、也不在本单中途」的场景：
+     * 纯计费的单元测试、以及任何只想知道「从这一刻起段内怎么变」的调用方。
+     * 生产路径（订单模块的结账预览）走上面那个 6 参版本 ——
+     * 它会先 {@link #halfPeriodUsedBefore 算出本段之前的同半场已收}，
+     * 半场额度用掉一部分后，预告的「下一档金额」才不会报出一个到不了的数。
+     */
+    public NextChange nextChange(LocalDateTime startTime, LocalDateTime now,
+                                 BigDecimal monthSpent, CardCoverage cardCoverage,
                                  List<FreeRange> freeRanges) {
+        return nextChangeInternal(startTime, now, monthSpent, cardCoverage, freeRanges, null);
+    }
+
+    private NextChange nextChangeInternal(LocalDateTime startTime, LocalDateTime now,
+                                          BigDecimal monthSpent, CardCoverage cardCoverage,
+                                          List<FreeRange> freeRanges,
+                                          BigDecimal halfUsedBefore) {
         if (startTime == null || now == null) {
             throw new IllegalArgumentException("跳档预告的计费起点与当前时刻不能为空");
         }
@@ -386,14 +450,21 @@ public class BillingService {
         BigDecimal cap = capOf(period, discounted);
 
         // ② 已达封顶：段内金额不再增长。
-        //    用「原始金额 ≥ 封顶」而不是段上的 capped 标志 —— 那个要到第 11 档
-        //    （5 小时 6 分）才为 true，而金额不再增长从第 10 档（4 小时 36 分）
-        //    就开始了，靠它会漏报。与 OrderService.allSegmentsCapped 同一条口径。
+        //    ⚠️ 这里的「封顶」要看【半场剩余额度】而不是本段自己的封顶：
+        //    封顶自 2026-10-10 起按半场累计，本段能收的上限是
+        //    「封顶 − 本半场此前已收」。只看 cap 的话，同半场前面几段收掉的
+        //    钱会被忽略 —— 预告会报出一个到不了的数字
+        //    （而账单那边是对的，两边差距只有用户对照时才会被发现）。
+        //    用「原始金额 ≥ 剩余额度」而不是段上的 capped 标志 —— 那个要到
+        //    第 11 档（5 小时 6 分）才为 true，而金额不再增长从第 10 档
+        //    （4 小时 36 分）就开始了，靠它会漏报。
         //
         //    此刻不给倒计时：跨段虽然终会到来（新段会重新计费），但它可能在
         //    十余小时之后，而「已到封顶价」才是用户现在真正需要知道的事。
         //    真到了跨段那一刻，预览接口会重新算出新段的预告。
-        if (unitPrice.multiply(BigDecimal.valueOf(units)).compareTo(cap) >= 0) {
+        BigDecimal halfUsed = halfUsedBefore == null ? BigDecimal.ZERO : halfUsedBefore;
+        BigDecimal remaining = cap.subtract(halfUsed).max(BigDecimal.ZERO);
+        if (unitPrice.multiply(BigDecimal.valueOf(units)).compareTo(remaining) >= 0) {
             return NextChange.none("当前已到封顶价");
         }
 
@@ -402,7 +473,10 @@ public class BillingService {
         LocalDateTime tierAt = current.start().plusMinutes(nextTierMinutes(units));
 
         if (tierAt.isBefore(periodEnd)) {
-            BigDecimal nextAmount = unitPrice.multiply(BigDecimal.valueOf(units + 1)).min(cap);
+            // 「下一档时本段会收多少」同样受半场剩余额度约束 ——
+            // 与账单里的 amount = min(原始金额, 封顶, 剩余额度) 是同一个公式
+            BigDecimal nextAmount = unitPrice.multiply(BigDecimal.valueOf(units + 1))
+                    .min(remaining);
             return NextChange.at(secondsBetween(now, tierAt), "进入下一档 " + money(nextAmount));
         }
 
@@ -718,7 +792,8 @@ public class BillingService {
      * @return 该段的计费明细
      */
     private SegmentBill billSegment(TimeSegment segment, boolean discounted,
-                                    CardCoverage cardCoverage, List<FreeRange> freeRanges) {
+                                    CardCoverage cardCoverage, List<FreeRange> freeRanges,
+                                    HalfPeriodUsage usage) {
         long minutes = Duration.between(segment.start(), segment.end()).toMinutes();
         // 档数与跳档预告共用 unitsOf —— 两处各写一份的话，「还有多久到下一档」
         // 会与账单上的档数对不上，而两边看起来都合理
@@ -727,7 +802,18 @@ public class BillingService {
         BigDecimal unitPrice = unitPriceOf(segment.period(), discounted);
         BigDecimal rawAmount = unitPrice.multiply(BigDecimal.valueOf(units));
         BigDecimal cap = capOf(segment.period(), discounted);
-        BigDecimal amount = rawAmount.min(cap);
+
+        // 半场累计额度：本段能收的上限是「封顶 − 本半场此前已收」。
+        // usedBefore 为 0 时退化成段级封顶 min(原始金额, 封顶) —— 那是
+        // 半场第一段的常态，也是 2026-10-10 规则变化之前的唯一形态
+        LocalDateTime halfStart = halfPeriodStart(segment.period(), segment.start());
+        BigDecimal usedBefore = usage.usedIn(halfStart, discounted);
+        BigDecimal remaining = cap.subtract(usedBefore).max(BigDecimal.ZERO);
+        BigDecimal amount = rawAmount.min(cap).min(remaining);
+        // 本段因半场累计少收的部分 = 段级封顶后的金额 − 实收。
+        // 与「段级封顶减免」分开记：capped 说「本段原始金额超顶了」，
+        // 本字段说「其中多少是因为半场前面已经收过钱」
+        BigDecimal cutAmount = rawAmount.min(cap).subtract(amount);
 
         // 免费判定：时段在卡种范围内、且起点落在卡的有效区间内。
         // 传起点而不是终点 —— 段已按卡的有效期边界切过，不会跨越它，
@@ -740,6 +826,12 @@ public class BillingService {
         // 活动并没有为他省下什么 —— 两个都记会把同一笔钱算两遍，
         // 复盘一场活动时「送出去多少」虚高，且不报任何错。
         boolean freeByActivity = !freeByCard && isInFreeRange(segment.start(), freeRanges);
+        boolean free = freeByCard || freeByActivity;
+
+        // 额度记的是【实收】：免掉的段记 0（等于不消耗额度）——
+        // 月卡用户本来就免费，让他「用掉」额度等于替他少免了后面的钱
+        BigDecimal actualAmount = free ? BigDecimal.ZERO : amount;
+        usage.add(halfStart, discounted, actualAmount);
 
         SegmentBill bill = new SegmentBill();
         bill.setPeriod(segment.period());
@@ -750,13 +842,158 @@ public class BillingService {
         bill.setUnitPrice(unitPrice);
         bill.setCapAmount(cap);
         bill.setRawAmount(rawAmount);
-        bill.setAmount(freeByCard || freeByActivity ? BigDecimal.ZERO : amount);
+        bill.setAmount(actualAmount);
         bill.setCapped(rawAmount.compareTo(cap) > 0);
+        bill.setHalfPeriodUsedBefore(usedBefore);
+        bill.setHalfPeriodCutAmount(free ? BigDecimal.ZERO : cutAmount);
         bill.setFreeByCard(freeByCard);
         bill.setCardFreeAmount(freeByCard ? amount : BigDecimal.ZERO);
         bill.setFreeByActivity(freeByActivity);
         bill.setActivityFreeAmount(freeByActivity ? amount : BigDecimal.ZERO);
         return bill;
+    }
+
+    /**
+     * 求某个段所属半场的起点时刻。
+     *
+     * <p><b>半场的定义</b>：日场半场 = 当天 {@code dayStart} 起至 {@code dayEnd}；
+     * 夜场半场 = 当天 {@code dayEnd} 起至次日 {@code dayStart}。
+     * 夜场跨零点，所以凌晨时刻要归到<b>前一天</b>的夜场 ——
+     * 用日期做键会把 10/8 深夜与 10/9 凌晨拆成两个半场，
+     * 而它们本是同一份封顶额度。
+     *
+     * <p>⚠️ 它与 {@link #nextBoundary} 是同一个时段划分的两种表达
+     *（一个求「还有多久结束」、一个求「从哪儿开始」），
+     * 改动时段划分时两处一起看。
+     *
+     * @param period 段所属时段
+     * @param at     段内任意时刻（调用方传段的起点）
+     * @return 半场起点
+     */
+    private LocalDateTime halfPeriodStart(BillingPeriod period, LocalDateTime at) {
+        LocalDate date = at.toLocalDate();
+        if (period == BillingPeriod.DAY) {
+            return LocalDateTime.of(date, properties.getDayStart());
+        }
+        // 夜场：日场结束时刻之后属于当晚；凌晨（早于日场开始）属于前一晚
+        return at.toLocalTime().isBefore(properties.getDayStart())
+                ? LocalDateTime.of(date.minusDays(1), properties.getDayEnd())
+                : LocalDateTime.of(date, properties.getDayEnd());
+    }
+
+    /**
+     * 求某段之前、同一半场已收的金额（<b>本单内 + 历史订单</b>）——
+     * 供跳档预告判断「窗口剩余额度」。
+     *
+     * <p>与 {@code billSegment} 内部读的是同一套半场划分
+     *（{@link #halfPeriodStart}）：调用方（订单模块）拿到账单后把它传给
+     * {@link #nextChange}，预告与账单因此不会各算各的。
+     *
+     * @param segments   一份已算好的账单的分段（按时间先后）
+     * @param current    当前正在进行的段（通常是最后一个）
+     * @param discounted 本单是否走优惠价（决定从哪条线取历史预置）
+     * @param seeded     {@link #seedUsage} 预置好的历史额度；没有历史时传 null
+     * @return 该段起点之前、同一半场的已收之和；没有则为 0
+     */
+    public BigDecimal halfPeriodUsedBefore(List<SegmentBill> segments, SegmentBill current,
+                                           boolean discounted, HalfPeriodUsage seeded) {
+        LocalDateTime halfStart = halfPeriodStart(current.getPeriod(), current.getStartTime());
+        BigDecimal fromBill = segments.stream()
+                .filter(s -> s.getStartTime().isBefore(current.getStartTime()))
+                .filter(s -> halfPeriodStart(s.getPeriod(), s.getStartTime()).equals(halfStart))
+                .map(SegmentBill::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal fromHistory = seeded == null
+                ? BigDecimal.ZERO : seeded.usedIn(halfStart, discounted);
+        return fromBill.add(fromHistory);
+    }
+
+    /**
+     * 求某个时刻所在半场的起点 —— 供订单模块算「历史订单查询范围」。
+     *
+     * <p>它公开出来只有一个理由：{@code OrderService} 要拿它查「同一半场内
+     * 还有哪些已支付订单」（封顶<b>跨订单</b>累计，见 {@link #seedUsage}），
+     * 而半场的划分只应有这一处定义。
+     *
+     * @param at 任意时刻
+     * @return 该时刻所属半场的起点
+     */
+    public LocalDateTime halfPeriodStartAt(LocalDateTime at) {
+        return halfPeriodStart(periodOf(at), at);
+    }
+
+    /**
+     * 求某个时刻所在半场的终点（半开区间 [起点, 终点)）。
+     *
+     * <p>复用 {@link #nextBoundary}：它就是「当前时段的下一个边界」，
+     * 与账单切段用的是同一处定义。
+     *
+     * @param at 任意时刻
+     * @return 该时刻所属半场的终点
+     */
+    public LocalDateTime halfPeriodEndAt(LocalDateTime at) {
+        return nextBoundary(halfPeriodStartAt(at), periodOf(at));
+    }
+
+    /**
+     * 把历史订单的实收（别的订单的段）预置进累计器。
+     *
+     * <p><b>这是「封顶跨订单累计」的入口</b>：用户玩一段、结算、再开新单
+     * （随时结算再重开是正常操作），拆单不能绕过半场封顶 ——
+     * 本次计费要先把同一半场里<b>已经付过的钱</b>记上，额度只剩余数。
+     *
+     * <p>⚠️ <b>两条线都预置同一个数</b>（优惠价线与原价线都记实收额）：
+     * 现金额度只有一份，与优惠状态无关。原价线理论上应记「历史如果按原价收
+     * 会是多少」，但那要求把历史订单集体重算一遍 —— 本机制不付这个代价，
+     * 偏差只影响「本单优惠金额」的展示（有界、不报错）。
+     *
+     * <p>段按各自的半场归位（{@link #halfPeriodStart}），落在别的半场的段
+     * 只进别的桶、不影响本次 —— 调用方因此可以把查询范围放宽一点，
+     * 多捞无害，<b>漏掉才会少收钱</b>。金额为 0 的段（被月卡 / 活动免掉的）
+     * 不占额度。
+     *
+     * @param usage    待预置的累计器
+     * @param segments 历史订单快照里的分段
+     */
+    public void seedUsage(HalfPeriodUsage usage, List<SegmentBill> segments) {
+        for (SegmentBill segment : segments) {
+            BigDecimal amount = segment.getAmount();
+            if (amount == null || amount.signum() == 0) {
+                continue;
+            }
+            LocalDateTime halfStart = halfPeriodStart(segment.getPeriod(), segment.getStartTime());
+            usage.add(halfStart, true, amount);
+            usage.add(halfStart, false, amount);
+        }
+    }
+
+    /**
+     * 判断账单里每个半场是否都已收满封顶价 —— 预览页「当前已到封顶价」的依据。
+     *
+     * <p>口径是<b>按半场分组求和</b>，而不是「逐段比对各自的封顶」：
+     * 同一半场可能被包场剪成多段、被活动切成多段，单看某一段
+     *（如第一段只收了 28 元）会漏报「这个半场其实已经收满」。
+     * 同半场各段的封顶值必然相同（单价与优惠状态整单一致），取哪个都一样。
+     *
+     * <p>没有计费段时返回 false：整段被包场覆盖的账单是 0 元，
+     * 但「封顶」在这里不适用（包场结束后照样会重新计费）。
+     *
+     * @param segments 账单分段
+     * @return 每个半场的实收合计都达到该半场封顶返回 true
+     */
+    public boolean allHalfPeriodsCapped(List<SegmentBill> segments) {
+        if (segments.isEmpty()) {
+            return false;
+        }
+        Map<LocalDateTime, BigDecimal> cumulative = new HashMap<>();
+        Map<LocalDateTime, BigDecimal> caps = new HashMap<>();
+        for (SegmentBill segment : segments) {
+            LocalDateTime halfStart = halfPeriodStart(segment.getPeriod(), segment.getStartTime());
+            cumulative.merge(halfStart, segment.getAmount(), BigDecimal::add);
+            caps.put(halfStart, segment.getCapAmount());
+        }
+        return cumulative.entrySet().stream()
+                .allMatch(e -> e.getValue().compareTo(caps.get(e.getKey())) >= 0);
     }
 
     /**

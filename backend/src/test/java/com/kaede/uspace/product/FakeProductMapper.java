@@ -103,6 +103,7 @@ public class FakeProductMapper implements InvocationHandler {
             case "updateProduct" -> updateProduct((Product) args[0]);
             case "deleteById" -> deleteById((Long) args[0]);
             case "deductStock" -> deductStock(args);
+            case "updateStock" -> updateStock(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -308,6 +309,27 @@ public class FakeProductMapper implements InvocationHandler {
             return 0;
         }
         product.setStock(product.getStock() - quantity);
+        return 1;
+    }
+
+    /**
+     * 把库存设成给定值。忠实照搬真 SQL 的
+     * {@code WHERE id = ? AND deleted = 0}。
+     *
+     * <p>⚠️ <b>返回「匹配行数」而不是「实际改变的行数」</b> —— 与 Connector/J 的默认
+     * 语义一致（见 {@code ProductService#updateStock} 里那段注释）：把库存改成
+     * 本来相同的值时仍返回 1。假实现若照「变了才算」写，同值更新那条用例
+     * 在单测里会绿、真机上却回一句「商品不存在」。
+     *
+     * @param args 依次为商品 ID、新的库存值
+     * @return 受影响行数；0 表示商品不存在或已逻辑删除
+     */
+    private int updateStock(Object[] args) {
+        Product product = selectById((Long) args[0]);
+        if (product == null) {
+            return 0;
+        }
+        product.setStock((Integer) args[1]);
         return 1;
     }
 

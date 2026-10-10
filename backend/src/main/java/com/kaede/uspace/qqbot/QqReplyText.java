@@ -5,6 +5,7 @@ import com.kaede.uspace.billing.event.FreePeriodChangeAction;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.notice.NoticePublishMode;
 import com.kaede.uspace.order.OrderStatus;
+import com.kaede.uspace.order.PaymentTargetType;
 import com.kaede.uspace.order.dto.InstoreUserVo;
 import com.kaede.uspace.order.dto.MonthSpentVo;
 import com.kaede.uspace.order.dto.OrderPreviewVo;
@@ -44,7 +45,7 @@ import java.util.Map;
  * <p>⚠️ <b>本类的产出全部会发到群里（所有人可见）</b>，因此：
  * <ul>
  *   <li>密码只在 {@link #openPasscode} 里出现 —— 那是设计允许的唯一出口</li>
- *   <li>金额只在 {@code /看看自己}、{@code /结账} 的回复里出现，
+ *   <li>金额只在 {@code fw看看自己}、{@code fw结账} 的回复里出现，
  *       而那两条都是<b>本人主动查自己</b>（2026-10-04 与用户确认的口径）；
  *       系统主动推的播报仍受 {@code QqbotProperties#isAmountVisible} 约束</li>
  * </ul>
@@ -57,11 +58,11 @@ public final class QqReplyText {
     /**
      * 这个 QQ 还没绑定账号时的提示。
      *
-     * <p>两条写指令与「看看自己」共用同一句 —— 三处各写一份的话，
+     * <p>写指令与「看看自己」共用同一句 —— 几处各写一份的话，
      * 改文案时漏掉一处，同一个原因在群里会看到三种说法。
      */
     public static final String NOT_BOUND =
-            "这个 QQ 还没绑定账号。先在网页端注册并完成 QQ 验证，之后就能用了。";
+            "该 QQ 尚未绑定账号。请先在网页端注册并完成 QQ 验证，之后即可使用。";
 
     /** 时间格式，如 {@code 14:00} */
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm");
@@ -80,18 +81,18 @@ public final class QqReplyText {
      * 表现为群里说的时限与系统实际受理的时限不一致。
      */
     private static final String PAY_BY_GROUP_HINT =
-            "\n付完把付款截图发到群里也行（5 分钟内有效）。";
+            "\n付款后也可将付款截图直接发送到群里（5 分钟内有效）。";
 
     /**
      * 认不出指令时的提示。
      *
      * <p>商品那条路是<b>封闭</b>的（只认 {@code 买…个…} 与 {@code 名-数量} 两种写法），
-     * 所以拼错的指令（{@code /在店铺}、{@code /开门吧}）都会落到这里 ——
+     * 所以拼错的指令（{@code fw在店铺}、{@code fw开门吧}）都会落到这里 ——
      * 不会被错怪成「没有这个商品」。这也是它值得单独一个常量的原因：
      * 它守着一类「答非所问」的体验。
      */
     private static final String UNKNOWN_COMMAND =
-            "没认出这条指令。发 /帮助 看看能问什么";
+            "无法识别该指令。可发送 fw帮助 查看可用指令。";
 
     /**
      * 公告正文在群里的截断长度。
@@ -122,10 +123,23 @@ public final class QqReplyText {
      * @param maxListed        一次最多列几个人
      * @return 多行文本；没有人时回一句人话而不是空表
      */
+    /**
+     * 名册图前的一句话（{@code fw在店} 发图时）。
+     *
+     * <p>格式由用户定（2026-10-10）：<b>一句话 + 图</b>，不是只发图 ——
+     * 群里先看到「店内目前有 3 人」，不必点开图才知道几人在店。
+     *
+     * @param count 在店人数
+     * @return 一句话
+     */
+    public static String instoreCount(int count) {
+        return count == 0 ? "店内目前无人。" : "店内目前有 " + count + " 人。";
+    }
+
     public static String instore(List<InstoreUserVo> users, Map<String, String> preferenceLabels,
                                  int maxListed) {
         if (users == null || users.isEmpty()) {
-            return "现在店里没人。";
+            return "当前店内无人。";
         }
 
         StringBuilder text = new StringBuilder("当前 ").append(users.size()).append(" 人在店：\n");
@@ -155,7 +169,7 @@ public final class QqReplyText {
     public static String bookingSchedule(List<BookingScheduleVo> items, Duration leadDuration,
                                          LocalDate today) {
         if (items == null || items.isEmpty()) {
-            return "近期没有包场安排，随时可以来。";
+            return "近期暂无包场安排。";
         }
 
         StringBuilder text = new StringBuilder("近期包场安排：\n");
@@ -223,18 +237,18 @@ public final class QqReplyText {
         if (stats != null) {
             text.append("\n累计在店 ").append(duration((int) stats.getTotalMinutes()));
             if (stats.getMonthMinutes() > 0) {
-                text.append(" · 本月 ").append(duration((int) stats.getMonthMinutes()));
+                text.append("（本月 ").append(duration((int) stats.getMonthMinutes())).append('）');
             }
         }
 
         // 只报「待支付」：进行中的那一单归下一条说，两处都报就成了同一个数字说两遍
         if (pending != null && OrderStatus.PENDING_PAYMENT.name().equals(pending.getStatus())) {
-            text.append("\n有一笔还没付款：");
+            text.append("\n有一笔未付款订单：");
             if (amountVisible && pending.getPayableAmount() != null) {
                 text.append(yuan(pending.getPayableAmount())).append('，');
             }
             text.append("单号 ").append(pending.getOrderNo());
-            text.append("\n（要重新拿到付款入口，发一次 /结账）");
+            text.append("\n（重新获取付款入口请发送 fw结账）");
         }
 
         if (current != null) {
@@ -242,7 +256,7 @@ public final class QqReplyText {
             if (amountVisible && current.getBill() != null) {
                 text.append("，预计 ").append(yuan(current.getBill().getTotalAmount()));
             }
-            text.append("\n（看更多的发 /当前订单）");
+            text.append("\n（查看分段明细请发送 fw当前订单）");
         }
 
         if (preference != null && !preference.isBlank()) {
@@ -257,11 +271,11 @@ public final class QqReplyText {
      *
      * <p>⚠️ <b>只是看一眼，不停表</b>：数据源与网页端「结账」按钮点进去那一屏同源
      * （{@code OrderPreviewVo}，纯查询、零副作用）。所以末尾必须明说
-     * 「计时照走」并指去 {@code /结账} —— 不写的话，用户会以为发一条指令就把账结了，
+     * 「计时照走」并指去 {@code fw结账} —— 不写的话，用户会以为发一条指令就把账结了，
      * 然后接着玩、然后被账单吓一跳。
      *
      * <p>跳档预告（{@link OrderPreviewVo#getNextChangeText()}）里的金额<b>不受
-     * 金额开关约束</b>：那是价目表上的档位价，群里任何人发 {@code /价格} 都查得到，
+     * 金额开关约束</b>：那是价目表上的档位价，群里任何人发 {@code fw价格} 都查得到，
      * 不是这位顾客自己的消费额。
      *
      * @param preview       结账预览（含分段账单与跳档预告）
@@ -275,7 +289,7 @@ public final class QqReplyText {
 
         if (preview.isWillAutoSettle()) {
             // 0 元单不要引导去付款：压根没有可付的通道
-            text.append("\n现在结账无需支付，会直接结清。");
+            text.append("\n本次结账无需支付，将直接结清。");
         } else if (amountVisible && preview.getBill() != null) {
             text.append("\n当前应付 ").append(yuan(preview.getBill().getTotalAmount()));
             if (preview.isCappedNow()) {
@@ -295,7 +309,7 @@ public final class QqReplyText {
             text.append(preview.getNextChangeText());
         }
 
-        text.append("\n（只是看一眼，计时照走。要结账发 /结账）");
+        text.append("\n（仅为预览，计时照常进行。结账请发送 fw结账）");
         return text.toString();
     }
 
@@ -303,7 +317,7 @@ public final class QqReplyText {
      * 没有在计时的单时的回复，附带待付款那一笔。
      *
      * <p>⚠️ <b>刻意不带「付款截图可以发群里」那句</b>：那是 {@link #settleAlreadyStopped}
-     * 的待遇 —— 发过 {@code /结账} 才会撑起「等一张图」那道闸（见 {@code QqPaymentProofService}）。
+     * 的待遇 —— 发过 {@code fw结账} 才会撑起「等一张图」那道闸（见 {@code QqPaymentProofService}）。
      * 只看一眼当前订单并不会撑闸，说了那句话只会让用户发一张石沉大海的图。
      *
      * @param orderNo       待付款的订单号
@@ -314,13 +328,49 @@ public final class QqReplyText {
      */
     public static String noActiveOrder(String orderNo, BigDecimal amount,
                                        boolean amountVisible, String ordersUrl) {
-        StringBuilder text = new StringBuilder("你现在没有在计时的订单。");
-        text.append("\n有一笔还没付款：");
+        StringBuilder text = new StringBuilder("你当前没有正在计时的订单。");
+        text.append("\n有一笔未付款订单：");
         if (amountVisible && amount != null) {
             text.append(yuan(amount)).append('，');
         }
         text.append("单号 ").append(orderNo);
-        text.append("\n去支付：").append(ordersUrl);
+        text.append("\n付款入口：").append(ordersUrl);
+        return text.toString();
+    }
+
+    /**
+     * 「fw未付款」的清单。
+     *
+     * <p>四类单已由调用方换算成统一的 {@link UnpaidBill}，这里只排版 ——
+     * 于是本方法可以脱离 Spring 单测（与其余文案方法一致）。
+     *
+     * <p><b>金额按开关显示</b>（{@code uspace.qqbot.self-amount-visible}）：
+     * 群消息全群可见，欠费金额与消费金额同级 —— 关掉时不报数，
+     * 但单号照给（下一步动作要靠它）。
+     *
+     * @param bills         清单，按调用方给的顺序展示（计时 → 包场 → 月卡 → 商品）
+     * @param amountVisible 金额是否显示
+     * @param webUrl        网页端地址（付款入口）
+     * @return 多行文本
+     */
+    public static String unpaidBills(List<UnpaidBill> bills, boolean amountVisible, String webUrl) {
+        if (bills.isEmpty()) {
+            return "你没有未付款的单子。";
+        }
+        StringBuilder text = new StringBuilder("你有 ").append(bills.size()).append(" 笔未付款的单子：\n");
+        for (UnpaidBill bill : bills) {
+            text.append("· [").append(bill.typeLabel()).append("] ").append(bill.orderNo());
+            if (amountVisible && bill.amount() != null) {
+                text.append(" · ").append(yuan(bill.amount()));
+            }
+            text.append(" · ").append(bill.statusText()).append('\n');
+        }
+        text.append("付款请前往网页端：").append(webUrl);
+        // 计时订单不可取消（欠费不能自消），所以可取消提示只在真的存在
+        // 可取消单子时出现 —— 全部都是计时订单时给这条提示就是句空话
+        if (bills.stream().anyMatch(UnpaidBill::cancelable)) {
+            text.append("\n不需要的单子可发送 fw取消 <单号> 取消。");
+        }
         return text.toString();
     }
 
@@ -362,18 +412,18 @@ public final class QqReplyText {
                 .append(rules.getDayStart())
                 .append("：").append(plain(rules.getNightPricePerHour())).append(" 元/小时，封顶 ")
                 .append(plain(rules.getNightCap())).append(" 元\n");
-        text.append("前 ").append(rules.getGraceMinutes()).append(" 分钟免费，之后每 ")
+        text.append("首 ").append(rules.getGraceMinutes()).append(" 分钟免费，此后每 ")
                 .append(rules.getUnitMinutes()).append(" 分钟一档。");
 
         if (rules.isDiscountEnabled()) {
-            text.append("\n当月累计消费满 ").append(yuan(rules.getDiscountThreshold()))
-                    .append(" 后，本月的后续订单按优惠价：日场 ")
+            text.append("\n当月消费满 ").append(yuan(rules.getDiscountThreshold()))
+                    .append(" 后，本月后续订单按优惠价：日场 ")
                     .append(plain(rules.getDiscountDayPricePerHour())).append(" 元/小时、夜场 ")
                     .append(plain(rules.getDiscountNightPricePerHour())).append(" 元/小时。");
         }
         // 月卡是另一种买法（包月），不在这张表里 —— 给一句指路，
         // 否则在群里问「月卡多少钱」的人得不到任何线索
-        text.append("\n月卡另算（全天 / 夜间两种），发 /月卡 看说明。");
+        text.append("\n月卡另行计费（含全天、夜间两种），可发送 fw月卡 查看说明。");
         return text.toString();
     }
 
@@ -389,15 +439,18 @@ public final class QqReplyText {
      * 报实际库存的话会出现「群里说还剩 3 件、下单却说售罄」—— 那 3 件被未支付的
      * 单子占着，而这种不一致是纯展示口径造成的，本可以避免。
      *
-     * @param products 上架商品，已按后台排的序号排好
-     * @param mallUrl  网页端商城地址（群里的菜单只报价格与库存，下单还是回网页）
+     * @param products     上架商品，已按后台排的序号排好
+     * @param mallUrl      网页端商城地址
+     * @param writeEnabled 写指令此刻可不可用（决定要不要提「群里下单」那两种写法）。
+     *                     ⚠️ 与 {@link #help} 同一条纪律：提示了一条发不动的指令，
+     *                     用户只会以为机器人坏了 —— 所以写指令关掉时只留网页端那条路
      * @return 多行文本；没有商品时回一句人话
      */
-    public static String menu(List<ProductVo> products, String mallUrl) {
+    public static String menu(List<ProductVo> products, String mallUrl, boolean writeEnabled) {
         if (products == null || products.isEmpty()) {
-            return "店里暂时没有上架的商品。";
+            return "当前暂无在售商品。";
         }
-        StringBuilder text = new StringBuilder("店里卖这些（共 ")
+        StringBuilder text = new StringBuilder("在售商品（共 ")
                 .append(products.size()).append(" 种）：\n");
         for (ProductVo product : products) {
             text.append(product.getName())
@@ -405,7 +458,12 @@ public final class QqReplyText {
                     .append(" -- ").append(stockLabel(product))
                     .append('\n');
         }
-        text.append("要买的话到网页端商城下单：").append(mallUrl);
+        // 两种写法各占一行、并与上面的商品列表隔一个空行（2026-10-09 由用户要求）——
+        // 挤在商品行末尾的话，那两种语法要读到一半才发现是「怎么下单」
+        text.append(writeEnabled
+                        ? "\n下单请发送 fw买个xx 或 fwxx-数量\n或前往网页端商城："
+                        : "\n下单请前往网页端商城：")
+                .append(mallUrl);
         return text.toString();
     }
 
@@ -442,7 +500,7 @@ public final class QqReplyText {
      */
     public static String cardTypes(List<CardTypeVo> types, String purchaseUrl) {
         if (types == null || types.isEmpty()) {
-            return "月卡暂时没有开放售卖，问一下店主吧。";
+            return "月卡暂未开放售卖，请联系门店管理员。";
         }
         StringBuilder text = new StringBuilder("月卡（有效期 ")
                 .append(types.get(0).getValidDays()).append(" 天）：\n");
@@ -452,25 +510,46 @@ public final class QqReplyText {
                     .append(" -- ").append(type.getPeriodText())
                     .append('\n');
         }
-        text.append("有效期内卡覆盖的时段不计费；到网页端买：").append(purchaseUrl);
+        text.append("有效期内所覆盖时段不计费。购买请前往：").append(purchaseUrl);
         return text.toString();
     }
 
     /**
      * 网页端地址。
      *
+     * <p>⚠️ <b>拆成两条消息发</b>（2026-10-09 由用户要求）：一条讲解用途、一条<b>只放网址</b>。
+     * 网址单独占一条才好复制 —— 混在句子里长按选中，多半会把「网页端：」这类前缀
+     * 一起带进去，粘到浏览器里就打不开了。
+     *
      * <p>地址原样来自配置（{@code uspace.web.base-url}），这里不加工 ——
      * 加工过一次的话，群里看到的地址与配置里那一项就对不上了，
      * 排查时反而多一层要怀疑的东西。
      *
-     * @param url 完整地址；没配置时给一句提示而不是留空白
-     * @return 回复文本
+     * @param url 完整地址；没配置时只回一条提示
+     * @return 要依次发出的消息（正常两条、没配置时一条）
      */
-    public static String web(String url) {
+    public static List<String> web(String url) {
         if (url == null || url.isBlank()) {
-            return "网页端地址还没配置，问一下店主吧。";
+            return List.of("网页端地址尚未配置，请联系门店管理员。");
         }
-        return "网页端：" + url + "\n下单、查看账单、买月卡都在这里。";
+        return List.of("网页端可以下单、查看账单、购买月卡。", url);
+    }
+
+    /**
+     * 与 NapCat 的连接建立时的群提示。
+     *
+     * <p><b>它补的是「重连没有动静」这半边</b>：断开在后端有日志、在 NapCat
+     * 界面上也有显示，而重连成功此前两边都悄无声息 —— 运营者只能发一条
+     * {@code fwping} 去猜。这条让群里直接看到「机器人回来了」。
+     *
+     * <p>措辞刻意不带「重连」：对群里的人来说，机器人只有「能用」与
+     * 「不能用」两种状态，内部重连了几次与他们无关；这句话出现在断线之后，
+     * 本身就已经说明了是重连。
+     *
+     * @return 提示文本
+     */
+    public static String botConnected() {
+        return "🤖 机器人已连接，指令可正常使用。发送 fw帮助 查看可用指令。";
     }
 
     /**
@@ -502,8 +581,8 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String proofRejected(String reason, String ordersUrl) {
-        return " 你的付款凭证没有通过复核：" + reason
-                + "。请重新上传一张付款截图（已经付过款的话，不要重复支付） → " + ordersUrl;
+        return " 你的付款凭证未通过复核：" + reason
+                + "。请重新上传一张付款截图（如已完成付款，请勿重复支付） → " + ordersUrl;
     }
 
     /**
@@ -514,7 +593,7 @@ public final class QqReplyText {
      * 而「这场收了多少钱」属于经营信息（含金额的版本只进店主群，见
      * {@code QqbotProperties#isAmountVisible}），这条播报没有分两个版本的理由。
      *
-     * <p>日期与时刻的写法与 {@code /包场} 指令<b>逐字一致</b>（含「跨零点时
+     * <p>日期与时刻的写法与 {@code fw包场} 指令<b>逐字一致</b>（含「跨零点时
      * 只报到时刻为止」这一处）—— 两处各写一份的话，同一场包场在群里会有
      * 两种说法。要改格式就两处一起改。
      *
@@ -525,7 +604,7 @@ public final class QqReplyText {
      */
     public static String bookingActivated(LocalDateTime startAt, LocalDateTime endAt,
                                           LocalDate today) {
-        return "📅 已安排包场：" + dayLabel(startAt.toLocalDate(), today)
+        return "📅 包场已安排：" + dayLabel(startAt.toLocalDate(), today)
                 + " " + TIME.format(startAt) + " – " + TIME.format(endAt)
                 + "，该时段仅限包场人与被邀请者入场。";
     }
@@ -536,7 +615,7 @@ public final class QqReplyText {
      *
      * <p><b>不含金额</b> —— 这条对所有群发同一份文本
      * （与到店、包场播报同一条披露边界）。「还剩」报的是<b>可售量</b>，
-     * 与商城页、{@code /菜单} 同一口径；为 0 时照 {@code /菜单} 的规矩
+     * 与商城页、{@code fw菜单} 同一口径；为 0 时照 {@code fw菜单} 的规矩
      * 老实显示「还剩 0 件」，不另起「售罄」的说法 —— 两处口径不同的话，
      * 群里说售罄、商城里却还买得到，谁都不知道该信哪个。
      *
@@ -556,7 +635,7 @@ public final class QqReplyText {
                 .append(productName)
                 .append(" ×").append(quantity == null ? 1 : quantity);
         if (availableStock != null) {
-            text.append("，还剩 ").append(availableStock).append(" 件");
+            text.append("，当前剩余 ").append(availableStock).append(" 件");
         }
         return text.toString();
     }
@@ -610,7 +689,7 @@ public final class QqReplyText {
     /**
      * 包场撤销的播报。
      *
-     * <p>与 {@code /包场} 指令和「已安排包场」{@link #rangeText 同一套时段写法} ——
+     * <p>与 {@code fw包场} 指令和「已安排包场」{@link #rangeText 同一套时段写法} ——
      * 撤销的这一条要能与几天前那条生效消息对得上，
      * 否则群里读不出这两条说的是同一场包场。
      *
@@ -627,7 +706,7 @@ public final class QqReplyText {
     /**
      * 把一段起止时刻写成「今天 14:00 – 18:00」。
      *
-     * <p>与 {@link #bookingActivated} 和 {@code /包场} 指令<b>逐字同一套写法</b>
+     * <p>与 {@link #bookingActivated} 和 {@code fw包场} 指令<b>逐字同一套写法</b>
      * （含「跨零点时只报到时刻为止」这一处）—— 几处各写一份的话，
      * 同一段时间在群里会有好几种说法。
      *
@@ -689,6 +768,32 @@ public final class QqReplyText {
     }
 
     /**
+     * 有一笔付款凭证进了人工复核队列（2026-10-10 加，只推店主群）。
+     *
+     * <p><b>为什么需要这条</b>：小额收款识别到交易单号就自动结清了，
+     * 而没识别到单号的、以及月卡包场这类大额收款要等人看 ——
+     * 人工复核最大的风险不是看错，是<b>没人记得看</b>。这条播报把
+     * 「记得去后台」交给群消息。
+     *
+     * <p>带上金额与原因：这条只进店主群（金额可见性由
+     * {@code QqbotProperties#isAmountVisible} 判定），而管理员要判断的
+     * 正是「多少钱、为什么值得看一眼」。
+     *
+     * @param targetType 收款类型名（如 {@code ORDER}），这里翻成中文
+     * @param orderNo    对外单号
+     * @param amount     应付金额（元）
+     * @param reason     为什么进人工复核，一句短语
+     * @param adminUrl   运营后台「收款管理」页地址
+     * @return 播报文本
+     */
+    public static String proofPending(String targetType, String orderNo,
+                                      BigDecimal amount, String reason, String adminUrl) {
+        return "🧾 有一笔付款凭证待复核：" + PaymentTargetType.labelOf(targetType)
+                + " " + orderNo + "，金额 " + yuan(amount) + "（" + reason + "）。"
+                + "请前往运营后台处理：" + adminUrl;
+    }
+
+    /**
      * 指令列表（按「你想干什么」分组）。
      *
      * <p>顺带写明前缀要求 —— 这是「必须带前缀」那条规矩唯一的说明处，
@@ -701,36 +806,56 @@ public final class QqReplyText {
      *
      * @param writeEnabled 写指令是否启用（关掉时那一组整段不列出来，
      *                     否则用户发了没反应，而原因无处可查）
+     * @param admin        发送者是不是管理员 —— <b>调整库存那条只对管理员列</b>：
+     *                     它对别人本来就发不动（执行时会拒绝），列出来只会让人问
+     *                     「为什么我不能用」。为此多查一次 {@code sys_user} 是划算的，
+     *                     {@code fw帮助} 本来就是低频指令
+     * @param webUrl       网页端地址，放在最底下（2026-10-09 由用户要求）——
+     *                     它是这条长消息里最常被回头找的一样东西；
+     *                     没配置时这一行不出现
      * @return 多行文本
      */
-    public static String help(boolean writeEnabled) {
-        StringBuilder text = new StringBuilder("可用指令（前面加 / 或 fw，例如 /在店）：\n");
+    public static String help(boolean writeEnabled, boolean admin, String webUrl) {
+        // ⚠️ 前缀只写 fw（2026-10-09 起 `/` 已不是前缀，发 `/在店` 会当闲聊静默）——
+        // 这里曾写着「前缀 / 或 fw」，是那次改动漏掉的一处，别改回去
+        StringBuilder text = new StringBuilder("可用指令（前缀 fw，例如 fw在店）：\n");
 
         text.append("\n【看店里】\n");
-        text.append("/在店 或 /看看里面 —— 店里现在有谁\n");
-        text.append("/营业 —— 门店现在开着吗\n");
-        text.append("/包场 —— 近期的包场安排\n");
-        text.append("/菜单 —— 店里卖什么、还剩多少\n");
-        text.append("/价格 —— 按时长怎么计费\n");
-        text.append("/月卡 或 /pass —— 月卡有哪几种、多少钱\n");
+        text.append("fw在店 或 fw看看里面，也可直接发 kklm —— 查看当前在店人员\n");
+        text.append("fw营业 或 fwstatus —— 查看门店营业状态\n");
+        text.append("fw包场 或 fwbooking —— 查看近期包场安排\n");
+        text.append("fw菜单 或 fwmenu —— 查看在售商品与库存\n");
+        text.append("fw价格 或 fwprice —— 查看计费规则\n");
+        text.append("fw月卡 或 fwpass —— 查看月卡种类与价格\n");
 
         text.append("\n【我自己的】\n");
-        text.append("/看看自己 —— 我的月卡、消费与时长\n");
-        text.append("/当前订单 或 /now —— 正在计时的这一单多少钱（只看，不停表）\n");
+        text.append("fw看看自己 或 fwme —— 查看本人的月卡、消费与在店时长\n");
+        text.append("fw当前订单 或 fwnow —— 查看当前订单金额（仅预览，不停表）\n");
+        text.append("fw未付款 或 fwunpaid —— 查看本人未付款的单子\n");
 
         if (writeEnabled) {
             text.append("\n【常用】\n");
-            text.append("/开门 —— 开始计时，并拿到门锁密码\n");
-            text.append("/结账 —— 停止计时并去付款\n");
-            text.append("/买个可乐 或 /买2个可乐 或 /可乐-2 —— 下单买商品\n");
+            text.append("fw开门 或 fwopen —— 开始计时并获取门锁密码\n");
+            text.append("fw结账 或 fwsettle —— 停止计时并前往付款\n");
+            text.append("fw买个可乐 或 fw可乐-2 —— 下单购买商品\n");
+            text.append("fw取消 <单号> —— 取消未付款的商品单、月卡购买单或包场\n");
+        }
+        if (writeEnabled && admin) {
+            text.append("\n【管理】\n");
+            text.append("fw可乐5 —— 把该商品的库存调整为 5（仅管理员）\n");
+            text.append("fw拍拍机 1 号维护中 —— 把该机台状况改为维护中"
+                    + "（仅管理员，也可写「待维护」「良好」）\n");
         }
 
         text.append("\n【其他】\n");
-        text.append("/web 或 /网址 —— 网页端地址（手机下单、看账单都在这儿）\n");
-        text.append("/ping —— 看看机器人在不在\n");
-        text.append("/帮助 —— 显示这条消息\n");
+        text.append("fwweb 或 fw网址 —— 查看网页端地址（下单、查账单）\n");
+        text.append("fwping 或 fw在吗 —— 检测机器人是否在线\n");
+        text.append("fw帮助 或 fwhelp —— 显示本消息\n");
 
-        text.append("\n注册时网页会给你一条「/验证 」开头的指令，复制发到群里就能把 QQ 号绑到账号上。");
+        text.append("\n注册时网页会提供一条以「fw验证 」开头的指令，复制发送到群里即可完成 QQ 号绑定。");
+        if (webUrl != null && !webUrl.isBlank()) {
+            text.append("\n\n网页端：").append(webUrl);
+        }
         return text.toString();
     }
 
@@ -746,22 +871,50 @@ public final class QqReplyText {
      * 但<b>已有进行中订单时不会有播报</b>，那时要把状态补上，
      * 否则用户只看到一串密码，不知道自己在计时中。
      *
-     * @param passcode     一次性门锁密码
-     * @param newlyCreated 这次是不是才建的订单（决定要不要自报状态）
-     * @param stayMinutes  已在店时长（分钟）；刚刚建单时为 0
-     * @param ordersUrl    网页端订单页地址，作为私聊失败时的兜底
+     * @param passcode            一次性门锁密码
+     * @param newlyCreated        这次是不是才建的订单（决定要不要自报状态）
+     * @param stayMinutes         已在店时长（分钟）；刚刚建单时为 0
+     * @param privatePasscodeSent 固定密码有没有私聊给他（{@code uspace.qqbot.private-passcode-enabled}）——
+     *                            ⚠️ 关着的时候<b>绝不能</b>还写「已私聊发你」，
+     *                            那会让人去翻一个永远空的私聊窗口
+     * @param homeUrl             网页端<b>首页</b>地址，固定密码的兜底指路 ——
+     *                            ⚠️ 指首页而不是订单详情页（2026-10-09 由用户指出）：
+     *                            人在店里时首页就显示着当前这一单与「查看密码」入口，
+     *                            指订单详情要多绕一层
      * @return 回复文本
      */
     public static String openPasscode(String passcode, boolean newlyCreated,
-                                      Integer stayMinutes, String ordersUrl) {
+                                      Integer stayMinutes, boolean privatePasscodeSent,
+                                      String homeUrl) {
         StringBuilder text = new StringBuilder();
         if (!newlyCreated && stayMinutes != null) {
             text.append("你已在计时中（").append(duration(stayMinutes)).append("）。\n");
         }
         text.append("门锁密码：").append(passcode).append("\n");
-        text.append("用一次即作废，请勿转发。")
-                .append("固定密码已私聊发你，没收到就去网页端看：").append(ordersUrl);
+        text.append("该密码仅可使用一次，请勿转发。");
+        text.append(privatePasscodeSent
+                ? "固定密码已通过私聊发送，如未收到请前往网页端查看："
+                : "如需可重复使用的密码，请前往网页端查看：");
+        text.append(homeUrl);
         return text.toString();
+    }
+
+    /**
+     * 订单建好了、但一次性密码没取到时的回话。
+     *
+     * <p>⚠️ <b>这一条不能省</b>：人已经被计费了（订单已建），群里静悄悄的话
+     * 他只会站在门口等一串永远不来的密码。见 {@code QqWriteCommandService#openDoor}。
+     *
+     * @param reason              失败原因（取自 {@code BizResult.resolveMessage()}）
+     * @param privatePasscodeSent 固定密码有没有私聊给他（决定兜底指路怎么写）
+     * @param homeUrl             网页端<b>首页</b>地址（同 {@link #openPasscode}，指首页而非订单详情页）
+     * @return 回复文本
+     */
+    public static String openPasscodeFailed(String reason, boolean privatePasscodeSent,
+                                            String homeUrl) {
+        return "已开始计时，但门锁密码获取失败：" + reason
+                + (privatePasscodeSent ? "\n固定密码已通过私聊发送，也可前往网页端查看：" : "\n请前往网页端查看密码：")
+                + homeUrl;
     }
 
     /**
@@ -777,16 +930,16 @@ public final class QqReplyText {
      */
     public static String openFailure(ErrorCode error, String message, String ordersUrl) {
         if (error == null) {
-            return "开门失败" + (message == null ? "，请稍后再试。" : "：" + message);
+            return "开门失败" + (message == null ? "，请稍后重试。" : "：" + message);
         }
         return switch (error) {
-            case STORE_CLOSED -> "现在店里暂停营业，暂时开不了门。";
-            case BOOKING_ACCESS_DENIED -> "这个时段被包场了，只有包场人和受邀者能进。";
-            case BOOKING_PREPARING -> "这个时段马上有包场，暂时进不去了。";
-            case ORDER_UNPAID_EXISTS -> "你有一笔还没付款的订单，先付掉再来开门：" + ordersUrl;
-            case LOCK_NOT_CONFIGURED, STORE_NOT_FOUND -> "门店还没配置好，请联系管理员。";
-            case LOCK_CLOUD_UNAVAILABLE -> "门锁云暂时不可用，过一会儿再发一次 /开门。";
-            default -> "开门失败：" + (message == null ? "请稍后再试。" : message);
+            case STORE_CLOSED -> "门店当前暂停营业，暂时无法开门。";
+            case BOOKING_ACCESS_DENIED -> "该时段已被包场，仅限包场人与被邀请者入场。";
+            case BOOKING_PREPARING -> "该时段即将开始包场，暂时无法入场。";
+            case ORDER_UNPAID_EXISTS -> "你有一笔未付款订单，请先完成付款后再开门：" + ordersUrl;
+            case LOCK_NOT_CONFIGURED, STORE_NOT_FOUND -> "门店尚未配置完成，请联系管理员。";
+            case LOCK_CLOUD_UNAVAILABLE -> "门锁云服务暂不可用，请稍后重新发送 fw开门。";
+            default -> "开门失败：" + (message == null ? "请稍后重试。" : message);
         };
     }
 
@@ -803,21 +956,21 @@ public final class QqReplyText {
      */
     public static String settleDone(BigDecimal amount, boolean amountVisible, String settleUrl) {
         if (amount == null || amount.signum() == 0) {
-            return "已停止计时，本次无需支付，已结清。";
+            return "已停止计时，本次无需支付，账目已结清。";
         }
         if (!amountVisible) {
             // 金额被关掉时（uspace.qqbot.self-amount-visible=false）不报数 ——
             // 打开结算页自然看得到，而这里报了就是全群可见
-            return "已停止计时，去支付：" + settleUrl + PAY_BY_GROUP_HINT;
+            return "已停止计时，请前往支付：" + settleUrl + PAY_BY_GROUP_HINT;
         }
-        return "已停止计时，本次应付 " + yuan(amount) + "。\n去支付：" + settleUrl + PAY_BY_GROUP_HINT;
+        return "已停止计时，本次应付 " + yuan(amount) + "。\n请前往支付：" + settleUrl + PAY_BY_GROUP_HINT;
     }
 
     /**
-     * 再发一次 {@code /结账} 时，账其实已经停过表了的回复。
+     * 再发一次 {@code fw结账} 时，账其实已经停过表了的回复。
      *
      * <p>⚠️ <b>这条回复是一条回头路，不是客套</b>：群内传截图有 5 分钟时限，
-     * 超时那句提示写着「重新发一次 /结账」—— 而那时订单早已不是 {@code IN_USE}
+     * 超时那句提示写着「重新发一次 fw结账」—— 而那时订单早已不是 {@code IN_USE}
      * 了，按原来那条分支走只会得到「你没有在计时的订单」，等图的闸再也撑不起来，
      * 用户发多少张图都不会有反应。所以这一条必须<b>把待付金额与入口重新给一遍</b>。
      *
@@ -829,12 +982,72 @@ public final class QqReplyText {
      */
     public static String settleAlreadyStopped(String orderNo, BigDecimal amount,
                                               boolean amountVisible, String orderUrl) {
-        StringBuilder text = new StringBuilder("这笔账已经停过表了，还没有付款。");
+        StringBuilder text = new StringBuilder("该订单已停止计时，尚未付款。");
         if (amountVisible && amount != null) {
             text.append("\n应付 ").append(yuan(amount));
         }
-        text.append("\n订单 ").append(orderNo).append(" · 去支付：").append(orderUrl);
+        text.append("\n订单 ").append(orderNo).append(" · 付款入口：").append(orderUrl);
         return text.append(PAY_BY_GROUP_HINT).toString();
+    }
+
+    /**
+     * 取消未付款单成功的回复。
+     *
+     * <p>三类单共用本方法，差别只在「取消之后释放了什么」那一句 ——
+     * 由调用方以 {@code hint} 传入（库存 / 卡种 / 时段）。不在这里按类型分叉：
+     * 分叉要认识三个模块的枚举，而文案层只需认识
+     * {@link UnpaidBill} 那一层抽象。
+     *
+     * @param typeLabel 类型中文名（商品 / 月卡 / 包场）
+     * @param orderNo   单号
+     * @param hint      取消后释放了什么的说明（如「占用的库存已释放」）
+     * @return 回复文本
+     */
+    public static String cancelDone(String typeLabel, String orderNo, String hint) {
+        return "已取消未付款的" + typeLabel + " " + orderNo + "，" + hint + "。";
+    }
+
+    /**
+     * 取消失败时的回复，按错误码分派。
+     *
+     * <p><b>两档分开说，因为用户的下一步动作不同</b>：「找不到」多半是
+     * 单号抄错或不是自己的单子，该去核对（顺手指路 {@code fw未付款} 查单号）；
+     * 「状态不对」说明单子已付款或已被处理，该去网页端看究竟。
+     *
+     * <p>六个错误码归成两档而不是逐码定制：三个模块的 {@code *_NOT_FOUND}
+     * 口径一致（都不区分「不存在」与「不是你的」，防枚举单号），
+     * 状态类同理。分得更细的话，文案与错误码表就成了两份要同步维护的清单。
+     *
+     * @param error   失败错误码
+     * @param message 服务端给的原因，可为 null
+     * @return 回复文本
+     */
+    public static String cancelFailed(ErrorCode error, String message) {
+        return switch (error) {
+            case PRODUCT_ORDER_NOT_FOUND, CARD_NOT_FOUND, BOOKING_NOT_FOUND ->
+                    "没找到这个单号，或它不是你的单子。可发送 fw未付款 查看自己的未付款单。";
+            case PRODUCT_STATUS_INVALID, CARD_STATUS_INVALID, BOOKING_NOT_EDITABLE ->
+                    "这笔单当前的状态不支持取消"
+                            + (message == null ? "（可能已付款或已被处理）" : "（" + message + "）")
+                            + "。详情请前往网页端查看。";
+            default -> "取消失败：" + (message == null ? "请稍后重试。" : message);
+        };
+    }
+
+    /**
+     * 取消计时订单被拒的回复。
+     *
+     * <p><b>这不是「暂不支持」，而是设计边界</b>：欠费不能靠一句指令自消。
+     * 所以文案必须说清去处 —— 正在计时的发 {@code fw结账}，
+     * 已出账的去网页端付款（凭证被驳回的在那儿重新上传）。
+     *
+     * @param ordersUrl 网页端订单页地址
+     * @return 回复文本
+     */
+    public static String cancelOrderRefused(String ordersUrl) {
+        return "计时订单不支持在群里取消。\n"
+                + "正在计时的请发送 fw结账 停止计时；已出账的请前往网页端付款"
+                + "（凭证未通过时请重新上传付款截图）：" + ordersUrl;
     }
 
     /**
@@ -853,15 +1066,15 @@ public final class QqReplyText {
      * 商品名没匹配上，而用户<b>写明了数量</b>。
      *
      * <p>这种情况下他确实在报一个商品名（不写数量的那种走 {@link #unknownCommand()}），
-     * 所以直接告诉他名字不对，并指去 {@code /菜单} —— 那里的名字可以直接复制，
+     * 所以直接告诉他名字不对，并指去 {@code fw菜单} —— 那里的名字可以直接复制，
      * 而名字对不上多半是因为商品名里那个空格或全角括号（如「王老吉 250ml（绿）」）。
      *
      * @param name 他打出来的那个名字（原样回显，让他一眼看出差在哪）
      * @return 提示文本
      */
     public static String productNotFound(String name) {
-        return "没有叫「" + name + "」的商品。发 /菜单 看看店里卖什么，"
-                + "名字要一模一样（含空格与括号）。";
+        return "未找到名为「" + name + "」的商品。可发送 fw菜单 查看在售商品，"
+                + "名称须完全一致（含空格与括号）。";
     }
 
     /**
@@ -880,17 +1093,17 @@ public final class QqReplyText {
      */
     public static String productOrdered(ProductOrderVo order, boolean amountVisible,
                                         String ordersUrl) {
-        StringBuilder text = new StringBuilder("已下单：")
+        StringBuilder text = new StringBuilder("下单成功：")
                 .append(order.getProductName()).append(" ×").append(order.getQuantity());
         if (amountVisible) {
-            // 与 /结账 同一口径：金额受 self-amount-visible 控制（回复是群消息、全群可见），
+            // 与 fw结账 同一口径：金额受 self-amount-visible 控制（回复是群消息、全群可见），
             // 关掉时不报数 —— 付款页上本来就看得到
             text.append("，共 ").append(yuan(order.getAmount()));
         }
         text.append("\n单号 ").append(order.getOrderNo())
                 .append("\n付款入口：").append(ordersUrl);
         text.append(PAY_BY_GROUP_HINT);
-        text.append("\n付完到店自取即可。");
+        text.append("\n付款后请自行取货。");
         return text.toString();
     }
 
@@ -907,39 +1120,175 @@ public final class QqReplyText {
      */
     public static String productOrderFailure(ErrorCode error, String message, String menuUrl) {
         if (error == null) {
-            return "下单失败" + (message == null ? "，请稍后再试。" : "：" + message);
+            return "下单失败" + (message == null ? "，请稍后重试。" : "：" + message);
         }
         return switch (error) {
-            case PRODUCT_SOLD_OUT -> "这件商品卖光了" + (message == null ? "" : "（" + message + "）")
-                    + "。发 /菜单 看看别的吧：" + menuUrl;
-            case PRODUCT_STATUS_INVALID -> "这件商品现在不卖了。发 /菜单 看看别的吧：" + menuUrl;
-            case PARAM_INVALID -> message == null ? "这个数量不合适，改一下再发。" : message + "。";
-            default -> "下单失败：" + (message == null ? "请稍后再试。" : message);
+            case PRODUCT_SOLD_OUT -> "该商品已售罄" + (message == null ? "" : "（" + message + "）")
+                    + "。可发送 fw菜单 查看其他商品：" + menuUrl;
+            case PRODUCT_STATUS_INVALID -> "该商品已下架。可发送 fw菜单 查看其他商品：" + menuUrl;
+            case PARAM_INVALID -> message == null ? "数量不合适，请修改后重新发送。" : message + "。";
+            // 下面两条的主语是「名下那笔旧单」而不是「这次要买的东西」——
+            // 用默认那条「下单失败：…」的话，用户会以为这次买的东西有问题，
+            // 换个商品接着试，然后又撞同一堵墙
+            case PRODUCT_UNPAID_EXISTS -> message == null
+                    ? "你有一笔未付款的商品单，请先完成支付或取消该单，再下单。"
+                    : message + "。取消可在网页端「商品订单」页操作。";
+            case PRODUCT_PROOF_REJECTED ->
+                    "你的商品单付款凭证未通过复核，请先在网页端重新上传一张付款截图，再下单。";
+            default -> "下单失败：" + (message == null ? "请稍后重试。" : message);
         };
     }
 
     /**
-     * 群内付款截图已受理。
+     * 库存调整成功的回复（{@code fw可乐5}）。
      *
-     * <p>识别到的金额与单号原样报出来 —— 它们是<b>辅助线索</b>，用户看一眼就知道
-     * 系统读对没有；读错了也不影响提交（复核永远是人做的）。
+     * <p>⚠️ <b>必须报出「原库存 → 新库存」</b>：这条指令是把库存<b>设成</b>给定值，
+     * 一个字的差错就是把库存改成另一个数（想补货到 20、手一快发成了 fw可乐2）。
+     * 不报原值的话，改错了只有下次清点时才会发现 —— 而那时早卖乱了。
+     *
+     * @param name      商品名（原样回显，让他一眼看出名字切得对不对）
+     * @param before    调整前的库存
+     * @param after     调整后的库存
+     * @param available 当前可售量（= 库存 − 未付款的待支付单占用），由商品模块算好
+     * @return 回复文本
+     */
+    public static String stockAdjusted(String name, int before, int after, int available) {
+        StringBuilder text = new StringBuilder("已调整「").append(name).append("」库存：")
+                .append(before).append(" 件 → ").append(after).append(" 件");
+        if (available != after) {
+            // 只在两者不同时补一句。不同就意味着有未付款的订单占着货 ——
+            // 不说的话，管理员会奇怪「明明改成 5 了，顾客怎么还说买不了」
+            text.append("，当前可售 ").append(available).append(" 件");
+        }
+        return text.append("。").toString();
+    }
+
+    /**
+     * 非管理员发了库存指令时的回复。
+     *
+     * <p>⚠️ <b>必须带购买引导</b>：{@code fw可乐5} 与「买 2 件可乐」的写法
+     * （{@code fw可乐-2}）只差一个横杠，发这条的多半是想买可乐的顾客 ——
+     * 只回一句「仅限管理员」，他不知道自己该发什么。
+     *
+     * <p>不报「你是谁」也不报管理员是谁：群消息全群可见，
+     * 而这条回复对任何人都一样。
+     *
+     * @return 提示文本
+     */
+    public static String stockAdjustForbidden() {
+        return "「调整库存」仅限管理员使用。如需购买商品，请发送 fw买个可乐 或 fw可乐-2。";
+    }
+
+    /**
+     * 群内调整机台状况成功的回复。
+     *
+     * <p>报「原 → 新」：手快发错了（比如把「维护中」发成了「良好」）当场看得见；
+     * 只报一个结果的话，要等顾客来问才会发现牌子挂错了。
+     *
+     * <p>顺带提一句公告：状况真的变化时，{@code DeviceService.updateStatus} 会往
+     * 首页公告栏记一条（「机台 1 号由良好转为维护中」）—— 告诉管理员一声，
+     * 否则他会以为还得再去后台补一条公告。
+     *
+     * @param name      机台名
+     * @param fromLabel 变更前状况的中文名，如「良好」
+     * @param toLabel   变更后状况的中文名，如「维护中」
+     * @return 回复文本
+     */
+    public static String deviceStatusAdjusted(String name, String fromLabel, String toLabel) {
+        return "已将「" + name + "」的状况由「" + fromLabel + "」改为「" + toLabel
+                + "」，门店公告已同步更新。";
+    }
+
+    /**
+     * 目标状况与当前相同时的回复。
+     *
+     * <p>单独一条而不是复用上面那条：报「维护中 → 维护中」看着像出了故障，
+     * 而事实是「你要的状态已经是了」—— 与网页端「重复点两下不算错误」同一口径。
+     *
+     * @param name  机台名
+     * @param label 当前状况的中文名
+     * @return 回复文本
+     */
+    public static String deviceStatusUnchanged(String name, String label) {
+        return "「" + name + "」当前的状况已经是「" + label + "」，未做改动。";
+    }
+
+    /**
+     * 非管理员发了机台状况指令时的回复。
+     *
+     * <p><b>刻意不带操作引导</b>（与库存那条不同）：库存指令有个只差一个横杠的
+     * 近亲写法（{@code fw可乐5} 与 {@code fw可乐-2}），所以那条要教他「怎么买」；
+     * 而 {@code fw拍拍机 1 号维护中} 没有任何顾客照着能办成事的样子 ——
+     * 顾客想干的事是开门，不是报修。
+     *
+     * @return 提示文本
+     */
+    public static String deviceStatusForbidden() {
+        return "「调整机台状况」仅限管理员使用。如需查看机台信息，请前往网页端。";
+    }
+
+    /**
+     * 按名字没找到机台时的回复。
+     *
+     * @param name 管理员打的机台名
+     * @return 提示文本
+     */
+    public static String deviceNotFound(String name) {
+        return "未找到名为「" + name + "」的机台。名称须完全一致（含空格），"
+                + "可前往网页端查看机台列表。";
+    }
+
+    /**
+     * 多台机台同名时的回复。
+     *
+     * <p>不报「有几台」、也不替管理员挑一台：这条指令的输入只有名字，
+     * 挑错的后果是改错机器，而回复看起来一切正常。
+     *
+     * @param name 管理员打的机台名
+     * @return 提示文本
+     */
+    public static String deviceNameAmbiguous(String name) {
+        return "有多台机台都叫「" + name + "」。群内按名字只能改唯一的一台，"
+                + "请前往网页端处理（可先在后台改掉重名，或按机台直接操作）。";
+    }
+
+    /**
+     * 群内付款截图已受理（2026-10-10 改：结尾分「已结清」与「等复核」两种）。
+     *
+     * <p>识别到的金额与流水号原样报出来 —— 它们是<b>辅助线索</b>，
+     * 用户看一眼就知道系统读对没有。
+     *
+     * <p>⚠️ <b>结尾那句必须与事实相符</b>：识别到有效单号时这笔已经当场结清了
+     * （小额自动通过），再说一句「管理员将进行复核」会让他以为还欠着钱、
+     * 甚至再付一次；反过来，没识别到单号时绝不能报「已结清」——
+     * 那笔还挂在待复核上，钱一分都没算数。
      *
      * @param outTradeNo 商户单号（房间订单是 {@code OD…}、商品是 {@code PD…}）
      * @param amount     识别到的金额，可为 null（没识别出）
      * @param paymentNo  识别到的流水号，可为 null
+     * @param settled    这笔是不是已经结清了（{@code ProofSubmitVo#isDelivered}）
      * @return 回复文本
      */
-    public static String proofAccepted(String outTradeNo, BigDecimal amount, String paymentNo) {
+    public static String proofAccepted(String outTradeNo, BigDecimal amount, String paymentNo,
+                                       boolean settled) {
         // 文案里说的是「单号」而不是「订单」：这条路既收房间订单的凭证，也收商品的
-        StringBuilder text = new StringBuilder("已收到付款截图，提交为单号 ")
-                .append(outTradeNo).append(" 的凭证。");
+        StringBuilder text = new StringBuilder("已收到付款截图，单号 ").append(outTradeNo);
         if (amount != null) {
             text.append("\n识别到金额 ").append(yuan(amount));
         }
         if (paymentNo != null && !paymentNo.isBlank()) {
-            text.append("，单号 ").append(paymentNo);
+            // 说「流水号」而不是「单号」：上面那个「单号」指的是这一笔业务单，
+            // 两个「单号」并排出现时读的人分不清谁是谁
+            text.append("，流水号 ").append(paymentNo);
         }
-        text.append("\n管理员会再核对一遍。");
+        if (settled) {
+            text.append("\n本次已结清。");
+        } else {
+            text.append("\n尚未结清：管理员将人工复核这张截图。");
+            if (paymentNo == null || paymentNo.isBlank()) {
+                text.append("若截图里本应有交易单号，也可换一张更清晰的重新发送。");
+            }
+        }
         return text.toString();
     }
 
@@ -1058,7 +1407,7 @@ public final class QqReplyText {
      * @param userId   用户 ID
      * @return 展示名
      */
-    private static String displayName(String nickname, Long userId) {
+    static String displayName(String nickname, Long userId) {
         if (nickname == null || nickname.isBlank()) {
             return "用户" + userId;
         }

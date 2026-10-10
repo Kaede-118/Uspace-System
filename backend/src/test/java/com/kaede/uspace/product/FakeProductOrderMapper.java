@@ -110,6 +110,8 @@ public class FakeProductOrderMapper implements InvocationHandler {
             case "markRejected" -> markRejected((Long) args[0]);
             case "closePending" -> closePending((Long) args[0]);
             case "countPendingByProduct" -> countPendingByProduct(args);
+            case "selectUnsettledByUser" -> selectUnsettledByUser((Long) args[0]);
+            case "selectUnpaidByUser" -> selectUnpaidByUser((Long) args[0]);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -303,6 +305,46 @@ public class FakeProductOrderMapper implements InvocationHandler {
             result.add(row);
         });
         return result;
+    }
+
+    /**
+     * 查某用户名下还没了结的购买单（待支付 / 凭证未通过），最近的一条在前。
+     *
+     * <p>与真 SQL 逐字对齐的两个要点：<b>只认这两种状态</b>；
+     * <b>不带时间窗</b> —— 超时与否在这里不算数（「超时只影响还占不占库存」，
+     * 不影响能不能再下单，见真 Mapper 上的注释）。
+     *
+     * @param userId 用户 ID
+     * @return 最近的一条未了结单；没有时返回 null
+     */
+    private ProductOrder selectUnsettledByUser(Long userId) {
+        return rows.values().stream()
+                .filter(FakeProductOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> ProductOrderStatus.PENDING_PAYMENT.name().equals(o.getStatus())
+                        || ProductOrderStatus.REJECTED.name().equals(o.getStatus()))
+                .max(Comparator.comparing(ProductOrder::getId))
+                .orElse(null);
+    }
+
+    /**
+     * 查某用户名下全部未付款的购买单（待支付 / 凭证未通过），最近的在前。
+     *
+     * <p>与真 SQL 对齐的两点：<b>只认这两种状态</b>（不含已关闭的）、
+     * <b>按 id 倒序</b>。与 {@link #selectUnsettledByUser} 的区别只在「复数」——
+     * 那条是同一个过滤条件取第一条，这条为群里的 {@code fw未付款} 供数。
+     *
+     * @param userId 用户 ID
+     * @return 未付款的购买单；没有时返回空列表
+     */
+    private List<ProductOrder> selectUnpaidByUser(Long userId) {
+        return rows.values().stream()
+                .filter(FakeProductOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> ProductOrderStatus.PENDING_PAYMENT.name().equals(o.getStatus())
+                        || ProductOrderStatus.REJECTED.name().equals(o.getStatus()))
+                .sorted(Comparator.comparing(ProductOrder::getId, Comparator.reverseOrder()))
+                .toList();
     }
 
     /**

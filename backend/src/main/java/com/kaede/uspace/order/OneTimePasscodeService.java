@@ -15,7 +15,7 @@ import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 
 /**
- * 一次性密码的发放（模块 11 的群指令 {@code /开门} 用）。
+ * 一次性密码的发放（模块 11 的群指令 {@code fw开门} 用）。
  *
  * <p>它只为问答一件事：<b>「给这张订单取一串新的、用一次即焚的门锁密码」</b>。
  *

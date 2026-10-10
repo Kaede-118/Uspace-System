@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p><b>纯单测，不启动 Spring、不连数据库。</b>
  *
- * <p>覆盖重点有四块，都是「错了也不会报错、只会在界面上悄悄错」的地方：
+ * <p>覆盖重点有五块，都是「错了也不会报错、只会在界面上悄悄错」的地方：
  * <ol>
  *   <li><b>陈列分组</b> —— 组按类型权重排、组内按机台权重排、空组不出现、
  *       维护中的机台必须还在</li>
@@ -44,6 +44,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li><b>状况在修改时的例外语义</b> —— {@code status} 传 null 要<b>保持原值</b>，
  *       不能被一次普通改名顺手改回「良好」</li>
  *   <li><b>改状况只动一列</b> —— 不碰名称与位置，避免覆盖别人刚改的内容</li>
+ *   <li><b>按名查机台的三种结果</b> —— 命中唯一一台 / 没有 / 同名多台，
+ *       群指令靠它守「多台同名时不猜着改机器」</li>
  * </ol>
  *
  * <p>本模块不参与计费与准入，因此<b>没有</b>任何「机台状态影响下单」的用例 ——
@@ -540,6 +542,64 @@ class DeviceServiceTests {
         BizResult<Void> result = deviceService.updateStatus(999L, statusRequest("NORMAL"));
 
         assertFalse(result.isSuccess());
+        assertEquals(ErrorCode.DEVICE_NOT_FOUND, result.getError());
+    }
+
+    // ==================================================================
+    // 按名字找机台（群指令 fw拍拍机 1 号维护中 走这条）
+    // ==================================================================
+
+    @Test
+    @DisplayName("按名查：命中唯一一台时返回它")
+    void findByName_found() {
+        deviceMapper.seed(device(101L, "拍拍机 1 号", PAIPAI_ID, "NORMAL", 10));
+        deviceMapper.seed(device(102L, "拍拍机 2 号", PAIPAI_ID, "NORMAL", 20));
+
+        BizResult<DeviceVo> result = deviceService.findByName("拍拍机 1 号");
+
+        assertTrue(result.isSuccess());
+        assertEquals(101L, result.getData().getId());
+        assertEquals("NORMAL", result.getData().getStatus());
+        assertEquals("良好", result.getData().getStatusLabel());
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：同名多台时拒绝返回，不替调用方挑一台")
+    void findByName_rejectsAmbiguousName() {
+        deviceMapper.seed(device(101L, "拍拍机", PAIPAI_ID, "NORMAL", 10));
+        deviceMapper.seed(device(102L, "拍拍机", PAIPAI_ID, "NORMAL", 20));
+
+        BizResult<DeviceVo> result = deviceService.findByName("拍拍机");
+
+        assertFalse(result.isSuccess(),
+                "⚠️ 挑一台返回的后果是「改错了哪台」在界面上看不出来 —— "
+                        + "拒绝才是安全的那一侧，群指令据此让管理员走网页端");
+        assertEquals(ErrorCode.DEVICE_NAME_AMBIGUOUS, result.getError());
+    }
+
+    @Test
+    @DisplayName("按名查：名字必须完全一致，不做模糊匹配")
+    void findByName_notFound() {
+        deviceMapper.seed(device(101L, "拍拍机 1 号", PAIPAI_ID, "NORMAL", 10));
+
+        BizResult<DeviceVo> result = deviceService.findByName("拍拍机");
+
+        assertFalse(result.isSuccess());
+        assertEquals(ErrorCode.DEVICE_NOT_FOUND, result.getError(),
+                "群里打错半个字就该查不到 —— 模糊匹配会改到另一台机器上");
+    }
+
+    @Test
+    @DisplayName("按名查：别的门店的同名机台不算命中")
+    void findByName_ignoresOtherStores() {
+        Device other = device(201L, "拍拍机 1 号", PAIPAI_ID, "NORMAL", 10);
+        other.setStoreId(99L);
+        deviceMapper.seed(other);
+
+        BizResult<DeviceVo> result = deviceService.findByName("拍拍机 1 号");
+
+        assertFalse(result.isSuccess(),
+                "查的是「当前门店」里的机台 —— 将来开分店时同名机台不该跨店撞上");
         assertEquals(ErrorCode.DEVICE_NOT_FOUND, result.getError());
     }
 

@@ -133,7 +133,7 @@ public class OneBotEvent {
      * 但少了它后面所有按群号做的判断都会退化成「拿 null 去比」。
      *
      * <p><b>{@code message_sent} 也算</b>：自己那一侧发的消息同样要能触发指令
-     * （运营者在手机上发 {@code /ping}，电脑上的机器人回复），
+     * （运营者在手机上发 {@code fwping}，电脑上的机器人回复），
      * 是否处理由 {@link #isSelfSent()} 与调用方的判据共同决定。
      *
      * @return 是群消息返回 true

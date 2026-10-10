@@ -174,6 +174,31 @@ public interface BookingMapper extends BaseMapper<Booking> {
     Booking selectByBookingNo(@Param("bookingNo") String bookingNo);
 
     /**
+     * 查某人全部<b>未付款</b>的包场（{@code PENDING_PAYMENT}）。
+     *
+     * <p>供群里的 {@code fw未付款} 用 —— 包场此前只有分页查询
+     *（{@code selectPageByHost}，不限状态），「这个人有几场还没付钱」
+     * 因此没有现成的答案。
+     *
+     * <p>只查 {@code host_user_id}：被邀请者不欠包场的钱（那是包场人的事），
+     * 所以这里没有参与者表的份。
+     *
+     * <p>按开始时间升序：越早的场子越该先付。
+     *
+     * @param hostUserId 包场人用户 ID
+     * @return 未付款的包场；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_booking
+             WHERE deleted = 0
+               AND host_user_id = #{hostUserId}
+               AND status = 'PENDING_PAYMENT'
+             ORDER BY start_at
+            """)
+    List<Booking> selectUnpaidByHost(@Param("hostUserId") Long hostUserId);
+
+    /**
      * 按邀请令牌查询。
      *
      * <p>供模块 8 的被邀请者入口使用 —— 被邀请者点开分享链接，

@@ -26,6 +26,7 @@ import {
   listAdminProducts,
   createProduct,
   updateProduct,
+  updateProductStock,
   deleteProduct,
   uploadProductCover,
   listAdminProductOrders
@@ -397,7 +398,7 @@ function openRestock(row) {
  * 提交补货。
  *
  * <p>⚠️ 输入的<b>是补完后的总数</b>，不是「补了几件」—— 与后端
- * {@code ProductSaveRequest.stock} 的口径一致（那是新的库存值，不是扣减量）。
+ * {@code UpdateProductStockRequest.stock} 的口径一致（那是新的库存值，不是扣减量）。
  * 弹层里有实时预览，就是为了让这件事不用猜。
  */
 async function submitRestock() {
@@ -409,7 +410,10 @@ async function submitRestock() {
   restockError.value = ''
   try {
     const row = restocking.value
-    await updateProduct(row.id, buildBody(row, { stock: restockPreview.value.to }))
+    // ⚠️ 走「只改库存」那条接口，不走全量替换：全量替换要把名称、封面、价格
+    // 原样回传，而它们取自列表加载时的那份快照 —— 这期间若有别人改过名称，
+    // 补货会把它悄悄写回旧值，且不报任何错
+    await updateProductStock(row.id, restockPreview.value.to)
     toastSuccess(`库存已改为 ${restockPreview.value.to}`)
     restocking.value = null
     await load()

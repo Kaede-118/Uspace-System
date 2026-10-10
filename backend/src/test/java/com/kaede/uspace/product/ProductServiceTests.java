@@ -3,6 +3,8 @@ package com.kaede.uspace.product;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
+import com.kaede.uspace.product.event.ProductOrderCancelledEvent;
 import com.kaede.uspace.product.dto.CreateProductOrderRequest;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductSaveRequest;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,6 +43,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       这一条错了，用户会看到一个自己从没同意过的金额</li>
  *   <li><b>{@code enabled} 是全量替换语义的唯一例外</b> —— 传 null 时保持原值。
  *       改了这条，管理员改个商品名就会顺手把商品下架，而他毫无察觉</li>
+ *   <li><b>下单互斥</b> —— 一笔没了结（待支付 / 凭证未通过）就不给下新的，
+ *       而超时的旧单照样挡着。这一条松了，用户能挂起一串没人管的待支付单</li>
  * </ul>
  *
  * <p>另有一条钉住下单接口的价格<b>只认服务端</b>：
@@ -57,9 +62,14 @@ class ProductServiceTests {
     /** 被测服务，每个用例前重建 */
     private ProductService service;
 
+    /** 收集被测代码发布的事件（取消购买单时发一条，由 order 包记进交易流水） */
+    private final List<Object> publishedEvents = new ArrayList<>();
+
     @BeforeEach
     void setUp() {
-        service = new ProductService(productMapper.asMapper(), orderMapper.asMapper(), properties);
+        publishedEvents.clear();
+        service = new ProductService(productMapper.asMapper(), orderMapper.asMapper(),
+                properties, publishedEvents::add);
     }
 
     // ==================================================================
@@ -219,6 +229,97 @@ class ProductServiceTests {
                         + "而且界面上看不出任何异常");
     }
 
+    // ------------------------------------------------------------------
+    // 下单互斥（2026-10-10 加）：一笔没了结就不给下新的
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("⚠️ 守门：名下有未付款的商品单时不给下新的，提示里带单号")
+    void createOrder_rejectsWhenUnpaidOrderExists() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        ProductOrder unpaid = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertEquals(ErrorCode.PRODUCT_UNPAID_EXISTS, result.getError());
+        assertTrue(result.resolveMessage().contains(unpaid.getOrderNo()),
+                "单号要报出来 —— 用户得照着它去付款或取消：" + result.resolveMessage());
+        assertEquals(1, orderMapper.size(), "被拒绝的请求不该留下第二条购买单");
+    }
+
+    @Test
+    @DisplayName("守门：凭证被驳回的商品单同样挡着，给的是「重新上传」的码")
+    void createOrder_rejectsWhenProofRejected() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        ProductOrder rejected = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+        rejected.setStatus(ProductOrderStatus.REJECTED.name());
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertEquals(ErrorCode.PRODUCT_PROOF_REJECTED, result.getError(),
+                "「还没付钱」与「付了但凭证没通过」的处置动作不同 —— "
+                        + "合并成一个码，用户看到「待支付」会再付一次钱");
+    }
+
+    @Test
+    @DisplayName("守门：超时未付的旧单照样挡着（与「超时不占库存」是两个口径）")
+    void createOrder_unpaidBlockIgnoresTimeout() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now().minusMinutes(40));
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertEquals(ErrorCode.PRODUCT_UNPAID_EXISTS, result.getError(),
+                "⚠️ 时间窗只影响「还占不占库存」—— 两天前没付的单子今天照样挡人，"
+                        + "要么付掉、要么取消；否则「欠着费接着买」就从这道缝里漏过去");
+    }
+
+    @Test
+    @DisplayName("守门：取消掉那笔未付款单之后就能再下单")
+    void createOrder_allowedAfterCancel() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        ProductOrder unpaid = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
+
+        assertEquals(ErrorCode.PRODUCT_UNPAID_EXISTS,
+                service.createOrder(USER_ID, request(product.getId(), 1)).getError(),
+                "先确认它确实挡着");
+
+        service.cancelOrder(USER_ID, unpaid.getId(), TradeSource.WEB);
+        BizResult<ProductOrderVo> after = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertTrue(after.isSuccess(), "取消之后路要通 —— 否则这道拦截就是个死胡同");
+    }
+
+    @Test
+    @DisplayName("守门：别人的未付款单挡不住我（互斥只认本人）")
+    void createOrder_otherUsersUnpaidOrderDoesNotBlock() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        seedPendingOrder(OTHER_USER_ID, product.getId(), 1, LocalDateTime.now());
+
+        BizResult<ProductOrderVo> result = service.createOrder(USER_ID, request(product.getId(), 1));
+
+        assertTrue(result.isSuccess(),
+                "挡的是「自己欠着又买新的」，不是替别人挡 —— "
+                        + "按商品全局挡的话，一个人不付款全店都买不了");
+    }
+
+    @Test
+    @DisplayName("取消：发一条「购买单被取消」事件 —— 交易流水靠它留档")
+    void cancelOrder_publishesCancelledEvent() {
+        Product product = seedProduct("可乐", "3.50", 10);
+        ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 2, LocalDateTime.now());
+
+        service.cancelOrder(USER_ID, order.getId(), TradeSource.WEB);
+
+        assertEquals(1, publishedEvents.size(), "成功取消要恰好发一条事件，不能多也不能少");
+        ProductOrderCancelledEvent event = (ProductOrderCancelledEvent) publishedEvents.get(0);
+        assertEquals(order.getOrderNo(), event.orderNo(),
+                "流水靠单号与业务单据对齐 —— 记错了这个字段，那笔账就找不回原单");
+        assertEquals(USER_ID, event.userId());
+        assertEquals(0, order.getAmount().compareTo(event.amount()), "金额要原样带出去");
+        assertEquals(TradeSource.WEB, event.source(), "网页端取消要记成 WEB");
+    }
+
     @Test
     @DisplayName("下单：商品已下架时拒绝")
     void createOrder_rejectsDisabledProduct() {
@@ -312,7 +413,7 @@ class ProductServiceTests {
                 service.createOrder(OTHER_USER_ID, request(product.getId(), 1)).getError(),
                 "先确认这一件确实被占着");
 
-        assertTrue(service.cancelOrder(USER_ID, order.getId()).isSuccess());
+        assertTrue(service.cancelOrder(USER_ID, order.getId(), TradeSource.WEB).isSuccess());
 
         assertEquals(ProductOrderStatus.CLOSED.name(), orderMapper.get(order.getId()).getStatus());
         assertTrue(service.createOrder(OTHER_USER_ID, request(product.getId(), 1)).isSuccess(),
@@ -326,7 +427,7 @@ class ProductServiceTests {
         ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
         order.setStatus(ProductOrderStatus.PAID.name());
 
-        BizResult<Void> result = service.cancelOrder(USER_ID, order.getId());
+        BizResult<Void> result = service.cancelOrder(USER_ID, order.getId(), TradeSource.WEB);
 
         assertEquals(ErrorCode.PRODUCT_STATUS_INVALID, result.getError(),
                 "关掉一笔付过款的单会造成「单子关闭、库存少了」的不一致");
@@ -340,7 +441,7 @@ class ProductServiceTests {
         Product product = seedProduct("矿泉水", "2.00", 10);
         ProductOrder order = seedPendingOrder(USER_ID, product.getId(), 1, LocalDateTime.now());
 
-        BizResult<Void> result = service.cancelOrder(OTHER_USER_ID, order.getId());
+        BizResult<Void> result = service.cancelOrder(OTHER_USER_ID, order.getId(), TradeSource.WEB);
 
         assertEquals(ErrorCode.PRODUCT_ORDER_NOT_FOUND, result.getError(),
                 "403 等于承认「这个单子存在，只是不归你」，可以被用来枚举单号");
@@ -457,6 +558,64 @@ class ProductServiceTests {
                 "空串应当被归一为 null，而不是原样存进去");
     }
 
+    // ==================================================================
+    // 调整库存（后台「只改库存」接口与群里的库存指令共用这一条）
+    // ==================================================================
+
+    @Test
+    @DisplayName("改库存：传的是新的库存值，不是增减量")
+    void updateStock_setsValueInsteadOfAdding() {
+        Product cola = seedProduct("可乐", "3.50", 20);
+
+        BizResult<ProductVo> result = service.updateStock(cola.getId(), 5);
+
+        assertTrue(result.isSuccess(), result.resolveMessage());
+        assertEquals(5, productMapper.get(cola.getId()).getStock(),
+                "⚠️ 传的是【新的库存值】——写成按量扣减的话，「补货到 5」会变成「再进 5 件」，"
+                        + "而两者在库存数上只差一点，很难被发现");
+        assertEquals(5, result.getData().getStock(), "返回值里也要是新值");
+        assertEquals(5, result.getData().getAvailableStock(), "没有待支付单时，可售量就是库存");
+    }
+
+    @Test
+    @DisplayName("改库存：改成同一个数仍算成功（SET 语义的指纹）")
+    void updateStock_sameValueStillSucceeds() {
+        Product cola = seedProduct("可乐", "3.50", 5);
+
+        assertTrue(service.updateStock(cola.getId(), 5).isSuccess(),
+                "⚠️ 这条钉住「匹配行数」语义：若把条件写成 stock <> ?（或驱动改成 useAffectedRows），"
+                        + "「改成同一个数」会被误报成「商品不存在」");
+    }
+
+    @Test
+    @DisplayName("改库存：可售量扣掉未付款订单占用的部分")
+    void updateStock_returnsAvailabilityAfterPendingOrders() {
+        Product cola = seedProduct("可乐", "3.50", 1);
+        seedPendingOrder(USER_ID, cola.getId(), 2, LocalDateTime.now());
+
+        BizResult<ProductVo> result = service.updateStock(cola.getId(), 10);
+
+        assertEquals(10, result.getData().getStock());
+        assertEquals(8, result.getData().getAvailableStock(),
+                "可售量 = 库存 − 待支付单占用 —— 与列表、下单校验同一口径");
+    }
+
+    @Test
+    @DisplayName("改库存：负数被挡下且不动数据（群里绕过 Bean Validation）")
+    void updateStock_rejectsNegative() {
+        Product cola = seedProduct("可乐", "3.50", 5);
+
+        assertEquals(ErrorCode.PARAM_INVALID, service.updateStock(cola.getId(), -1).getError(),
+                "群里的指令直接调本方法，@Min(0) 管不到它");
+        assertEquals(5, productMapper.get(cola.getId()).getStock(), "被拒时一个数都不该动");
+    }
+
+    @Test
+    @DisplayName("改库存：商品不存在时回 NOT_FOUND")
+    void updateStock_rejectsUnknownProduct() {
+        assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.updateStock(999L, 3).getError());
+    }
+
     @Test
     @DisplayName("后台新增：不传 enabled 时默认上架，不传 sortNo 按 0")
     void create_defaultsEnabledAndSortNo() {
@@ -561,7 +720,7 @@ class ProductServiceTests {
         assertEquals("可乐 500ml", service.findLiveByName("可乐 500ml").getData().getName());
         assertEquals("王老吉 500ml", service.findLiveByName("王老吉 500ml").getData().getName(),
                 "⚠️ 下架的也要找得到 —— 调用方要能区分「没有这件商品」与「这件已下架」，"
-                        + "前者指去 /菜单，后者让他等上架，两句话不一样");
+                        + "前者指去 fw菜单，后者让他等上架，两句话不一样");
         assertEquals(ErrorCode.PRODUCT_NOT_FOUND, service.findLiveByName("不存在").getError());
     }
 

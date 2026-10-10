@@ -3,6 +3,7 @@ package com.kaede.uspace.space;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.space.dto.BookingParticipantVo;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.CreateBookingRequest;
@@ -302,7 +303,7 @@ class BookingServiceTests {
         Long id = bookingService.createBooking(
                 newRequest(start, tomorrowAt(18, 0), BigDecimal.TEN), ADMIN_ID).getData().getId();
 
-        assertTrue(bookingService.cancelBooking(id).isSuccess());
+        assertTrue(bookingService.cancelBooking(id, TradeSource.ADMIN, ADMIN_ID).isSuccess());
         assertEquals(1, bookingMapper.get(id).getDeleted(), "应当是逻辑删除，取消记录仍留在库里");
 
         // 时段腾出来了，可以再排一场
@@ -317,7 +318,8 @@ class BookingServiceTests {
         Long id = bookingMapper.seed(
                 booking(tomorrowAt(14, 0), tomorrowAt(18, 0), BookingStatus.PAID)).getId();
 
-        assertEquals(ErrorCode.BOOKING_NOT_EDITABLE, bookingService.cancelBooking(id).getError());
+        assertEquals(ErrorCode.BOOKING_NOT_EDITABLE,
+                bookingService.cancelBooking(id, TradeSource.ADMIN, ADMIN_ID).getError());
     }
 
     @Test
@@ -329,7 +331,8 @@ class BookingServiceTests {
         request.setPrice(BigDecimal.TEN);
 
         assertEquals(ErrorCode.BOOKING_NOT_FOUND, bookingService.updateBooking(999L, request).getError());
-        assertEquals(ErrorCode.BOOKING_NOT_FOUND, bookingService.cancelBooking(999L).getError());
+        assertEquals(ErrorCode.BOOKING_NOT_FOUND,
+                bookingService.cancelBooking(999L, TradeSource.ADMIN, ADMIN_ID).getError());
     }
 
     // ==================================================================

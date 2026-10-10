@@ -12,6 +12,11 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.concurrent.atomic.AtomicReference;
+
 /**
  * 反向 WebSocket 端点（模块 11）。
  *
@@ -50,18 +55,33 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
     /** 认不出的帧，日志里最多打这么多字符 */
     private static final int UNKNOWN_FRAME_LOG_LIMIT = 300;
 
+    /** 「已连接」提示的防抖间隔：网络抖动会在一分钟内反复重连，每次都说会刷屏 */
+    private static final Duration CONNECT_NOTICE_COOLDOWN = Duration.ofSeconds(60);
+
     private final OneBotClient client;
 
     private final QqCommandService commandService;
 
     private final ObjectMapper objectMapper;
 
+    private final QqbotProperties properties;
+
+    /** 时钟。与写指令冷却同一个 bean（{@code QqVerifyConfig}），测试可拨钟 */
+    private final Clock clock;
+
+    /** 上一次发「已连接」群消息的时刻；null 表示本次进程内还没发过 */
+    private final AtomicReference<LocalDateTime> lastConnectNoticeAt = new AtomicReference<>();
+
     public OneBotWebSocketHandler(OneBotClient client,
                                   QqCommandService commandService,
-                                  ObjectMapper objectMapper) {
+                                  ObjectMapper objectMapper,
+                                  QqbotProperties properties,
+                                  Clock clock) {
         this.client = client;
         this.commandService = commandService;
         this.objectMapper = objectMapper;
+        this.properties = properties;
+        this.clock = clock;
     }
 
     /**
@@ -75,6 +95,56 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         client.attach(session);
+        // 断开有日志（见 afterConnectionClosed）、连上反而一直什么都没有 ——
+        // 排查「什么时候连上的」只能靠猜，这条补的就是那半边（2026-10-10 由用户提出）
+        log.info("[QQ机器人] NapCat 已连接 sessionId={}", session.getId());
+        noticeConnected();
+    }
+
+    /**
+     * 连接建立后在群里说一声「机器人已连接」。
+     *
+     * <p><b>为什么值得发一条群消息</b>：断线在 NapCat 界面上看得见，
+     * 而<b>重连成功此前两边都悄无声息</b> —— 运营者只能发一条 {@code fwping}
+     * 去猜。这句话让群里直接看到「它回来了」，比翻日志直观。
+     *
+     * <p>三条纪律：
+     * <ol>
+     *   <li><b>受播报开关管</b>（与写指令同一条）：在一条从不说话的群里
+     *       突然冒一句「已连接」，比不说更让人困惑</li>
+     *   <li><b>只发一个群</b>：店主群优先（运营者盯着那里），没配则第一个交互群 ——
+     *       往所有群广播「我上线了」是刷屏</li>
+     *   <li><b>60 秒防抖</b>：NapCat 网络抖动会一分钟重连好几次，
+     *       每次都说等于刷屏，而它们说的是同一件事</li>
+     * </ol>
+     */
+    private void noticeConnected() {
+        if (!properties.getBroadcast().isEnabled()) {
+            return;
+        }
+        LocalDateTime now = LocalDateTime.now(clock);
+        LocalDateTime last = lastConnectNoticeAt.get();
+        if (last != null && Duration.between(last, now).compareTo(CONNECT_NOTICE_COOLDOWN) < 0) {
+            return;
+        }
+        lastConnectNoticeAt.set(now);
+
+        Long groupId = noticeGroupId();
+        if (groupId != null) {
+            client.sendGroupMessage(groupId, QqReplyText.botConnected());
+        }
+    }
+
+    /**
+     * 「已连接」提示发到哪个群：店主群优先，其次第一个交互群。
+     *
+     * @return 群号；一个群都没配时返回 null（此时只留后端日志）
+     */
+    private Long noticeGroupId() {
+        if (!properties.getAdminGroups().isEmpty()) {
+            return properties.getAdminGroups().get(0);
+        }
+        return properties.effectiveGroups().stream().findFirst().orElse(null);
     }
 
     /**
@@ -160,7 +230,7 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
             // 一个字段都没映射上时把原始帧打出来。**这条是吃过亏才加的**：
             // 协议用 snake_case（post_type / group_id / raw_message）而 Java 字段是
             // camelCase，Jackson 默认对不上 —— 反序列化不报错，只是每个字段都成了 null，
-            // 而光看一串 null 完全猜不出原因。当时的现象是「机器人对 /ping 毫无反应，
+            // 而光看一串 null 完全猜不出原因。当时的现象是「机器人对 fwping 毫无反应，
             // 日志里只有一行全是 null 的事件」，从这里才能一眼看出协议字段的真面目。
             log.warn("[QQ机器人] 事件反序列化后 postType 为空（字段名对不上？），原始帧：{}", frame);
         }

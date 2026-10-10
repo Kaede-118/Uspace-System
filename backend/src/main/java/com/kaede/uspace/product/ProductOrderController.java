@@ -3,6 +3,7 @@ package com.kaede.uspace.product;
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.security.UserPrincipal;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.product.dto.CreateProductOrderRequest;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import jakarta.validation.Valid;
@@ -95,6 +96,6 @@ public class ProductOrderController {
     @PostMapping("/{id}/cancel")
     public ResponseEntity<ApiResult<Void>> cancel(@PathVariable Long id,
                                                   @AuthenticationPrincipal UserPrincipal me) {
-        return ApiResult.of(productService.cancelOrder(me.id(), id));
+        return ApiResult.of(productService.cancelOrder(me.id(), id, TradeSource.WEB));
     }
 }

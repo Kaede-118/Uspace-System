@@ -8,15 +8,18 @@ import com.kaede.uspace.billing.CardScope;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
 import com.kaede.uspace.promotion.dto.MonthlyCardVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
+import com.kaede.uspace.promotion.event.CardPurchaseCancelledEvent;
 import com.kaede.uspace.promotion.mapper.MonthlyCardMapper;
 import com.kaede.uspace.promotion.mapper.MonthlyCardOrderMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,14 +58,19 @@ public class MonthlyCardService {
     /** 计费配置。只为组装「夜场是几点到几点」这类展示文案，不参与任何计算 */
     private final BillingProperties billingProperties;
 
+    /** 事件发布器：未付款的购买单被取消时发一条，由 {@code order} 包记进交易流水 */
+    private final ApplicationEventPublisher events;
+
     public MonthlyCardService(MonthlyCardMapper cardMapper,
                               MonthlyCardOrderMapper orderMapper,
                               PromotionProperties properties,
-                              BillingProperties billingProperties) {
+                              BillingProperties billingProperties,
+                              ApplicationEventPublisher events) {
         this.cardMapper = cardMapper;
         this.orderMapper = orderMapper;
         this.properties = properties;
         this.billingProperties = billingProperties;
+        this.events = events;
     }
 
     // ==================================================================
@@ -154,12 +162,17 @@ public class MonthlyCardService {
      * <p>非本人的订单一律按「不存在」处理，不用 403：403 等于承认
      * 「这个单子存在，只是不归你」，可以被用来枚举单号。
      *
+     * <p>成功之后发一条 {@link CardPurchaseCancelledEvent} —— 由
+     * {@code order} 包的 {@code TradeLogListener} 记进交易流水。本方法本来
+     * 就带 {@code @Transactional}，那条流水因此与这次关闭同生共死。
+     *
      * @param userId     当前登录用户
      * @param purchaseId 购买单 ID
+     * @param source     来源渠道（网页端 / 群内），只进流水，不参与任何判断
      * @return 成功返回空数据；单子不存在、不归本人、或已不是待支付状态时返回对应错误码
      */
     @Transactional
-    public BizResult<Void> cancelPurchase(Long userId, Long purchaseId) {
+    public BizResult<Void> cancelPurchase(Long userId, Long purchaseId, TradeSource source) {
         MonthlyCardOrder order = orderMapper.selectById(purchaseId);
         if (order == null || !order.getUserId().equals(userId)) {
             return BizResult.fail(ErrorCode.CARD_NOT_FOUND);
@@ -168,7 +181,48 @@ public class MonthlyCardService {
             return BizResult.fail(ErrorCode.CARD_STATUS_INVALID, "该购买单不是待支付状态，无法取消");
         }
         log.info("[优惠] 用户 {} 取消了月卡购买单 {}", userId, order.getOrderNo());
+        events.publishEvent(new CardPurchaseCancelledEvent(
+                order.getOrderNo(), userId, order.getPrice(), source));
         return BizResult.ok(null);
+    }
+
+    /**
+     * 按<b>单号</b>取消未付款的购买单 —— 群里的 {@code fw取消 <单号>} 走这条。
+     *
+     * <p>与商品那条同构：网页端按 ID 取消，群里只有单号可填。
+     * 两条最终汇进 {@link #cancelPurchase}，守卫与流水只有一份。
+     *
+     * <p><b>本方法自己带 {@code @Transactional}</b>：内部调
+     * {@link #cancelPurchase} 属于同类自调用，那个方法的事务注解不会生效 ——
+     * 少了这一层，「取消成功、流水插入失败」会分成两个独立事务。
+     *
+     * @param userId  当前用户（必须是这张单的主人）
+     * @param orderNo 购买单号
+     * @param source  来源渠道（网页端 / 群内），只进流水
+     * @return 成功返回空数据；单号不存在、不归本人、或已不是待支付状态时返回对应错误码
+     */
+    @Transactional
+    public BizResult<Void> cancelPurchaseByNo(Long userId, String orderNo, TradeSource source) {
+        MonthlyCardOrder order = orderMapper.selectByOrderNo(orderNo);
+        if (order == null || !order.getUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.CARD_NOT_FOUND);
+        }
+        return cancelPurchase(userId, order.getId(), source);
+    }
+
+    /**
+     * 查某人当前待支付的月卡购买单 —— 群里的 {@code fw未付款} 用。
+     *
+     * <p>至多一笔：{@code createPurchase} 挡着「已有待支付购买单」的重复下单
+     *（{@code CARD_PENDING_PAYMENT_EXISTS}），月卡又是「一人一卡」，
+     * 所以复用单数查询就够，不必另开列表版。
+     *
+     * @param userId 用户 ID
+     * @return 待支付的购买单；没有时 {@code data} 为 null
+     */
+    public BizResult<CardPurchaseVo> findPendingPurchase(Long userId) {
+        return BizResult.ok(CardPurchaseVo.from(orderMapper.selectPendingByUser(userId),
+                properties.getMonthlyCard().getPendingTimeout()));
     }
 
     // ==================================================================

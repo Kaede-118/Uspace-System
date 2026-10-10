@@ -3,6 +3,7 @@ package com.kaede.uspace.space;
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.security.UserPrincipal;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.CreateBookingRequest;
 import com.kaede.uspace.space.dto.UpdateBookingRequest;
@@ -118,11 +119,16 @@ public class AdminBookingController {
      *
      * <p>同样是逻辑删除，且只有待付款的可以取消，理由同上。
      *
+     * <p>操作人取当前登录的管理员 —— 交易流水的「取消未付款单」那一行要记下
+     * <b>是哪个管理员取消的</b>。
+     *
      * @param id 包场 ID
+     * @param me 当前登录的管理员
      * @return 成功时 data 为 null
      */
     @DeleteMapping("/{id}")
-    public ResponseEntity<ApiResult<Void>> cancel(@PathVariable Long id) {
-        return ApiResult.of(bookingService.cancelBooking(id));
+    public ResponseEntity<ApiResult<Void>> cancel(@PathVariable Long id,
+                                                  @AuthenticationPrincipal UserPrincipal me) {
+        return ApiResult.of(bookingService.cancelBooking(id, TradeSource.ADMIN, me.id()));
     }
 }

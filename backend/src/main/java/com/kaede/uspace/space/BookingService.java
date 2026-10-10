@@ -6,6 +6,7 @@ import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.security.TokenGenerator;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.space.dto.BookingParticipantVo;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
 import com.kaede.uspace.space.dto.BookingVo;
@@ -15,6 +16,7 @@ import com.kaede.uspace.space.dto.UpdateBookingRequest;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.BookingParticipant;
 import com.kaede.uspace.space.event.BookingActivatedEvent;
+import com.kaede.uspace.space.event.BookingCancelledEvent;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import com.kaede.uspace.space.mapper.BookingParticipantMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
@@ -183,6 +185,21 @@ public class BookingService {
     public BizResult<PageResult<BookingVo>> listHostBookings(Long userId, long pageNum, long pageSize) {
         IPage<Booking> page = bookingMapper.selectPageByHost(new Page<>(pageNum, pageSize), userId);
         return BizResult.ok(PageResult.of(page, BookingVo::from));
+    }
+
+    /**
+     * 列出某人全部<b>未付款</b>的包场 —— 群里的 {@code fw未付款} 用。
+     *
+     * <p>与分页的 {@link #listHostBookings} 分开：那个要翻页、且不限状态
+     *（历史场次都在里面），这里只要「还欠着钱的那几场」，一次列全。
+     *
+     * @param userId 包场人用户 ID
+     * @return 未付款的包场，按开始时间升序；没有时返回空列表
+     */
+    public BizResult<List<BookingVo>> listUnpaidBookings(Long userId) {
+        return BizResult.ok(bookingMapper.selectUnpaidByHost(userId).stream()
+                .map(BookingVo::from)
+                .toList());
     }
 
     /**
@@ -480,11 +497,18 @@ public class BookingService {
      * 而不是「把这条记录删掉」。将来若需要保留取消痕迹，
      * 改为置 {@code CANCELLED} 状态即可，接口不必变。
      *
-     * @param id 包场 ID
+     * <p>成功之后发一条 {@link BookingCancelledEvent}，由 {@code order} 包的
+     * {@code TradeLogListener} 记进交易流水 —— 借它把「这场取消过」留个档。
+     * 本方法本来就带 {@code @Transactional}，那条流水与这次删除同生共死。
+     *
+     * @param id         包场 ID
+     * @param source     来源渠道（管理后台 / 群内），只进流水，不参与任何判断
+     * @param operatorId 操作人：管理员在后台取消时是他的 ID；
+     *                   用户在群里取消自己的场子时传 null（流水里的 user 就是他）
      * @return 成功时 data 为 null；失败时返回对应错误码
      */
     @Transactional
-    public BizResult<Void> cancelBooking(Long id) {
+    public BizResult<Void> cancelBooking(Long id, TradeSource source, Long operatorId) {
         Booking existing = bookingMapper.selectById(id);
         if (existing == null) {
             return BizResult.fail(ErrorCode.BOOKING_NOT_FOUND);
@@ -497,7 +521,40 @@ public class BookingService {
 
         log.info("[空间] 取消包场 {} 原时段 {} ~ {}",
                 existing.getBookingNo(), existing.getStartAt(), existing.getEndAt());
+        eventPublisher.publishEvent(new BookingCancelledEvent(
+                existing.getBookingNo(), existing.getHostUserId(), existing.getPrice(),
+                source, operatorId));
         return BizResult.ok(null);
+    }
+
+    /**
+     * 包场人取消自己的一场<b>未付款</b>包场（群里的 {@code fw取消 <单号>} 走这条）。
+     *
+     * <p>与 {@link #cancelBooking} 的差别只有两处，都是刻意的：
+     * <ol>
+     *   <li><b>按单号找</b> —— 群里没有地方填 ID，用户打出来的就是单号</li>
+     *   <li><b>校验归属</b> —— 只有包场人本人能取消自己排的场子。
+     *       非本人一律按「没找到」处理（不用 403）：403 等于承认
+     *       「这场存在，只是不归你」，可以被用来枚举单号</li>
+     * </ol>
+     *
+     * <p>⚠️ <b>只有未付款的能取消</b>：已付款的场子涉及退款，
+     * 走的是 {@code BookingRefundService#revoke}（管理员撤销 + 退款），
+     * 不是这里 —— 那条路钱要真的退回去，不是把记录关掉就完了。
+     *
+     * @param bookingNo 包场单号
+     * @param userId    当前登录用户（必须是这场包场的包场人）
+     * @param source    来源渠道，只进流水
+     * @return 成功返回空数据；单号不存在、不归本人、或已不是待支付状态时返回对应错误码
+     */
+    @Transactional
+    public BizResult<Void> cancelOwnBooking(String bookingNo, Long userId, TradeSource source) {
+        Booking existing = bookingMapper.selectByBookingNo(bookingNo);
+        if (existing == null || !existing.getHostUserId().equals(userId)) {
+            return BizResult.fail(ErrorCode.BOOKING_NOT_FOUND);
+        }
+        // 操作人传 null：这一行是包场人自己做的（流水里的 user 就是他），不是谁代劳
+        return cancelBooking(existing.getId(), source, null);
     }
 
     /**

@@ -96,6 +96,7 @@ public class FakeDeviceMapper implements InvocationHandler {
             case "insert" -> insert((Device) args[0]);
             case "selectById" -> selectById((Long) args[0]);
             case "selectListByStore" -> selectListByStore((Long) args[0]);
+            case "selectListByName" -> selectListByName(args);
             case "countByDeviceNo" -> countByDeviceNo(args);
             case "updateDevice" -> updateDevice(args);
             case "updateStatus" -> updateStatus(args);
@@ -164,6 +165,27 @@ public class FakeDeviceMapper implements InvocationHandler {
                 .filter(d -> storeId.equals(d.getStoreId()))
                 .sorted(Comparator.comparing(Device::getSort)
                         .thenComparing(Device::getId))
+                .toList();
+    }
+
+    /**
+     * 按名字查同门店的机台，按 {@code id ASC} 排列。
+     *
+     * <p>名字用 {@code equals} 比对，模拟 SQL 里 {@code name = #{name}}：
+     * <b>完全一致才算命中</b>（不 trim、不模糊）—— 与真实 SQL 逐字一致，
+     * 差别一个字，「打错半个字就改错机器」那条守门用例就会得出相反结论。
+     *
+     * @param args 依次为门店 ID、机台名
+     * @return 同名机台；没有时返回空列表
+     */
+    private List<Device> selectListByName(Object[] args) {
+        Long storeId = (Long) args[0];
+        String name = (String) args[1];
+        return rows.values().stream()
+                .filter(this::isAlive)
+                .filter(d -> storeId.equals(d.getStoreId()))
+                .filter(d -> name != null && name.equals(d.getName()))
+                .sorted(Comparator.comparing(Device::getId))
                 .toList();
     }
 

@@ -31,8 +31,8 @@ import java.util.function.Predicate;
  *       {@code AND status = '...'}。这不只是并发保护，更是幂等的关键一道：
  *       支付回调重推时，第二次会因为状态已变而拿到 0 行受影响。
  *       假实现若忽略状态直接改，就会把「重复回调只记账一次」这条测成永远通过。</li>
- *   <li><b>月度累计只算 PAID、按 start_time 归集</b> ——
- *       写成按 {@code paidAt} 归集的话，跨零点结算的夜单会跳到下个月，
+ *   <li><b>月度累计只算 PAID、按 end_time 归集</b> ——
+ *       写成按 {@code paidAt} 归集的话，用户拖几天付款就把归月拖走了，
  *       而这种错在单测里完全看不出来。</li>
  *   <li><b>逻辑删除过滤</b> —— 真实库里由全局配置与手写 SQL 里的
  *       {@code deleted = 0} 共同保证。</li>
@@ -122,6 +122,7 @@ public class FakeOrderMapper implements InvocationHandler {
             case "selectByOrderNo" -> selectByOrderNo((String) args[0]);
             case "selectActiveByUser" -> selectActiveByUser((Long) args[0]);
             case "selectUnsettledByUser" -> selectUnsettledByUser((Long) args[0]);
+            case "selectPaidOverlapping" -> selectPaidOverlapping(args);
             case "selectActiveByStore" -> selectActiveByStore((Long) args[0]);
             case "selectMonthPaidAmount" -> selectMonthPaidAmount(args);
             case "selectTotalStayMinutes" -> selectTotalStayMinutes(args);
@@ -224,6 +225,33 @@ public class FakeOrderMapper implements InvocationHandler {
     }
 
     /**
+     * 查某人已支付、且与给定区间相交的订单（排除指定 ID）。
+     *
+     * <p>与真实 SQL 逐条对齐：{@code status = 'PAID'}、{@code id <> ?}、
+     * 区间相交用<b>半开口径</b>（{@code start_time &lt; to AND end_time &gt; from}）、
+     * 按开始时间升序。半场封顶的跨订单累计靠它 ——
+     * 口径写成「包含关系」而不是「相交」的话，首尾相接的两单会互相漏算。
+     *
+     * @param args 依次为用户 ID、要排除的订单 ID、区间起点、区间终点
+     * @return 相交的已支付订单；没有则返回空列表
+     */
+    private List<Order> selectPaidOverlapping(Object[] args) {
+        Long userId = (Long) args[0];
+        Long excludeId = (Long) args[1];
+        LocalDateTime from = (LocalDateTime) args[2];
+        LocalDateTime to = (LocalDateTime) args[3];
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getUserId(), userId))
+                .filter(o -> OrderStatus.PAID.name().equals(o.getStatus()))
+                .filter(o -> !Objects.equals(o.getId(), excludeId))
+                .filter(o -> o.getStartTime() != null && o.getStartTime().isBefore(to))
+                .filter(o -> o.getEndTime() != null && o.getEndTime().isAfter(from))
+                .sorted(Comparator.comparing(Order::getStartTime))
+                .toList();
+    }
+
+    /**
      * 查询某人最近一条未结清的订单（使用中或待支付），取 id 最大的一条。
      *
      * <p>与真实 SQL 的 {@code status IN ('IN_USE', 'PENDING_PAYMENT')}
@@ -272,7 +300,7 @@ public class FakeOrderMapper implements InvocationHandler {
     /**
      * 汇总某人某月已支付订单的实付额。
      *
-     * <p>逐条复刻真实 SQL 的四个条件：只算 PAID、按 start_time 归集、
+     * <p>逐条复刻真实 SQL 的四个条件：只算 PAID、按 <b>end_time 归集</b>、
      * 半开区间、排除已删除。少任何一条，都会让「优惠门槛」的判定在单测里失真。
      *
      * @param args 依次为 userId、from、to
@@ -287,9 +315,9 @@ public class FakeOrderMapper implements InvocationHandler {
                 .filter(FakeOrderMapper::isAlive)
                 .filter(o -> Objects.equals(o.getUserId(), userId))
                 .filter(o -> OrderStatus.PAID.name().equals(o.getStatus()))
-                .filter(o -> o.getStartTime() != null
-                        && !o.getStartTime().isBefore(from)
-                        && o.getStartTime().isBefore(to))
+                .filter(o -> o.getEndTime() != null
+                        && !o.getEndTime().isBefore(from)
+                        && o.getEndTime().isBefore(to))
                 .map(Order::getPayableAmount)
                 .filter(Objects::nonNull)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -540,10 +568,10 @@ public class FakeOrderMapper implements InvocationHandler {
 
     /**
      * 某月的在店时长 —— 归月口径与 {@link #selectMonthPaidAmount} 逐字一致：
-     * 按 {@code start_time} 的半开区间 {@code [from, to)} 归集，不是 {@code end_time}。
+     * 按 {@code end_time} 的半开区间 {@code [from, to)} 归集。
      *
-     * <p>写成按 {@code end_time} 归集的话，跨零点结算的夜单会跳到下个月，
-     * 而这种错在单测里完全看不出来。
+     * <p>一个按 {@code start_time}、另一个按 {@code end_time} 的话，跨月那一刻
+     * 就会出现「消费算上月、时长算本月」，而这种错在单测里完全看不出来。
      *
      * @param args 依次为 userId、from、to
      * @return 该月分钟数；无记录时返回 0
@@ -557,9 +585,9 @@ public class FakeOrderMapper implements InvocationHandler {
                 .filter(FakeOrderMapper::isAlive)
                 .filter(o -> Objects.equals(o.getUserId(), userId))
                 .filter(o -> OrderStatus.PAID.name().equals(o.getStatus()))
-                .filter(o -> o.getStartTime() != null
-                        && !o.getStartTime().isBefore(from)
-                        && o.getStartTime().isBefore(to))
+                .filter(o -> o.getEndTime() != null
+                        && !o.getEndTime().isBefore(from)
+                        && o.getEndTime().isBefore(to))
                 .map(Order::getStayMinutes)
                 .filter(Objects::nonNull)
                 .mapToLong(Integer::longValue)

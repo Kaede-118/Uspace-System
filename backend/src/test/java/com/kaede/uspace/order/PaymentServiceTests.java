@@ -3,6 +3,7 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.CreatePaymentRequest;
 import com.kaede.uspace.order.dto.PaymentCreateVo;
 import com.kaede.uspace.order.dto.PaymentNotifyRequest;
@@ -130,6 +131,9 @@ class PaymentServiceTests {
 
     private PaymentService service;
 
+    /** 交易流水（2026-10-10 加）：到账那一行写在 PaymentService 里，用它断言 */
+    private final FakeTradeLogMapper tradeLogMapper = new FakeTradeLogMapper();
+
     @BeforeEach
     void setUp() {
         publishedEvents.clear();
@@ -140,7 +144,7 @@ class PaymentServiceTests {
                                 publishedEvents::add),
                         new MonthlyCardPaymentTargetHandler(cardOrderMapper.asMapper(),
                                 cardMapper.asMapper(), promotionProperties)),
-                userMapper.asMapper());
+                userMapper.asMapper(), new TradeLogService(tradeLogMapper.asMapper()));
     }
 
     /**
@@ -648,7 +652,8 @@ class PaymentServiceTests {
         Order order = seedPendingOrder(USER_ID);
         seedUser(USER_ID, BigDecimal.ZERO);
 
-        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L);
+        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L,
+                TradeSource.ADMIN);
 
         Order saved = orderMapper.get(order.getId());
         assertEquals(OrderStatus.PAID.name(), saved.getStatus(), "落账后转已支付");
@@ -667,11 +672,13 @@ class PaymentServiceTests {
         seedUser(USER_ID, BigDecimal.ZERO);
         PaymentTarget target = targetOf(order);
 
-        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null);
+        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null,
+                TradeSource.WEB);
         // 第二次拿的是同一个 target 对象（status 仍是 PENDING_PAYMENT 的快照），
         // 所以挡下它的是 markPaid 的状态守卫，而不是 isPaid() 那个前置判断 ——
         // 两道防线各测各的
-        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null);
+        service.settleByProof(target, PaymentChannel.QR_UPLOAD, "WX-TX-9", null,
+                TradeSource.WEB);
 
         assertEquals(0, AMOUNT.compareTo(userMapper.asMapper().selectById(USER_ID).getOrderPaid()),
                 "重复累加会让用户的累计消费凭空翻倍，而订单本身看不出任何异常");
@@ -687,7 +694,8 @@ class PaymentServiceTests {
         orderMapper.get(order.getId()).setStatus(OrderStatus.PAID.name());
         seedUser(USER_ID, BigDecimal.ZERO);
 
-        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L);
+        service.settleByProof(targetOf(order), PaymentChannel.QR_UPLOAD, "WX-TX-9", 9L,
+                TradeSource.ADMIN);
 
         // 用 signum() 判「是不是零」而不是 equals —— BigDecimal 的 equals 连标度
         // 一起比，0 与 0.00 不相等，而这里只关心数值

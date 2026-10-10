@@ -24,7 +24,7 @@ public class CreateProductOrderRequest {
      * <p><b>它是一个常量而不是写在注解里的字面量</b>：{@code ProductService#createOrder}
      * 也要用它 —— 群里下单那条路<b>绕过了 Web 层的 Bean Validation</b>
      * （注解只在 Controller 入参上生效），只靠这里的 {@code @Max} 挡不住
-     * {@code /可乐-100}，而一个负数数量会算出一笔负金额的订单。
+     * {@code fw可乐-100}，而一个负数数量会算出一笔负金额的订单。
      * 两处各写一份 99 的话，改一处漏一处不会有任何报错。
      */
     public static final int MAX_QUANTITY = 99;

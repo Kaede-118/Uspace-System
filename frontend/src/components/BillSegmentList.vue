@@ -78,6 +78,24 @@ const hasCardFree = computed(() => Number(shownCardFree.value) > 0)
 const hasActivityFree = computed(() => Number(shownActivityFree.value) > 0)
 /** 实付与合计不同才需要单独列「应付」那一行。 */
 const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmount.value))
+
+/*
+ * 半场累计封顶的解释（2026-10-10）：封顶价按【半场】算 ——
+ * 同一个半场（日场 10:00-22:00、夜场 22:00-次日 10:00）里，
+ * 被包场剪开的几截、被活动 / 月卡切开的几段、乃至同一半场内的【其它订单】
+ *（玩一段结算再开新单），实收合计不超过一个封顶价。
+ *
+ * 本段因「之前已经收过钱」而少收时，后端在段上留了
+ * halfPeriodUsedBefore（本段之前已收）与 halfPeriodCutAmount（本段少收的）。
+ * 不解释一句的话，那行 ¥0.00 看起来就像算错了 —— 用户实测问过这个
+ *（「日场怎么也免费了」：其实是该半场内已付满封顶，不是月卡免的）。
+ *
+ * 口径：整单里找【第一个】被削的段取它的 usedBefore —— 它就是「该半场
+ * 在本段之前的累计」，而账单按时间排列，第一个被削的段最能说明问题。
+ */
+const quotaCutSegment = computed(() =>
+  segments.value.find((s) => Number(s.halfPeriodCutAmount) > 0) || null
+)
 </script>
 
 <template>
@@ -93,6 +111,13 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
           -->
           <span v-if="seg.freeByActivity" class="bill__free bill__free--activity">活动免费</span>
           <span v-else-if="seg.freeByCard" class="bill__free">月卡免费</span>
+          <!--
+            因半场累计而少收（不是免费）：与上面两种互斥 ——
+            被月卡 / 活动免掉的段 cutAmount 是 0（它们本来就收 0）
+          -->
+          <span v-if="Number(seg.halfPeriodCutAmount) > 0" class="bill__free bill__free--quota">
+            本时段已收满
+          </span>
         </span>
         <span class="bill__duration">{{ formatDuration(seg.minutes) }}</span>
       </div>
@@ -150,6 +175,11 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
     <p v-if="monthSpentBefore !== null && hasDiscount" class="bill__hint">
       结算前本月已消费 ¥{{ formatMoney(monthSpentBefore) }}，本单按优惠价计费
     </p>
+    <p v-if="quotaCutSegment" class="bill__hint">
+      同一时段（日场 / 夜场）内的消费合计只收一次封顶价。
+      本单之前该时段内已收 ¥{{ formatMoney(quotaCutSegment.halfPeriodUsedBefore) }}，
+      额度用尽的部分不再计费
+    </p>
   </div>
 </template>
 
@@ -196,6 +226,15 @@ const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmoun
 .bill__free--activity {
   background: var(--c-primary-pale);
   color: var(--c-primary);
+}
+
+/*
+ * 「本时段已收满」用警告色 —— 它解释的是一段明显反常的 0 元 / 小额，
+ * 与上面两种「免费」不是一回事（用户没有获得好处，是额度早用掉了），
+ * 用中性灰会被误读成又一处优惠。
+ */
+.bill__free--quota {
+  color: var(--c-warning);
 }
 
 .bill__duration {

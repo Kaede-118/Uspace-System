@@ -330,6 +330,38 @@ public class DeviceService {
         return BizResult.ok(null);
     }
 
+    /**
+     * 按名字找一台机台 —— <b>群里的「改状况」指令走这条</b>（{@code fw拍拍机 1 号维护中}）。
+     *
+     * <p>群里没有地方填机台 ID，管理员打出来的就是名字，所以名字必须能定位到唯一一台。
+     * 机台名没有唯一键，因此结果有三种：<b>没有</b>（{@link ErrorCode#DEVICE_NOT_FOUND}）、
+     * <b>唯一一台</b>（成功）、<b>多台同名</b>（{@link ErrorCode#DEVICE_NAME_AMBIGUOUS}）。
+     * 多台时<b>刻意不挑一台返回</b> —— 调用方拿去改状况时「改错了哪台」在界面上看不出来，
+     * 而拒绝执行只会让群里的回复说一句「有多台同名」，管理员一看就懂。
+     *
+     * <p>名字按<b>完全一致</b>匹配（解析器已 trim 过）。不做模糊匹配：
+     * 群里打错半个字，改的就是另一台机器，且当场没人会发现。
+     *
+     * @param name 机台名，调用方须已去掉首尾空白
+     * @return 命中唯一一台时成功；没有或多台同名时失败并给出对应错误码
+     */
+    public BizResult<DeviceVo> findByName(String name) {
+        Long storeId = storeMapper.selectCurrentId();
+        if (storeId == null) {
+            return BizResult.fail(ErrorCode.STORE_NOT_FOUND);
+        }
+        List<Device> matched = deviceMapper.selectListByName(storeId, name);
+        if (matched.isEmpty()) {
+            return BizResult.fail(ErrorCode.DEVICE_NOT_FOUND);
+        }
+        if (matched.size() > 1) {
+            return BizResult.fail(ErrorCode.DEVICE_NAME_AMBIGUOUS);
+        }
+        Device device = matched.get(0);
+        return BizResult.ok(DeviceVo.from(device,
+                equipmentTypeMapper.selectTypeById(device.getTypeId())));
+    }
+
     // ==================================================================
     // 内部辅助
     // ==================================================================

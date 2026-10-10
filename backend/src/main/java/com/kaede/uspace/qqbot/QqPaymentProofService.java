@@ -1,6 +1,7 @@
 package com.kaede.uspace.qqbot;
 
 import com.kaede.uspace.common.result.BizResult;
+import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.PaymentProofImageService;
 import com.kaede.uspace.order.PaymentProofService;
 import com.kaede.uspace.order.PaymentTargetHandler;
@@ -29,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h3>它解决什么</h3>
  *
  * <p>扫码转账那条路要在<b>网页端</b>上传付款截图。但顾客付款时人就在群里
- * （{@code /结账}、{@code /可乐-2} 都是从群里发的），让他为了传张图再打开一次网页
+ * （{@code fw结账}、{@code fw可乐-2} 都是从群里发的），让他为了传张图再打开一次网页
  * 是白费一道手续。于是：<b>那两条指令之后，这个人发的下一张图就当付款截图收下</b>
  * —— 取图、识别、提交凭证，与网页那条路<b>走的是同一套服务</b>
  * （{@link PaymentProofImageService} 与 {@link PaymentProofService}），
@@ -42,7 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * （订单当场转已支付、商品当场扣库存）。任何一张无关的图被当成凭证，
  * 就是把一笔没收到钱的账标成已收，事后只能靠管理员人工发现。
  *
- * <p><b>那两条写指令就是那道闸</b>（{@code /结账}、{@code /商品名-数量}）：
+ * <p><b>那两条写指令就是那道闸</b>（{@code fw结账}、{@code fw商品名-数量}）：
  * 它们同时说明「这个人有意传凭证」与「这笔账正等着付」。
  * 闸门之外，本类对任何图片都不作声。
  *
@@ -144,7 +145,7 @@ public class QqPaymentProofService {
     /**
      * 登记：让这个人接下来发的那张图当付款截图。
      *
-     * <p>由两条写指令在目标建好之后调用（{@code /结账} 与 {@code /商品名-数量}）。
+     * <p>由两条写指令在目标建好之后调用（{@code fw结账} 与 {@code fw商品名-数量}）。
      * 重复调用以最后一次为准 —— 同一个人连着下两单，等的自然是最近那一笔。
      * 这是刻意的：群消息是线性的，他此刻要付的就是刚说的那笔。
      *
@@ -192,7 +193,7 @@ public class QqPaymentProofService {
         if (pending.at().plus(WAIT_WINDOW).isBefore(LocalDateTime.now(clock))) {
             waiting.remove(qq);
             client.sendGroupMessage(groupId,
-                    "刚才那张是超过 5 分钟才发的，已经不再受理了。要补付款截图的话，重新发一次那条指令。");
+                    "该截图超过 5 分钟的受理时限，已不再受理。如需补交付款截图，请重新发送 fw结账 指令。");
             return;
         }
 
@@ -203,7 +204,7 @@ public class QqPaymentProofService {
         if (target == null) {
             waiting.remove(qq);
             client.sendGroupMessage(groupId,
-                    "没找到那笔待付的账，付款截图没有提交。到网页端看一下订单列表吧。");
+                    "未找到待付订单，付款截图未提交。请前往网页端查看订单列表。");
             return;
         }
         if (!target.isPendingPayment()) {
@@ -211,7 +212,7 @@ public class QqPaymentProofService {
             // 用户在网页端付过之后，这张图不该再提交一遍（会撞 uk_target，也没有意义）
             waiting.remove(qq);
             client.sendGroupMessage(groupId,
-                    "这笔账已经不是待支付状态了（可能你在网页端付过了），这张图就没有再重复提交。");
+                    "该订单已不是待支付状态（可能已在网页端完成付款），本次截图未重复提交。");
             return;
         }
 
@@ -220,31 +221,35 @@ public class QqPaymentProofService {
         if (bytes == null) {
             // 与「图太大」「地址取不到」等情形同一句：反正就是没收到，让他重发或走网页
             client.sendGroupMessage(groupId,
-                    "这张图没取到（可能太大了），麻烦重发一次，或者到网页端上传。");
+                    "截图获取失败（可能超出大小上限），请重新发送，或前往网页端上传。");
             return;
         }
 
-        BizResult<ProofImageVo> stored = proofImageService.upload(bytes);
+        BizResult<ProofImageVo> stored = proofImageService.upload(bytes, pending.userId());
         if (!stored.isSuccess()) {
             client.sendGroupMessage(groupId,
-                    "这张图没能收下：" + stored.resolveMessage() + "。到网页端传一张清晰的试试。");
+                    "截图受理失败：" + stored.resolveMessage() + "。请前往网页端上传一张清晰的截图。");
             return;
         }
 
+        // ⚠️ 来源传 QQ：这条路的流水上要看得出来是群里传的图，
+        // 与网页端那条区分开（两处走的是同一个 submit）
         BizResult<ProofSubmitVo> submitted = paymentProofService.submit(
-                pending.userId(), buildRequest(target, stored.getData()));
+                pending.userId(), buildRequest(target, stored.getData()), TradeSource.QQ);
         // 无论提交成败，这次等待都结束了 —— 不然他会一直以为自己还欠一张图
         waiting.remove(qq);
 
         if (!submitted.isSuccess()) {
             client.sendGroupMessage(groupId,
-                    "付款截图提交失败：" + submitted.resolveMessage() + "。到网页端再传一次吧。");
+                    "付款截图提交失败：" + submitted.resolveMessage() + "。请前往网页端重新上传。");
             return;
         }
 
+        // isDelivered 一并报给用户：识别到有效单号的那两类当场就结清了，
+        // 没识别到的还挂在待复核上 —— 两句话必须分开说，否则他会以为钱已经算数了
         client.sendGroupMessage(groupId, QqReplyText.proofAccepted(
                 target.getOutTradeNo(), stored.getData().getOcrAmount(),
-                stored.getData().getOcrPaymentNo()));
+                stored.getData().getOcrPaymentNo(), submitted.getData().isDelivered()));
         log.info("[QQ机器人] 群内付款截图已受理 target={}#{} 单号={}",
                 pending.targetType(), pending.targetId(), target.getOutTradeNo());
     }

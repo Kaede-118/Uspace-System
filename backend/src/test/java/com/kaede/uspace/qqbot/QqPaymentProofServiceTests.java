@@ -104,7 +104,7 @@ class QqPaymentProofServiceTests {
                 "登记之后发图必须至少有一句回话。一个字都没有，就说明等待表的键写错了 —— "
                         + "expect 用 sys_user.id、handleImages 用 QQ 号时就是这个症状"
                         + "（两者是不同的数：id=" + USER_ID + "、qq=" + QQ + "）");
-        assertTrue(client.groupMessages.get(0).contains("没找到那笔待付的账"),
+        assertTrue(client.groupMessages.get(0).contains("未找到待付订单"),
                 client.groupMessages.get(0));
     }
 
@@ -118,7 +118,7 @@ class QqPaymentProofServiceTests {
 
         assertEquals(USER_ID, orderHandler.lastUserId,
                 "拿 QQ 号去载入目标会查不到（两者是不同的数），而且查不到只会回一句"
-                        + "「没找到那笔待付的账」，看起来像「单子丢了」而不是「ID 传错了」");
+                        + "「未找到待付订单」，看起来像「单子丢了」而不是「ID 传错了」");
         assertEquals(ORDER_ID, orderHandler.lastTargetId);
         assertNull(productHandler.lastTargetId, "登记的是订单，就不该去问商品那个处理器");
     }
@@ -139,7 +139,7 @@ class QqPaymentProofServiceTests {
         assertEquals(USER_ID, productHandler.lastUserId);
         assertNull(orderHandler.lastTargetId,
                 "⚠️ 类型的路由写错的话，拿商品单 ID 去订单表里查 —— 查到的是「不存在」，"
-                        + "用户看到的是「没找到那笔待付的账」，而单子明明就在那里");
+                        + "用户看到的是「未找到待付订单」，而单子明明就在那里");
     }
 
     @Test
@@ -151,7 +151,7 @@ class QqPaymentProofServiceTests {
         service.handleImages(imageEvent(QQ));
 
         assertEquals(1, client.groupMessages.size());
-        assertTrue(client.groupMessages.get(0).contains("已经不是待支付状态"),
+        assertTrue(client.groupMessages.get(0).contains("不是待支付状态"),
                 "他在网页端付过了 —— 要说明白，别让他以为图没发出去：" + client.groupMessages.get(0));
     }
 

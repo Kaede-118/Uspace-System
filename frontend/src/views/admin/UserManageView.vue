@@ -2,7 +2,7 @@
 /**
  * 用户管理（运营后台）。
  *
- * <p>看全部用户、按几个维度筛、按几个维度排、改资料与启停用。
+ * <p>看全部用户、按几个维度筛、按几个维度排、改资料、改角色与启停用。
  *
  * <h3>这一页有两个字段不是「用户表上的东西」</h3>
  *
@@ -18,8 +18,9 @@
  * 管理员改不走验证 —— 他知道谁是谁 —— 但<b>照样查重</b>。
  * 这一页是那个「联系管理员」的落点。
  */
-import { ref, onMounted } from 'vue'
-import { listUsers, updateUser, updateUserStatus } from '@/api/admin'
+import { ref, computed, onMounted } from 'vue'
+import { listUsers, updateUser, updateUserStatus, updateUserRole } from '@/api/admin'
+import { userState } from '@/stores/user'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatDateTime } from '@/utils/format'
@@ -231,6 +232,55 @@ async function confirmToggle() {
   }
 }
 
+/* ---------------- 改角色 ---------------- */
+
+/** 正在改角色的那条记录。null 表示弹层关着 */
+const roleEditing = ref(null)
+const roleError = ref('')
+const roleSaving = ref(false)
+
+/**
+ * 当前登录的管理员自己。
+ *
+ * <p>⚠️ 后端<b>禁止改自己的角色</b>（把自己降成普通用户后就再也进不去后台了），
+ * 所以前端把那一行的按钮直接禁掉 —— 让他在点之前就知道，
+ * 而不是点了才收到一句报错。
+ */
+const myId = computed(() => userState.user?.id)
+
+function askRole(user) {
+  roleEditing.value = user
+  roleError.value = ''
+}
+
+/**
+ * 提交改角色。
+ *
+ * <p>角色只有 {@code USER} / {@code ADMIN} 两个取值，目标值由调用处传入：
+ * 弹层按当前角色给出那一个反向动作，不做下拉 —— 就两个选项，
+ * 下拉反而多一步。改完<b>立即生效、不必重新登录</b>
+ * （鉴权每请求重读库里的角色，这也正是「改角色不升 token 版本」的依据）。
+ *
+ * @param {string} role 目标角色 USER / ADMIN
+ */
+async function confirmRole(role) {
+  const user = roleEditing.value
+  if (!user) return
+  roleSaving.value = true
+  roleError.value = ''
+  try {
+    await updateUserRole(user.id, role)
+    roleEditing.value = null
+    toastSuccess(role === 'ADMIN' ? '已设为管理员' : '已降为普通用户')
+    load()
+  } catch (err) {
+    // ⚠️ 错误走弹层而不是 toast —— 层级问题，理由同 confirmToggle
+    roleError.value = errorMessage(err, '操作失败')
+  } finally {
+    roleSaving.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -314,6 +364,16 @@ onMounted(load)
 
           <div class="urow__ops">
             <button class="btn btn-ghost urow__op" @click="openEdit(u)">编辑资料</button>
+            <!-- ⚠️ 自己那一行禁掉 —— 后端禁止改自己的角色（降级后就进不去后台了），
+                 前端提前拦一道，让他在点之前就知道，而不是点了才吃一句报错 -->
+            <button
+              class="btn btn-ghost urow__op"
+              :disabled="u.id === myId"
+              :title="u.id === myId ? '不能修改自己的角色 —— 降级后就进不去后台了' : ''"
+              @click="askRole(u)"
+            >
+              改角色
+            </button>
             <button class="btn btn-ghost urow__op" @click="askToggle(u)">
               {{ u.status === 1 ? '禁用' : '启用' }}
             </button>
@@ -397,6 +457,44 @@ onMounted(load)
           @click="confirmToggle"
         >
           确定
+        </button>
+      </div>
+    </AdminSheet>
+
+    <!-- ---------------- 改角色 ---------------- -->
+    <AdminSheet
+      :visible="!!roleEditing"
+      :error="roleError"
+      title="修改角色"
+      mask-closable
+      @update:visible="roleEditing = null"
+    >
+      <p class="confirm">
+        <b>{{ roleEditing?.nickname || roleEditing?.username }}</b> 当前是
+        <b>{{ roleEditing?.role === 'ADMIN' ? '管理员' : '普通用户' }}</b>。
+      </p>
+      <p class="form__note">
+        ⚠️ 设为管理员后，<b>运营后台的全部功能</b>对他开放（用户、门店、设备、包场、
+        收款复核……），在店名册上也会挂 STAFF 徽章。改动立即生效、不必重新登录；
+        降回普通用户同理，他手上的凭证也不会被撤销。
+      </p>
+      <div class="confirm__ops">
+        <button class="btn btn-ghost" @click="roleEditing = null">取消</button>
+        <button
+          v-if="roleEditing?.role !== 'ADMIN'"
+          class="btn btn-primary"
+          :disabled="roleSaving"
+          @click="confirmRole('ADMIN')"
+        >
+          {{ roleSaving ? '处理中…' : '设为管理员' }}
+        </button>
+        <button
+          v-else
+          class="btn btn-danger"
+          :disabled="roleSaving"
+          @click="confirmRole('USER')"
+        >
+          {{ roleSaving ? '处理中…' : '降为普通用户' }}
         </button>
       </div>
     </AdminSheet>
@@ -518,6 +616,7 @@ onMounted(load)
 
 .urow__ops {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   margin-top: var(--sp-3);
 }
@@ -527,6 +626,13 @@ onMounted(load)
   height: 32px;
   padding: 0 var(--sp-3);
   font-size: 12px;
+}
+
+/* 禁用态：自己那一行的「改角色」用得上（后端禁止改自己的角色）。
+   全局那套按钮样式没有覆盖 disabled，不写这一条的话它看起来跟能点一样 */
+.urow__op:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ---------- 弹层表单 ---------- */

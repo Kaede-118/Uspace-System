@@ -118,6 +118,73 @@ public interface OrderMapper extends BaseMapper<Order> {
     Order selectUnsettledByUser(@Param("userId") Long userId);
 
     /**
+     * 查询某人全部<b>未付款</b>的订单（{@code PENDING_PAYMENT} 或 {@code REJECTED}）。
+     *
+     * <p>与 {@link #selectUnsettledByUser} 的区别在<b>两个方向</b>，都不许合并：
+     * <ul>
+     *   <li>它是<b>复数</b> —— 调用方（群里的 {@code fw未付款}）要把账一次列全。
+     *       下单校验挡住了新的并发单，但历史数据里可能挂着不止一笔</li>
+     *   <li>它<b>不含 {@code IN_USE}</b> —— 正在计时的那单钱还没算出来，
+     *       不是「未付款」。要看那单的是 {@code fw当前订单}（走
+     *       {@code selectActiveByUser}）</li>
+     * </ul>
+     *
+     * @param userId 用户 ID
+     * @return 未付款的订单，最近的在前；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND user_id = #{userId}
+               AND status IN ('PENDING_PAYMENT', 'REJECTED')
+             ORDER BY id DESC
+            """)
+    List<Order> selectUnpaidByUser(@Param("userId") Long userId);
+
+    /**
+     * 查某人在某区间内<b>已支付</b>、且不是本单的订单 —— 供「半场封顶跨订单累计」。
+     *
+     * <p>半场封顶是<b>跨订单</b>的：用户玩一段、结算、再开新单是正常操作，
+     * 额度只看本单的话，拆单就能绕过封顶。计算新单的账单前要用本查询
+     * 把同一半场里已经付过的钱找出来（见 {@code OrderService#seedHalfPeriodUsage}）。
+     *
+     * <p>几条口径：
+     * <ul>
+     *   <li><b>只认 {@code PAID}</b> —— 欠费的单会挡住新单（下单前的校验），
+     *       能开新单时以前的单必然付清了，所以「已收」就是已支付单的实收。
+     *       把未付的也算进来的话，用户看一眼没付款就能压住自己的额度</li>
+     *   <li><b>区间相交用半开口径</b>（{@code start_time < to AND end_time > from}），
+     *       与全项目一致。恰好挨着边界的不算 —— 夜场单玩到 10:00 整走，
+     *       它不属于 10:00 开始的日场</li>
+     *   <li>返回<b>一批</b>且带 {@code bill_snapshot}：调用方按段归位到各半场，
+     *       跨半场的历史单会被拆到各自半场的桶里，因此范围放宽无害、漏掉才有害</li>
+     * </ul>
+     *
+     * @param userId    用户 ID
+     * @param excludeId 要排除的订单 ID（本单自己 —— 老订单重算时它是 PAID，
+     *                  不排除会自己扣自己）
+     * @param from      区间起点（半场窗口的起点）
+     * @param to        区间终点（半场窗口的终点）
+     * @return 相交的已支付订单，按开始时间升序；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND user_id   = #{userId}
+               AND status    = 'PAID'
+               AND id       <> #{excludeId}
+               AND start_time < #{to}
+               AND end_time   > #{from}
+             ORDER BY start_time
+            """)
+    List<Order> selectPaidOverlapping(@Param("userId") Long userId,
+                                      @Param("excludeId") Long excludeId,
+                                      @Param("from") LocalDateTime from,
+                                      @Param("to") LocalDateTime to);
+
+    /**
      * 查询某门店当前所有进行中的订单（{@code IN_USE}）。
      *
      * <p>供包场开始时的清场使用：包场一开始，仍在店里的非参与者要被结算离场。
@@ -146,13 +213,29 @@ public interface OrderMapper extends BaseMapper<Order> {
      * <p>这是月度累计消费优惠的判定依据，口径有几条硬要求，逐条都容易踩坑：
      * <ul>
      *   <li><b>只算 {@code PAID}</b> —— 欠着费不算「消费」，否则用户可以靠不付款堆高累计</li>
-     *   <li><b>按 {@code start_time} 归集</b>，不是 {@code paid_at} ——
-     *       跨零点结算的夜单不会跳到下个月，管理员事后修正时长也不会让历史订单的优惠判定漂移</li>
+     *   <li><b>按 {@code end_time}（离场时刻）归集</b>，不是 {@code start_time}、也不是 {@code paid_at} ——
+     *       月底 23:xx 进店、次日凌晨离店的夜单计入<b>离场那个月</b>，
+     *       月初凌晨的消费因此不会被算进上个月；而用 {@code paid_at} 的话，
+     *       用户拖几天付款就把归月拖走了</li>
      *   <li><b>不含月卡充值</b> —— 这是天然成立的：月卡购买不生成 {@code biz_order} 行。
      *       月卡本身已是独立优惠，再顶满门槛等于一笔钱吃两次优惠</li>
      *   <li><b>本单不计入</b> —— 同样是天然成立的：结算时本单还是 {@code PENDING_PAYMENT}。
      *       这避开了「本单算完把自己顶过门槛」的循环依赖</li>
      * </ul>
+     *
+     * <p>⚠️ <b>「一笔钱计入哪个月」与「结算时用哪个月的累计判优惠」是两件事，不要合并</b>：
+     * 本方法管前半件，取的是<b>离场月</b>；结算时判本单走不走优惠价，取的是
+     * <b>订单开始月</b>（见 {@code OrderService#queryMonthSpent}）。于是一笔
+     * 8/31 进店、9/1 离店的夜单，享的是 <b>8 月</b>已挣到的优惠资格，
+     * 却计入 <b>9 月</b>的累计。这个分工是刻意的：判定跟着订单走，是因为
+     * 预览与结算必须用同一个口径 —— 若改成按结算时刻判，用户在零点前看预览、
+     * 零点后点「停止计时」，页面上的价与实际收的价就会不同；
+     * 而归集跟着离场走，月初凌晨的消费才不会被算进上个月。
+     *
+     * <p>⚠️ <b>{@code end_time} 非空是本查询的不变式</b>：结算时才写这个字段、
+     * 同时把状态流转出去，所以 {@code PAID} 必有 {@code end_time}。
+     * 若将来新增一条「直接置为 PAID」的写入路径而漏写它，那笔消费会
+     * <b>静默漏算</b> —— 不报任何错，只是数字偏小。
      *
      * <p>区间是<b>半开</b> {@code [from, to)}，与全项目的区间口径一致，
      * 调用方传「月初」与「下月初」。
@@ -175,8 +258,8 @@ public interface OrderMapper extends BaseMapper<Order> {
              WHERE deleted = 0
                AND user_id    = #{userId}
                AND status     = 'PAID'
-               AND start_time >= #{from}
-               AND start_time <  #{to}
+               AND end_time  >= #{from}
+               AND end_time  <  #{to}
             """)
     BigDecimal selectMonthPaidAmount(@Param("userId") Long userId,
                                      @Param("from") LocalDateTime from,
@@ -214,13 +297,14 @@ public interface OrderMapper extends BaseMapper<Order> {
      * 统计某人某月的在店时长（分钟）。
      *
      * <p><b>归月字段与 {@link #selectMonthPaidAmount} 逐字一致</b>（同样是
-     * {@code start_time} 的<b>半开</b>区间 {@code [from, to)}）——
+     * {@code end_time} 的<b>半开</b>区间 {@code [from, to)}）——
      * 两个数字在「我的」页并排显示，归月口径一旦有出入，跨月那一刻就会出现
      * 「消费算上月、时长算本月」的错位，而且不报任何错。
      * 调用方传「月初」与「下月初」，与那个方法共用同一处区间计算。
      *
-     * <p>按 {@code start_time} 而不是 {@code end_time} 归月：跨零点结算的夜单
-     * 不该跳到下个月，这与月度优惠的归集口径也是同一条。
+     * <p>按 {@code end_time} 归月而不是 {@code start_time}：月底进店、次日凌晨离店的
+     * 夜单中间跨了一天，但「这段消费算哪个月」由离场时刻定 ——
+     * 月初凌晨的消费因此不会被算进上个月，与消费额那条是同一条口径。
      *
      * @param userId 用户 ID
      * @param from   区间起点（含），通常是当月 1 日 00:00
@@ -233,8 +317,8 @@ public interface OrderMapper extends BaseMapper<Order> {
              WHERE deleted = 0
                AND user_id    = #{userId}
                AND status     = 'PAID'
-               AND start_time >= #{from}
-               AND start_time <  #{to}
+               AND end_time  >= #{from}
+               AND end_time  <  #{to}
             """)
     Long selectMonthStayMinutes(@Param("userId") Long userId,
                                 @Param("from") LocalDateTime from,
@@ -333,9 +417,9 @@ public interface OrderMapper extends BaseMapper<Order> {
                        @Param("endTime") LocalDateTime endTime);
 
     /**
-     * 记下最新一串一次性密码（模块 11 的群指令 {@code /开门} 用）。
+     * 记下最新一串一次性密码（模块 11 的群指令 {@code fw开门} 用）。
      *
-     * <p>每次 {@code /开门} 都会取一串新的并<b>覆盖</b>这里 —— 不做复用，
+     * <p>每次 {@code fw开门} 都会取一串新的并<b>覆盖</b>这里 —— 不做复用，
      * 因为「判断旧的那串还在不在」同样要花一次门锁云调用，与直接生成成本相同
      * （详见 {@code OneTimePasscodeService} 的类注释）。
      *

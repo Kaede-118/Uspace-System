@@ -60,6 +60,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -111,7 +112,7 @@ class OrderServiceTests {
     private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
     private final MonthlyCardService monthlyCardService = new MonthlyCardService(
             cardMapper.asMapper(), cardOrderMapper.asMapper(),
-            new PromotionProperties(), new BillingProperties());
+            new PromotionProperties(), new BillingProperties(), event -> { });
 
     /** 免费活动。默认一场都没有 —— 即绝大多数既有用例的场景 */
     private final FakeFreePeriodMapper freePeriodMapper = new FakeFreePeriodMapper();
@@ -1164,9 +1165,13 @@ class OrderServiceTests {
     @DisplayName("统计：累计含全部历史，本月只含本月，归月口径与月累计消费一致")
     void stats_splitsTotalAndMonthWithSameRangeAsMonthSpent() {
         LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
-        // 紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
-        seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.plusMonths(1).minusSeconds(1))
-                .setStayMinutes(20);
+        LocalDateTime nextMonth = thisMonth.plusMonths(1);
+        // 离场时刻紧挨着下月起点之前一秒 —— 半开区间下仍属于本月。
+        // ⚠️ 这里必须显式写 endTime：归月按离场时刻走，而 seedPaidOrder 补的是
+        // startTime + 1 小时，照旧写法那笔单的离场时刻会落到下月去
+        Order edge = seedPaidOrder(USER_ID, BigDecimal.TEN, nextMonth.minusHours(2));
+        edge.setEndTime(nextMonth.minusSeconds(1));
+        edge.setStayMinutes(20);
         seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.plusDays(1)).setStayMinutes(120);
         seedPaidOrder(USER_ID, BigDecimal.TEN, thisMonth.minusDays(5)).setStayMinutes(300);
 
@@ -1421,37 +1426,6 @@ class OrderServiceTests {
         assertTrue(vo.isFreeByBooking(), "这时候该说的是「包场时段不计费」，而不是跳档");
     }
 
-    @Test
-    @DisplayName("封顶判定：实收恰好等于封顶也算已封顶（与「超顶」不是一回事）")
-    void allSegmentsCapped_trueWhenAmountReachesCap() {
-        assertTrue(OrderService.allSegmentsCapped(
-                        List.of(segment(new BigDecimal("40"), new BigDecimal("40"), false))),
-                "第 10 档（4 小时 36 分起）金额恰好等于封顶、段上的 capped 是 false，"
-                        + "但那之后金额不会再涨 —— 靠 capped 判断会漏报");
-    }
-
-    @Test
-    @DisplayName("封顶判定：未达封顶时为 false")
-    void allSegmentsCapped_falseWhenBelowCap() {
-        assertFalse(OrderService.allSegmentsCapped(
-                List.of(segment(new BigDecimal("40"), new BigDecimal("36"), false))));
-    }
-
-    @Test
-    @DisplayName("封顶判定：没有计费段时为 false（整段被包场覆盖）")
-    void allSegmentsCapped_falseWhenNoBillableSegment() {
-        assertFalse(OrderService.allSegmentsCapped(List.of()),
-                "零账单不是「已封顶」—— 包场结束后照样会重新计费");
-    }
-
-    @Test
-    @DisplayName("封顶判定：多段中只要有一段未到顶就是 false")
-    void allSegmentsCapped_falseWhenAnySegmentBelowCap() {
-        assertFalse(OrderService.allSegmentsCapped(List.of(
-                segment(new BigDecimal("40"), new BigDecimal("40"), false),
-                segment(new BigDecimal("35"), new BigDecimal("21"), false))));
-    }
-
     // ==================================================================
     // 计费区间剪切（纯函数）
     // ==================================================================
@@ -1603,6 +1577,144 @@ class OrderServiceTests {
 
         assertTrue(result.isSuccess(), "没有进行中的订单不是错误");
         assertNull(result.getData(), "没有就返回 null，让前端知道该显示「开门」而不是「查看密码」");
+    }
+
+    // ==================================================================
+    // 半场封顶跨订单（2026-10-10）
+    // ==================================================================
+
+    @Test
+    @DisplayName("⚠️ 半场封顶跨订单：同半场里已付 32 元后，新单只收剩余的 8 元")
+    void calculateBill_deductsPaidOrdersInSameHalfPeriod() throws Exception {
+        LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
+
+        // 历史：10:00-14:00 玩过一单（4 小时 → 32 元），已支付并留下快照
+        Order paid = seedOrder(USER_ID, OrderStatus.PAID, dayStart, dayStart.plusHours(4));
+        paid.setPayableAmount(new BigDecimal("32"));
+        paid.setTotalAmount(new BigDecimal("32"));
+        paid.setBillSnapshot(segmentSnapshot(BillingPeriod.DAY,
+                dayStart, dayStart.plusHours(4), "32"));
+
+        // 本次：14:00 重新开门，算到 18:00（4 小时 → 原始 32，但日场只剩 8 元额度）
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(4), null);
+
+        BillingResult bill = service.calculateBill(order, dayStart.plusHours(8));
+
+        assertEquals(0, new BigDecimal("8").compareTo(bill.getTotalAmount()),
+                "⚠️ 不看历史的话这里会收 32 —— 玩一段结算再开新单，拆单就绕过了封顶");
+        assertEquals(0, new BigDecimal("32").compareTo(
+                        bill.getSegments().get(0).getHalfPeriodUsedBefore()),
+                "账单要能指出来：这 8 元是「半场额度已被之前那单用掉 32」的结果");
+    }
+
+    @Test
+    @DisplayName("半场封顶跨订单：历史单跨半场时，只有落在本半场的那段占额度")
+    void calculateBill_seedsOnlyMatchingHalfPeriodSegments() throws Exception {
+        LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
+
+        // 历史：21:00-23:00 一单（日场段 21-22 收 8、夜场段 22-23 收 7），带完整快照
+        Order paid = seedOrder(USER_ID, OrderStatus.PAID,
+                dayStart.plusHours(11), dayStart.plusHours(13));
+        paid.setPayableAmount(new BigDecimal("15"));
+        paid.setBillSnapshot(multiSegmentSnapshot(
+                segment(BillingPeriod.DAY, dayStart.plusHours(11), dayStart.plusHours(12), "8"),
+                segment(BillingPeriod.NIGHT, dayStart.plusHours(12), dayStart.plusHours(13), "7")));
+
+        // 本次：23:00 开门，算到次日 07:00（8 小时 → 原始 56 → 段级封顶 35；
+        //       夜场额度只剩 35-7 = 28 → 收 28）
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(13), null);
+
+        BillingResult bill = service.calculateBill(order, dayStart.plusHours(21));
+
+        assertEquals(0, new BigDecimal("28").compareTo(bill.getTotalAmount()),
+                "跨半场的历史单要被拆到各自半场：只有夜场那 7 元压住本次额度");
+        assertEquals(0, new BigDecimal("7").compareTo(
+                        bill.getSegments().get(0).getHalfPeriodUsedBefore()),
+                "日场那 8 元不该进来 —— 归位错的话这里会是 15");
+    }
+
+    @Test
+    @DisplayName("半场封顶跨订单：本次单自己跨半场时，两个半场各用各的额度")
+    void calculateBill_crossesHalfPeriodWithHistory() throws Exception {
+        LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
+
+        // 历史：日场 10:00-14:00 收了 32
+        Order paid = seedOrder(USER_ID, OrderStatus.PAID, dayStart, dayStart.plusHours(4));
+        paid.setPayableAmount(new BigDecimal("32"));
+        paid.setBillSnapshot(segmentSnapshot(BillingPeriod.DAY,
+                dayStart, dayStart.plusHours(4), "32"));
+
+        // 本次：20:00 玩到次日 02:00 —— 日场段（20-22）被历史扣，夜场段（22-02）重新起算
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(10), null);
+
+        BillingResult bill = service.calculateBill(order, dayStart.plusHours(16));
+
+        List<SegmentBill> segments = bill.getSegments();
+        assertEquals(2, segments.size(), "20:00 开始跨零点，必然切成日场与夜场两段");
+        assertEquals(0, new BigDecimal("8").compareTo(segments.get(0).getAmount()),
+                "日场段：原始 16 元，但半场只剩 8 元额度");
+        assertEquals(0, new BigDecimal("28").compareTo(segments.get(1).getAmount()),
+                "夜场段：另一个半场，35 元额度全新，按原始金额收 28");
+    }
+
+    /**
+     * 造一份「只含一个计费段」的账单快照 JSON —— 跨订单累计测试的历史数据。
+     *
+     * <p>真实快照由结算时序列化 {@code BillingResult} 产生；这里只要字段对上、
+     * 能让 {@code parseSnapshot} 解析出段即可 —— 半场累计只读段的
+     * {@code period / startTime / amount}。
+     *
+     * @param period 段所属时段
+     * @param start  段起点
+     * @param end    段终点
+     * @param amount 段实收金额（元）
+     * @return 快照 JSON
+     * @throws Exception 序列化失败（本测试的输入不该发生）
+     */
+    private String segmentSnapshot(BillingPeriod period, LocalDateTime start, LocalDateTime end,
+                                   String amount) throws Exception {
+        return multiSegmentSnapshot(segment(period, start, end, amount));
+    }
+
+    /**
+     * 同上，但快照里装多个段（跨半场的历史单用）。
+     *
+     * @param segments 段列表
+     * @return 快照 JSON
+     * @throws Exception 序列化失败（本测试的输入不该发生）
+     */
+    private String multiSegmentSnapshot(SegmentBill... segments) throws Exception {
+        BigDecimal total = BigDecimal.ZERO;
+        for (SegmentBill segment : segments) {
+            total = total.add(segment.getAmount());
+        }
+        BillingResult bill = new BillingResult();
+        bill.setStartTime(segments[0].getStartTime());
+        bill.setEndTime(segments[segments.length - 1].getEndTime());
+        bill.setSegments(List.of(segments));
+        bill.setTotalAmount(total);
+        return objectMapper.writeValueAsString(OrderBillSnapshot.of(bill, false));
+    }
+
+    /**
+     * 造一个用于快照的计费段。
+     *
+     * @param period 段所属时段
+     * @param start  段起点
+     * @param end    段终点
+     * @param amount 段实收金额（元）
+     * @return 计费段
+     */
+    private static SegmentBill segment(BillingPeriod period, LocalDateTime start,
+                                       LocalDateTime end, String amount) {
+        SegmentBill segment = new SegmentBill();
+        segment.setPeriod(period);
+        segment.setStartTime(start);
+        segment.setEndTime(end);
+        segment.setAmount(new BigDecimal(amount));
+        segment.setCapAmount(new BigDecimal(
+                period == BillingPeriod.DAY ? "40" : "35"));
+        return segment;
     }
 
     // ==================================================================
@@ -1883,9 +1995,13 @@ class OrderServiceTests {
     /**
      * 预置一条已支付的历史订单。
      *
+     * <p>离场时刻固定取 {@code startTime + 1 小时}，而月度归集按 {@code end_time} 走 ——
+     * 只要这一小时不跨过月末，它归属的自然月就与 {@code startTime} 同月，
+     * 两种口径在这里是一致的。
+     *
      * @param userId    用户 ID
      * @param amount    实付金额
-     * @param startTime 计费起点，决定它属于哪个月
+     * @param startTime 计费起点（与它的离场时刻同属一个月）
      * @return 订单，供调用方继续补字段（如 {@code stayMinutes}）
      */
     private Order seedPaidOrder(Long userId, BigDecimal amount, LocalDateTime startTime) {
@@ -1967,28 +2083,6 @@ class OrderServiceTests {
         booking.setPrice(BigDecimal.valueOf(100));
         booking.setStatus(BookingStatus.PAID.name());
         return booking;
-    }
-
-    /**
-     * 构造一个只填了「封顶判定」所需字段的计费段。
-     *
-     * <p>只服务于 {@link OrderService#allSegmentsCapped} 的断言 ——
-     * 它只看实收与封顶两个数，其余字段填占位值不影响结论。
-     *
-     * @param cap    该段封顶金额
-     * @param amount 该段实收金额
-     * @param capped 是否已超顶（注意：实收恰好等于封顶时这里应为 false）
-     * @return 计费段
-     */
-    private static SegmentBill segment(BigDecimal cap, BigDecimal amount, boolean capped) {
-        SegmentBill segment = new SegmentBill();
-        segment.setPeriod(BillingPeriod.DAY);
-        segment.setUnitPrice(new BigDecimal("4"));
-        segment.setCapAmount(cap);
-        segment.setRawAmount(amount);
-        segment.setAmount(amount);
-        segment.setCapped(capped);
-        return segment;
     }
 
     /**

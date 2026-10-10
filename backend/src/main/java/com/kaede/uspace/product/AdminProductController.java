@@ -6,6 +6,7 @@ import com.kaede.uspace.product.dto.ProductCoverVo;
 import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductSaveRequest;
 import com.kaede.uspace.product.dto.ProductVo;
+import com.kaede.uspace.product.dto.UpdateProductStockRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -101,6 +102,28 @@ public class AdminProductController {
             @PathVariable Long id,
             @Valid @RequestBody ProductSaveRequest request) {
         return ApiResult.of(productService.update(id, request));
+    }
+
+    /**
+     * 只改库存。
+     *
+     * <p>与 {@link #update} 的分工：那一条是<b>全量替换</b>（改名称、调价、换封面
+     * 走它，得把整条记录带上）；这一条<b>只动库存一列</b>，其余字段一个都不碰。
+     * 补货与盘点是运营里最高频的动作之一，走全量替换的话，调用方得先读整条记录
+     * 再原样传回，中间若有别人改了名称就会被静默覆盖 ——
+     * 与模块 4「机台单独改状况」（{@code PUT …/{id}/status}）是同一个取舍。
+     *
+     * <p>这里填的是<b>新的库存值</b>（0 表示售罄），不是增减量。
+     *
+     * @param id      商品 ID
+     * @param request 只含库存的请求
+     * @return 调整后的商品（含可售量）
+     */
+    @PutMapping("/{id}/stock")
+    public ResponseEntity<ApiResult<ProductVo>> updateStock(
+            @PathVariable Long id,
+            @Valid @RequestBody UpdateProductStockRequest request) {
+        return ApiResult.of(productService.updateStock(id, request.getStock()));
     }
 
     /**

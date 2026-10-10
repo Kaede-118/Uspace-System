@@ -128,12 +128,12 @@ class OrderMapperIntegrationTests {
     }
 
     @Test
-    @DisplayName("月累计：按订单的计费起点归集，不按支付时刻")
-    void monthPaidAmount_groupsByStartTime() {
+    @DisplayName("月累计：按离场时刻归集，不按支付时刻")
+    void monthPaidAmount_groupsByEndTimeNotPaidAt() {
         LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
         LocalDateTime lastMonth = thisMonth.minusMonths(1);
 
-        // 上个月的单，但它是这个月才付的款
+        // 上个月离场的单，但它是这个月才付的款
         Order lastMonthOrder = orderOf(lastMonth.plusDays(14), OrderStatus.PAID, "200.00");
         lastMonthOrder.setPaidAt(thisMonth.plusDays(1));
         orderMapper.insert(lastMonthOrder);
@@ -144,9 +144,34 @@ class OrderMapperIntegrationTests {
                 USER_ID, lastMonth, thisMonth);
 
         assertEquals(0, BigDecimal.ZERO.compareTo(thisMonthAmount),
-                "按 start_time 归集 —— 用 paid_at 的话，跨零点结算的夜单会跳到下个月");
+                "按 end_time 归集 —— 用 paid_at 的话，用户拖几天付款就把归月拖走了");
         assertEquals(0, new BigDecimal("200.00").compareTo(lastMonthAmount),
                 "它应当被算在上个月");
+    }
+
+    @Test
+    @DisplayName("月累计：月底进店、次日凌晨离店的夜单计入下个月")
+    void monthPaidAmount_crossMonthOrderCountsToNextMonth() {
+        LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        LocalDateTime lastMonth = thisMonth.minusMonths(1);
+        LocalDateTime nextMonth = thisMonth.plusMonths(1);
+
+        // 上月最后一天 23:30 进店、本月 1 日 00:30 离店 —— 跨零点的那一笔
+        Order crossMonth = orderOf(thisMonth.minusMinutes(30), OrderStatus.PAID, "88.00");
+        crossMonth.setEndTime(thisMonth.plusMinutes(30));
+        crossMonth.setStayMinutes(60);
+        orderMapper.insert(crossMonth);
+
+        assertEquals(0, BigDecimal.ZERO.compareTo(
+                        orderMapper.selectMonthPaidAmount(USER_ID, lastMonth, thisMonth)),
+                "它不该再算进上个月 —— 月初凌晨的消费留在上个月，正是这条口径要修掉的现象");
+        assertEquals(0, new BigDecimal("88.00").compareTo(
+                        orderMapper.selectMonthPaidAmount(USER_ID, thisMonth, nextMonth)),
+                "整笔按离场月归集");
+        assertEquals(60L, orderMapper.selectMonthStayMinutes(
+                        USER_ID, thisMonth, nextMonth).longValue(),
+                "在店时长跟着同一个归月字段走，否则跨月那一刻会出现"
+                        + "「消费算本月、时长算上月」的错位");
     }
 
     @Test
@@ -155,15 +180,19 @@ class OrderMapperIntegrationTests {
         LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
         LocalDateTime nextMonth = thisMonth.plusMonths(1);
 
-        // 紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
-        orderMapper.insert(paidOrder(nextMonth.minusSeconds(1), "66.00"));
-        // 恰好落在下月起点 —— 半开区间下属于下月
-        orderMapper.insert(paidOrder(nextMonth, "77.00"));
+        // 离场时刻紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
+        Order edge = paidOrder(nextMonth.minusHours(2), "66.00");
+        edge.setEndTime(nextMonth.minusSeconds(1));
+        orderMapper.insert(edge);
+        // 离场时刻恰好落在下月起点 —— 半开区间下属于下月
+        Order boundary = paidOrder(nextMonth.minusHours(2), "77.00");
+        boundary.setEndTime(nextMonth);
+        orderMapper.insert(boundary);
 
         BigDecimal thisMonthAmount = orderMapper.selectMonthPaidAmount(USER_ID, thisMonth, nextMonth);
 
         assertEquals(0, new BigDecimal("66.00").compareTo(thisMonthAmount),
-                "半开区间 [from, to)：下月起点那一秒的单不算本月 —— "
+                "半开区间 [from, to)：下月起点那一秒不算本月 —— "
                         + "写成闭区间就会把两边的单都算进来");
     }
 
@@ -218,22 +247,24 @@ class OrderMapperIntegrationTests {
     }
 
     @Test
-    @DisplayName("时长统计：归月口径与月累计消费逐字一致（按 start_time 的半开区间）")
-    void stayMinutes_groupsByStartTimeLikeMonthPaidAmount() {
+    @DisplayName("时长统计：归月口径与月累计消费逐字一致（按 end_time 的半开区间）")
+    void stayMinutes_groupsByEndTimeLikeMonthPaidAmount() {
         LocalDateTime thisMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
         LocalDateTime lastMonth = thisMonth.minusMonths(1);
+        LocalDateTime nextMonth = thisMonth.plusMonths(1);
 
         Order last = paidOrder(lastMonth.plusDays(14), "200.00");
         last.setStayMinutes(60);
         orderMapper.insert(last);
 
-        // 紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
-        Order edge = paidOrder(thisMonth.plusMonths(1).minusSeconds(1), "66.00");
+        // 离场时刻紧挨着下月起点之前一秒 —— 半开区间下仍属于本月
+        Order edge = paidOrder(nextMonth.minusHours(2), "66.00");
+        edge.setEndTime(nextMonth.minusSeconds(1));
         edge.setStayMinutes(30);
         orderMapper.insert(edge);
 
         assertEquals(30L, orderMapper.selectMonthStayMinutes(
-                        USER_ID, thisMonth, thisMonth.plusMonths(1)).longValue(),
+                        USER_ID, thisMonth, nextMonth).longValue(),
                 "两个数字在「我的」页并排显示，归月口径必须与 selectMonthPaidAmount 一致 —— "
                         + "一个按 start_time、另一个按 end_time 的话，跨月那一刻就错位了");
         assertEquals(60L, orderMapper.selectMonthStayMinutes(
@@ -472,6 +503,11 @@ class OrderMapperIntegrationTests {
     /**
      * 构造一条指定状态的订单。
      *
+     * <p><b>非「使用中」的订单一律补上离场时刻</b>（{@code startTime + 1 小时}）——
+     * 「已结算的单必有 {@code end_time}」是系统的不变式，而月度归集正是按它归集的，
+     * 测试数据不照这个造的话，那些单会被<b>静默漏掉</b>（统计偏小、不报错）。
+     * 需要跨月这类特殊场景时，调用方拿回对象后自行覆盖 {@code endTime}。
+     *
      * @param startTime 计费起点
      * @param status    状态
      * @param payable   应付金额，可为 null
@@ -487,6 +523,10 @@ class OrderMapperIntegrationTests {
         order.setStartTime(startTime);
         order.setStatus(status.name());
         order.setDiscountAmount(BigDecimal.ZERO);
+        if (status != OrderStatus.IN_USE) {
+            // 进行中的那一单还没离场，end_time 天然为空
+            order.setEndTime(startTime.plusHours(1));
+        }
         if (payable != null) {
             order.setTotalAmount(new BigDecimal(payable));
             order.setPayableAmount(new BigDecimal(payable));

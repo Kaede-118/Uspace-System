@@ -7,13 +7,13 @@
  * 这是刻意的模块边界，不是遗漏。
  *
  * <p><b>QQ 号那一栏带一整套验证流程</b>：填了 QQ 就必须先证明这个号是本人的 ——
- * 点「获取验证码」拿到一条 <code>/验证 123456</code> 指令，<b>整条复制</b>发到 QQ 群，
+ * 点「获取验证码」拿到一条 <code>fw验证 123456</code> 指令，<b>整条复制</b>发到 QQ 群，
  * 机器人在群里看到后回执给后端，状态转「已验证」之后才提交得了。
  * 理由见后端 QqVerifyService 的类注释：群播报与群查询全靠 sys_user.qq 认人，
  * 而这个号在注册页填的时候没有任何可信度。
  *
  * <p>⚠️ <b>复制的必须是整条指令、不能只给数字</b>：后端现在只认带前缀的
- * <code>/验证 123456</code>（纯数字已被当成闲聊静默），
+ * <code>fw验证 123456</code>（纯数字已被当成闲聊静默），
  * 只发数字过去将得不到任何回应，而用户无从知道为什么。
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
@@ -188,10 +188,10 @@ async function onIssueCode() {
  * 发到群里的整条指令。
  *
  * <p>⚠️ <b>复制的必须是整条指令，不能只给那 6 位数字</b>：后端现在只认
- * {@code /验证 123456} 这种形式（纯数字已被当成闲聊静默），
+ * {@code fw验证 123456} 这种形式（纯数字已被当成闲聊静默），
  * 用户只复制数字发过去将得不到任何回应，而他无从知道为什么。
  */
-const verifyCommand = computed(() => `/验证 ${qqVerify.value.code}`)
+const verifyCommand = computed(() => `fw验证 ${qqVerify.value.code}`)
 
 /**
  * 复制验证指令。
@@ -481,7 +481,7 @@ async function onSubmit() {
   color: var(--c-primary);
 }
 
-/* 指令 + 复制按钮排一行；指令本身不换行，换行会让「/验证 123456」被拆开看 */
+/* 指令 + 复制按钮排一行；指令本身不换行，换行会让「fw验证 123456」被拆开看 */
 .qq-hint__cmd {
   display: inline-flex;
   align-items: center;

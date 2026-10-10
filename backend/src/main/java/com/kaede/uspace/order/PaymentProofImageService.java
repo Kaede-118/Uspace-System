@@ -1,6 +1,7 @@
 package com.kaede.uspace.order;
 
 import com.kaede.uspace.common.result.BizResult;
+import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.upload.ImageStorage;
 import com.kaede.uspace.common.upload.StoredImage;
 import com.kaede.uspace.order.dto.ProofImageVo;
@@ -15,7 +16,12 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 付款截图的上传与识别（模块 8 的支付能力）。
@@ -64,6 +70,14 @@ public class PaymentProofImageService {
     private final ImageStorage imageStorage;
     private final OcrService ocrService;
 
+    private final PaymentProperties properties;
+
+    /** 时钟。与写指令冷却同一个 bean（{@code QqVerifyConfig}），测试可拨钟 */
+    private final Clock clock;
+
+    /** 每个用户上一次<b>成功</b>上传的时刻，用于冷却。只在内存里，重启即清 */
+    private final Map<Long, LocalDateTime> lastUploadAt = new ConcurrentHashMap<>();
+
     /**
      * 构造器注入。
      *
@@ -72,23 +86,36 @@ public class PaymentProofImageService {
      *                     那些安全代码不能有第二份）
      * @param ocrService   文字识别服务，落盘后调一次。它永远不写库，
      *                     也永远不抛异常（见 {@link #recognizeQuietly}）
+     * @param properties   支付配置（取上传冷却时长）
+     * @param clock        时钟，测试可拨钟
      */
-    public PaymentProofImageService(ImageStorage imageStorage, OcrService ocrService) {
+    public PaymentProofImageService(ImageStorage imageStorage, OcrService ocrService,
+                                    PaymentProperties properties, Clock clock) {
         this.imageStorage = imageStorage;
         this.ocrService = ocrService;
+        this.properties = properties;
+        this.clock = clock;
     }
 
     /**
      * 上传一张付款截图，顺带识别一遍。
      *
-     * <p>顺序是<b>先落盘、再识别</b>：校验没过的文件（不是图片、超过大小上限）
-     * 根本不该花那一次识别调用，而识别要读的字节也正是落盘之后才稳定下来的。
+     * <p>顺序是<b>先冷却、再落盘、最后识别</b>：被冷却挡下的请求连盘都不落，
+     * 校验没过的文件（不是图片、超过大小上限）不该花那一次识别调用，
+     * 而识别要读的字节也正是落盘之后才稳定下来的。
      *
-     * @param file 上传的图片，可为 null（表示请求里没带 file 部分）
-     * @return 成功时返回站内路径与识别结果；校验不过时返回对应错误码
+     * @param file   上传的图片，可为 null（表示请求里没带 file 部分）
+     * @param userId 上传者用户 ID —— 冷却按人算（识别额度是整店共用的）
+     * @return 成功时返回站内路径与识别结果；冷却未到或校验不过时返回对应错误码
      */
-    public BizResult<ProofImageVo> upload(MultipartFile file) {
-        return store(imageStorage.store(KIND_PROOF, newBaseName(), file));
+    public BizResult<ProofImageVo> upload(MultipartFile file, Long userId) {
+        BizResult<ProofImageVo> blocked = checkCooldown(userId);
+        if (blocked != null) {
+            return blocked;
+        }
+        BizResult<ProofImageVo> result = store(imageStorage.store(KIND_PROOF, newBaseName(), file));
+        recordIfSuccess(userId, result);
+        return result;
     }
 
     /**
@@ -96,13 +123,69 @@ public class PaymentProofImageService {
      *
      * <p>目前唯一的调用方是<b>群里的付款截图</b>（模块 11）：用户在群里发的图
      * 是一串字节（从 NapCat 给的地址下回来的），没有 {@code MultipartFile}
-     * 这层载体。识别与落盘逻辑与网页那版<b>完全共用</b>，两条路不会分岔。
+     * 这层载体。识别、落盘与冷却逻辑与网页那版<b>完全共用</b>，两条路不会分岔。
      *
-     * @param bytes 图片字节
-     * @return 同 {@link #upload(MultipartFile)}
+     * @param bytes  图片字节
+     * @param userId 上传者用户 ID（群里传图时是发起 {@code fw结账} 的那个人）
+     * @return 同 {@link #upload(MultipartFile, Long)}
      */
-    public BizResult<ProofImageVo> upload(byte[] bytes) {
-        return store(imageStorage.store(KIND_PROOF, newBaseName(), bytes));
+    public BizResult<ProofImageVo> upload(byte[] bytes, Long userId) {
+        BizResult<ProofImageVo> blocked = checkCooldown(userId);
+        if (blocked != null) {
+            return blocked;
+        }
+        BizResult<ProofImageVo> result = store(imageStorage.store(KIND_PROOF, newBaseName(), bytes));
+        recordIfSuccess(userId, result);
+        return result;
+    }
+
+    /**
+     * 上传冷却检查：同一用户两次成功上传之间要隔开一段（见
+     * {@code PaymentProperties#proofImageCooldown}）。
+     *
+     * <p>返回 {@code null} 表示放行；被挡时返回 42900 的失败结果，
+     * 文案里<b>报出还要等几秒</b> —— 只说「太频繁」而不给时长，用户只能瞎试。
+     *
+     * <p>慢几秒不该被当成错误：被挡的是「同一人连续上传」，按用户各记各的，
+     * 一个人被挡不影响别人（同一时刻只会有一个顾客在传自己的截图）。
+     *
+     * @param userId 上传者；为 null 时跳过冷却
+     *               （理论上不会发生 —— 两个调用方都从登录态 / 已绑定用户拿 ID，
+     *               但上传是主链路，不该因为缺一个参数而崩）
+     * @return 被挡时的失败结果；放行时返回 null
+     */
+    private BizResult<ProofImageVo> checkCooldown(Long userId) {
+        Duration cooldown = properties.getProofImageCooldown();
+        if (userId == null || cooldown == null || cooldown.isZero() || cooldown.isNegative()) {
+            return null;
+        }
+        LocalDateTime last = lastUploadAt.get(userId);
+        if (last == null) {
+            return null;
+        }
+        Duration elapsed = Duration.between(last, LocalDateTime.now(clock));
+        if (elapsed.compareTo(cooldown) >= 0) {
+            return null;
+        }
+        long waitSeconds = Math.max(1, cooldown.getSeconds() - elapsed.getSeconds());
+        log.info("[凭证] 上传过于频繁被冷却挡下 userId={} 还需等 {} 秒", userId, waitSeconds);
+        return BizResult.fail(ErrorCode.PAYMENT_PROOF_COOLDOWN,
+                "上传太频繁，请 " + waitSeconds + " 秒后再试");
+    }
+
+    /**
+     * 成功才计时（见 {@code PaymentProperties#proofImageCooldown} 上那条警告）。
+     *
+     * <p>失败的上传（文件不合法）根本没花识别额度，把它也计入冷却的话，
+     * 用户换一张合法图立刻重传会被莫名拒绝 —— 那不是他做错了什么。
+     *
+     * @param userId 上传者，可为 null（跳过）
+     * @param result 上传结果
+     */
+    private void recordIfSuccess(Long userId, BizResult<ProofImageVo> result) {
+        if (userId != null && result.isSuccess()) {
+            lastUploadAt.put(userId, LocalDateTime.now(clock));
+        }
     }
 
     /** @return 一个随机文件名主干（不带扩展名，扩展名由文件头决定） */

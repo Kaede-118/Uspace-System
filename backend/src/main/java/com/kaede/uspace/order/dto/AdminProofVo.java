@@ -108,8 +108,26 @@ public class AdminProofVo {
     /** 复核时刻，未复核时为空 */
     private LocalDateTime confirmedAt;
 
-    /** 复核管理员 ID，未复核时为空 */
+    /**
+     * 复核管理员 ID，未复核时为空。
+     *
+     * <p>⚠️ <b>为 null 但状态是「已核对」时，说明那次通过是【机器自动】做的</b>
+     * （识别到单号、金额相符、且单号无重复引用 —— 见
+     * {@code PaymentProofService} 的三道闸）。前端据此把「机器自动通过」
+     * 与「管理员核对」分开显示，并允许管理员对前者补一次人工驳回
+     * （后端驳回守卫同样认这个区分）。
+     */
     private Long confirmedBy;
+
+    /**
+     * 这条凭证被哪一批对账认领过；null 表示还没被任何批次对到。
+     *
+     * <p><b>它与 {@link #verifyStatus} 是两件事，不要互相推断</b>：
+     * 那是「管理员（或机器）看过截图认下的结论」，这是「与收款账单勾稽上了」。
+     * 后台因此能把<b>「到账」与「对账确认」分开显示</b> —— 对账不认定到账
+     *（管理员先认了、账单隔月才导出），到账也不代表账勾上了。
+     */
+    private Long reconcileBatchId;
 
     /** 未通过原因，驳回时才有值 */
     private String rejectReason;
@@ -152,6 +170,7 @@ public class AdminProofVo {
         vo.setConfirmedAt(proof.getConfirmedAt());
         vo.setConfirmedBy(proof.getConfirmedBy());
         vo.setRejectReason(proof.getRejectReason());
+        vo.setReconcileBatchId(proof.getReconcileBatchId());
         return vo;
     }
 }

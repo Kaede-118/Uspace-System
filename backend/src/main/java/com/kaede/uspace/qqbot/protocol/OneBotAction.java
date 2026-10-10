@@ -110,9 +110,66 @@ public class OneBotAction {
     }
 
     /**
+     * 构造一个「发送群消息（含图片）」的动作。
+     *
+     * <p>与 {@link #sendGroupMessageWithAt} 一样用<b>段数组</b>发送（图片没法
+     * 塞进纯文本字符串），同样<b>刻意不传 {@code auto_escape}</b> ——
+     * 段数组里没有 CQ 码注入面，安全性由「用段而不是用字符串」保证。
+     *
+     * <p>图片的 {@code file} 形如 {@code base64://iVBOR…}，理由见
+     * {@code OneBotMessageSegment#image}。
+     *
+     * @param groupId   群号
+     * @param imageFile image 段的 {@code file} 字段（base64 内联）
+     * @param text      图片之前的文本；为 null 或空串时只发图片。
+     *                  <b>文本在前</b>（2026-10-10 由用户定）：名册的格式是
+     *                  「店内目前有 X 人 + 卡片图」—— 先看到人数，再往下是明细
+     * @param echo      回显串，供日志追踪
+     * @return 可直接序列化发送的动作对象
+     */
+    public static OneBotAction sendGroupMessageWithImage(Long groupId, String imageFile,
+                                                         String text, String echo) {
+        return sendGroupMessageWithImages(groupId, List.of(imageFile), text, echo);
+    }
+
+    /**
+     * 构造一个「发送群消息（含<b>多张</b>图片）」的动作 —— 全部塞在【一条】消息里。
+     *
+     * <p>（2026-10-10 由用户定）名册每 4 人一张图，13 个人就是 4 张 ——
+     * 逐张各发一条会把群刷屏。段数组天然支持一条消息多张图，
+     * 客户端会把它们渲染成同一条消息里的图集，那就一条。
+     *
+     * @param groupId    群号
+     * @param imageFiles 各图的 {@code file} 字段（base64 内联），至少一张
+     * @param text       图片之前的文本；为 null 或空串时只发图片
+     * @param echo       回显串，供日志追踪
+     * @return 可直接序列化发送的动作对象
+     */
+    public static OneBotAction sendGroupMessageWithImages(Long groupId, List<String> imageFiles,
+                                                          String text, String echo) {
+        List<OneBotMessageSegment> segments = new ArrayList<>(imageFiles.size() + 1);
+        if (text != null && !text.isBlank()) {
+            segments.add(OneBotMessageSegment.text(text));
+        }
+        for (String imageFile : imageFiles) {
+            segments.add(OneBotMessageSegment.image(imageFile));
+        }
+
+        Map<String, Object> params = new HashMap<>(4);
+        params.put("group_id", groupId);
+        params.put("message", segments);
+
+        OneBotAction action = new OneBotAction();
+        action.setAction(ACTION_SEND_GROUP_MSG);
+        action.setParams(params);
+        action.setEcho(echo);
+        return action;
+    }
+
+    /**
      * 构造一个「发送私聊消息」的动作。
      *
-     * <p>目前唯一的用途：群指令 {@code /开门} 把<b>固定的限时密码</b>单独发给本人 ——
+     * <p>目前唯一的用途：群指令 {@code fw开门} 把<b>固定的限时密码</b>单独发给本人 ——
      * 群消息所有人可见，密码不能出现在那里。
      *
      * <p>{@code auto_escape} 同样取 true，理由与群消息那份完全相同（见上）：

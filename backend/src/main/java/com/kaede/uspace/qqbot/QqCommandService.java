@@ -2,6 +2,7 @@ package com.kaede.uspace.qqbot;
 
 import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.billing.dto.BillingRulesVo;
+import com.kaede.uspace.common.config.UploadProperties;
 import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.device.DeviceService;
@@ -16,14 +17,17 @@ import com.kaede.uspace.order.dto.OrderPreviewVo;
 import com.kaede.uspace.order.dto.OrderStatsVo;
 import com.kaede.uspace.order.dto.OrderVo;
 import com.kaede.uspace.product.ProductService;
+import com.kaede.uspace.product.dto.ProductOrderVo;
 import com.kaede.uspace.product.dto.ProductVo;
 import com.kaede.uspace.promotion.MonthlyCardService;
+import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.qqbot.protocol.OneBotEvent;
 import com.kaede.uspace.space.BookingService;
 import com.kaede.uspace.space.StoreService;
 import com.kaede.uspace.space.dto.BookingScheduleVo;
+import com.kaede.uspace.space.dto.BookingVo;
 import com.kaede.uspace.space.dto.StoreStatusVo;
 import com.kaede.uspace.user.QqVerifyService;
 import com.kaede.uspace.user.entity.SysUser;
@@ -33,7 +37,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -119,6 +125,14 @@ public class QqCommandService {
 
     private final WebProperties webProperties;
 
+    /**
+     * 名册图的图片读取器：把 {@code /uploads/…} 映射到本地上传目录。
+     *
+     * <p>构造时装配一次（闭包了目录与前缀）—— 连不上/读不到的图它返回 null，
+     * 渲染回落首字母底（见 {@code InstoreCardRenderer}），这里不再管失败。
+     */
+    private final InstoreCardRenderer.ImageLoader instoreImageLoader;
+
     private final QqWriteCommandService writeCommandService;
 
     private final QqPaymentProofService paymentProofService;
@@ -138,6 +152,7 @@ public class QqCommandService {
                             BillingProperties billingProperties,
                             OrderProperties orderProperties,
                             WebProperties webProperties,
+                            UploadProperties uploadProperties,
                             QqWriteCommandService writeCommandService,
                             QqPaymentProofService paymentProofService) {
         this.properties = properties;
@@ -155,6 +170,10 @@ public class QqCommandService {
         this.billingProperties = billingProperties;
         this.orderProperties = orderProperties;
         this.webProperties = webProperties;
+        this.instoreImageLoader = uploadProperties.getDir() == null
+                ? url -> null
+                : InstoreCardRenderer.localFileLoader(
+                        Path.of(uploadProperties.getDir()), uploadProperties.getUrlPrefix());
         this.writeCommandService = writeCommandService;
         this.paymentProofService = paymentProofService;
     }
@@ -210,11 +229,12 @@ public class QqCommandService {
         switch (command.kind()) {
             case PING -> client.sendGroupMessage(groupId, "pong");
             case INSTORE -> replyInstore(groupId);
-            case HELP -> replyHelp(groupId);
+            case HELP -> replyHelp(groupId, event.getUserId());
             case VERIFY_CODE -> replyVerifyCode(groupId, event, command.argument());
             case BOOKING_SCHEDULE -> replyBookingSchedule(groupId);
             case ME -> replyMe(groupId, event.getUserId());
             case CURRENT_ORDER -> replyNow(groupId, event.getUserId());
+            case UNPAID_BILLS -> replyUnpaid(groupId, event.getUserId());
             case STORE_STATUS -> replyStoreStatus(groupId);
             case PRICE -> replyPrice(groupId);
             case CARD_TYPES -> replyCardTypes(groupId);
@@ -222,8 +242,18 @@ public class QqCommandService {
             case PRODUCT_MENU -> replyMenu(groupId);
             case PRODUCT_ORDER -> writeCommandService.orderProduct(
                     groupId, event.getUserId(), command.argument(), command.quantity());
+            // 调整库存：解析层不认人，是不是管理员由 writeCommandService 查库判
+            case STOCK_ADJUST -> writeCommandService.adjustStock(
+                    groupId, event.getUserId(), command.argument(), command.quantity());
+            // 调整机台状况：同上，权限与同名判定都在 writeCommandService 里
+            case DEVICE_STATUS -> writeCommandService.adjustDeviceStatus(
+                    groupId, event.getUserId(), command.argument(), command.status());
             case OPEN_DOOR -> writeCommandService.openDoor(groupId, event.getUserId());
             case SETTLE -> writeCommandService.settle(groupId, event.getUserId());
+            // 取消未付款单：解析层只做了单号的形状校验，
+            // 按前缀路由、归属校验与状态守卫都在 writeCommandService 里
+            case CANCEL_ORDER -> writeCommandService.cancelOrder(
+                    groupId, event.getUserId(), command.argument());
             // ⚠️ 文案与「商品名没匹配上、又没写数量」共用一份，见 QqReplyText.unknownCommand
             case UNKNOWN_COMMAND ->
                     client.sendGroupMessage(groupId, QqReplyText.unknownCommand());
@@ -254,21 +284,49 @@ public class QqCommandService {
             client.sendGroupMessage(groupId, "查不到在店信息，稍后再试");
             return;
         }
+        List<InstoreUserVo> users = result.getData();
+        Map<String, String> labels = loadPreferenceLabels();
+
+        // 格式是「每四人一张图、合成一条消息」（2026-10-10 由用户定）：
+        // 人数写在句子里，图内只有卡片。画不出 / 发不出都回落到
+        // 纯文本名册 —— 指令永远要有回音，见类注释
+        if (properties.isInstoreImageEnabled() && sendInstoreImages(groupId, users, labels)) {
+            return;
+        }
         client.sendGroupMessage(groupId, QqReplyText.instore(
-                result.getData(), loadPreferenceLabels(), QqReplyText.DEFAULT_MAX_LISTED));
+                users, labels, QqReplyText.DEFAULT_MAX_LISTED));
     }
 
     /**
      * 回复指令列表。
      *
-     * <p>两条写指令只在<b>确实可用</b>时才列出来（写开关与播报开关都开着）——
+     * <p>写指令那几条只在<b>确实可用</b>时才列出来（写开关与播报开关都开着）——
      * 列出来却发不动，用户只会以为机器人坏了。
      *
+     * <p>「调整库存」那条还多一道：<b>只对管理员列</b>。它对别人本来就发不动
+     * （执行时会拒绝），列出来只会让人问「为什么我不能用」。
+     * 为此多查一次 {@code sys_user} —— {@code fw帮助} 是低频指令，这个代价划算。
+     *
      * @param groupId 目标群号
+     * @param qq      发送者 QQ（用于判定要不要列出管理员指令）
      */
-    private void replyHelp(Long groupId) {
-        boolean writeUsable = properties.isWriteEnabled() && properties.getBroadcast().isEnabled();
-        client.sendGroupMessage(groupId, QqReplyText.help(writeUsable));
+    private void replyHelp(Long groupId, Long qq) {
+        client.sendGroupMessage(groupId,
+                QqReplyText.help(writeUsable(), writeCommandService.isAdmin(qq), baseUrl()));
+    }
+
+    /**
+     * 写指令此刻能不能用。
+     *
+     * <p>与 {@code QqWriteCommandService#checkAllowed} 同一条判据：两个开关都要开 ——
+     * 播报关掉时写指令也不执行（群里看不到播报，就等于一次没人看见的账）。
+     * 这里的用途是<b>决定要不要在回复里提那几条指令</b>：提了却发不动，
+     * 用户只会以为机器人坏了。
+     *
+     * @return 可以执行写指令返回 true
+     */
+    private boolean writeUsable() {
+        return properties.isWriteEnabled() && properties.getBroadcast().isEnabled();
     }
 
     /**
@@ -353,7 +411,7 @@ public class QqCommandService {
      *
      * <p>数据源是 {@link OrderService#previewOrder} —— 网页端点「结账」进去看到的那一屏，
      * <b>纯查询、零副作用</b>（计时照走、状态不变、绝不撤销门锁密码）。
-     * 想真的结账要再发 {@code /结账}：两个动作分开，是为了防
+     * 想真的结账要再发 {@code fw结账}：两个动作分开，是为了防
      * 「只是想看一眼多少钱、结果把表停了」。
      *
      * <p>没有在计时的单时，把待付款那一笔告诉他 —— 那时他问的其实也是这件事。
@@ -412,7 +470,151 @@ public class QqCommandService {
                     pending.getPayableAmount(), properties.isSelfAmountVisible(), ordersUrl()));
             return;
         }
-        client.sendGroupMessage(groupId, "你现在没有在计时的订单。发 /开门 开始计时。");
+        client.sendGroupMessage(groupId, "你当前没有正在计时的订单。发送 fw开门 可开始计时。");
+    }
+
+    /**
+     * 回复本人全部未付款的单子（{@code fw未付款}）。
+     *
+     * <p>数据来自 {@link #collectUnpaidBills}，文案交给
+     * {@link QqReplyText#unpaidBills}。
+     *
+     * @param groupId 目标群号
+     * @param qq      发送者 QQ
+     */
+    private void replyUnpaid(Long groupId, Long qq) {
+        SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
+        if (user == null) {
+            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            return;
+        }
+        List<UnpaidBill> bills = collectUnpaidBills(user.getId());
+        if (bills == null) {
+            log.error("[QQ机器人] 查未付款清单失败：四类里至少一类查询未成功 qq={}", qq);
+            client.sendGroupMessage(groupId, "查不到未付款信息，稍后再试。");
+            return;
+        }
+        client.sendGroupMessage(groupId, QqReplyText.unpaidBills(
+                bills, properties.isSelfAmountVisible(), ordersUrl()));
+    }
+
+    /**
+     * 汇集某人四类未付款单（计时 → 包场 → 月卡 → 商品）。
+     *
+     * <p><b>四个来源各查各的</b>：它们分属四个模块、四张表，没有现成的汇总查询。
+     * 顺序按「下一步动作最要紧」排 —— 欠着的计时订单排在最前。
+     *
+     * <p>⚠️ <b>任何一类查询失败都返回 null，不降级</b>：调用方会回一句
+     * 「查不到」并记 error。少了这一类还说「你没有未付款单」是个
+     * <b>错误结论</b> —— 用户会以为账已经清了。
+     *
+     * @param userId 用户 ID
+     * @return 清单；任何一类查询未成功时返回 null
+     */
+    private List<UnpaidBill> collectUnpaidBills(Long userId) {
+        List<UnpaidBill> bills = new ArrayList<>();
+
+        BizResult<List<OrderVo>> orders = orderService.findUnpaidOrders(userId);
+        if (!orders.isSuccess() || orders.getData() == null) {
+            return null;
+        }
+        for (OrderVo order : orders.getData()) {
+            // 计时订单不可取消（欠费不能自消）—— 见 QqCommand.Kind#CANCEL_ORDER
+            bills.add(new UnpaidBill("计时", order.getOrderNo(), order.getPayableAmount(),
+                    unpaidStatusText(order.getStatus(), order.getStatusText()), false));
+        }
+
+        BizResult<List<BookingVo>> bookings = bookingService.listUnpaidBookings(userId);
+        if (!bookings.isSuccess() || bookings.getData() == null) {
+            return null;
+        }
+        for (BookingVo booking : bookings.getData()) {
+            // 查询只取 PENDING_PAYMENT，所以状态文案是固定的
+            bills.add(new UnpaidBill("包场", booking.getBookingNo(), booking.getPrice(),
+                    "待付款", true));
+        }
+
+        BizResult<CardPurchaseVo> card = monthlyCardService.findPendingPurchase(userId);
+        if (!card.isSuccess()) {
+            return null;
+        }
+        if (card.getData() != null) {
+            bills.add(new UnpaidBill("月卡", card.getData().getOrderNo(),
+                    card.getData().getPrice(), card.getData().getStatusLabel(), true));
+        }
+
+        BizResult<List<ProductOrderVo>> products = productService.listUnpaidOrders(userId);
+        if (!products.isSuccess() || products.getData() == null) {
+            return null;
+        }
+        for (ProductOrderVo order : products.getData()) {
+            bills.add(new UnpaidBill("商品", order.getOrderNo(), order.getAmount(),
+                    unpaidStatusText(order.getStatus(), order.getStatusLabel()), true));
+        }
+        return bills;
+    }
+
+    /**
+     * 未付款单的状态文案。
+     *
+     * <p>{@code REJECTED}（凭证未通过）多补一句「请重新上传付款截图」——
+     * 只报「凭证未通过」的话，用户知道出了事但不知道下一步做什么，
+     * 而下一步恰恰只有一件事可做。
+     *
+     * <p>判据用的是 {@link OrderStatus#REJECTED} 的名字，但它同时覆盖商品的
+     * {@code ProductOrderStatus.REJECTED} —— 两个枚举的常量名一样，
+     * 且这是唯一一个需要特殊说明的状态。将来若有一方改名，这里要跟着改
+     *（编译期发现不了，只有该状态的单子在群里显示会变回原样）。
+     *
+     * @param statusName 状态枚举名（{@code OrderVo.status} / 商品单同名字段）
+     * @param label      模块给出的中文名
+     * @return 展示用状态文案
+     */
+    private static String unpaidStatusText(String statusName, String label) {
+        return OrderStatus.REJECTED.name().equals(statusName)
+                ? label + "，请重新上传付款截图" : label;
+    }
+
+    /**
+     * 发在店名册图 —— 每 4 人一张、2×2 网格，<b>全部塞在同一条消息里</b>
+     * （2026-10-10 由用户定：多张图不逐条发，不刷屏）。
+     *
+     * <p>文本（「店内目前有 X 人」+ 可能的截断提示）在前、图依次在后，
+     * 客户端渲染成一条消息里的图集。图内不写人数（见
+     * {@link InstoreCardRenderer} 的类注释）。
+     *
+     * <p>返回值语义：渲染任何一张失败、或发送失败都返回 false，
+     * 调用方回落纯文本名册 —— 一条消息要么整份发出去、要么整份不发，
+     *「半份图集 + 一份全量文字」只会更乱。空店也返回 false ——
+     * 一屏空网格没有信息量，由文字那句「店内目前无人」说清。
+     *
+     * @param groupId 目标群
+     * @param users   在店顾客（全量，按进店时刻升序）
+     * @param labels  偏好中文名映射
+     * @return 整份发出去了返回 true
+     */
+    private boolean sendInstoreImages(Long groupId, List<InstoreUserVo> users,
+                                      Map<String, String> labels) {
+        if (users.isEmpty()) {
+            return false;
+        }
+        int total = Math.min(users.size(), QqReplyText.DEFAULT_MAX_LISTED);
+        List<byte[]> cards = new ArrayList<>();
+        for (int i = 0; i < total; i += 4) {
+            List<InstoreUserVo> page = users.subList(i, Math.min(i + 4, total));
+            byte[] card = InstoreCardRenderer.render(page, labels, instoreImageLoader);
+            if (card == null) {
+                // 任何一张画不出就整份回落文字 —— 半份图集比没有更让人困惑
+                return false;
+            }
+            cards.add(card);
+        }
+        String text = QqReplyText.instoreCount(users.size());
+        // 截断时不静默：与文字版同一条纪律（超过上限的部分必须有交代）
+        if (users.size() > total) {
+            text += "\n……还有 " + (users.size() - total) + " 人";
+        }
+        return client.sendGroupMessageImages(groupId, cards, text);
     }
 
     /**
@@ -470,7 +672,7 @@ public class QqCommandService {
     /**
      * 回复月卡说明：有哪几种卡、各多少钱、覆盖什么时段。
      *
-     * <p><b>与 {@code /价格} 分开是刻意的</b>：那条讲「按时长怎么算钱」，
+     * <p><b>与 {@code fw价格} 分开是刻意的</b>：那条讲「按时长怎么算钱」，
      * 这条讲「包月怎么买」—— 两笔账的算法完全不同，塞进一条消息里两边都说不清。
      *
      * <p>数据源是 {@link MonthlyCardService#cardTypes()}（与用户端月卡页同一个方法），
@@ -510,7 +712,7 @@ public class QqCommandService {
             return;
         }
         client.sendGroupMessage(groupId, QqReplyText.menu(
-                result.getData(), baseUrl() + "/#/mall"));
+                result.getData(), baseUrl() + "/#/mall", writeUsable()));
     }
 
     /**
@@ -530,7 +732,10 @@ public class QqCommandService {
      * @param groupId 目标群号
      */
     private void replyWeb(Long groupId) {
-        client.sendGroupMessage(groupId, QqReplyText.web(baseUrl()));
+        // 两条：一条讲解、一条纯网址（网址单独一条才好长按复制，见 QqReplyText#web）
+        for (String message : QqReplyText.web(baseUrl())) {
+            client.sendGroupMessage(groupId, message);
+        }
     }
 
     /**

@@ -8,6 +8,7 @@ import com.kaede.uspace.billing.BillingPeriod;
 import com.kaede.uspace.billing.BillingService;
 import com.kaede.uspace.billing.FreePeriodService;
 import com.kaede.uspace.billing.FreeRange;
+import com.kaede.uspace.billing.HalfPeriodUsage;
 import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.NextChange;
@@ -490,8 +491,8 @@ public class OrderService {
      * {@code OrderMapper} 里那两个查询同源：那个只认 {@code IN_USE}，
      * 因为首页要拿它决定「开门 / 查看密码」——待支付的订单密码早已撤销，
      * 返回它会让首页给出一个点不动的「查看密码」。而本方法要的恰恰是
-     * 「这个人手上还有一笔账没了结」，供群里的 {@code /结账} 用：
-     * 已经停过表、但还没付款时，再发一次 {@code /结账} 应当重新撑起付款入口
+     * 「这个人手上还有一笔账没了结」，供群里的 {@code fw结账} 用：
+     * 已经停过表、但还没付款时，再发一次 {@code fw结账} 应当重新撑起付款入口
      * （待付金额与网页端链接），而不是回一句「你没有在计时的订单」。
      *
      * @param userId 用户 ID
@@ -499,6 +500,22 @@ public class OrderService {
      */
     public BizResult<OrderVo> findUnsettledOrder(Long userId) {
         return BizResult.ok(OrderVo.from(orderMapper.selectUnsettledByUser(userId)));
+    }
+
+    /**
+     * 列出某人全部<b>未付款</b>的订单（{@code PENDING_PAYMENT} 或 {@code REJECTED}）。
+     *
+     * <p>供群里的 {@code fw未付款} 用 —— 与 {@link #findUnsettledOrder} 分开：
+     * 那个是「最近一笔」、还带上 {@code IN_USE}（{@code fw结账} 要靠它辨认
+     * 「已经停过表」的情形），而这里只要「还没付钱的账」，且要列全。
+     *
+     * @param userId 用户 ID
+     * @return 未付款的订单，最近的在前；没有时返回空列表
+     */
+    public BizResult<List<OrderVo>> findUnpaidOrders(Long userId) {
+        return BizResult.ok(orderMapper.selectUnpaidByUser(userId).stream()
+                .map(OrderVo::from)
+                .toList());
     }
 
     // ==================================================================
@@ -556,8 +573,10 @@ public class OrderService {
         List<Booking> bookings = findCoveringBookings(order, previewAt);
         BillingResult bill = calculateBill(order, previewAt, bookings);
 
+        // 「已到封顶」的判定住在 BillingService（allHalfPeriodsCapped）——
+        // 它要按半场分组求和，而半场的划分只在那儿有定义（2026-10-10 从本类挪过去）
         return BizResult.ok(OrderPreviewVo.of(order, previewAt, bill,
-                !bookings.isEmpty(), allSegmentsCapped(bill.getSegments()),
+                !bookings.isEmpty(), billingService.allHalfPeriodsCapped(bill.getSegments()),
                 statusAfterSettle(bill.getTotalAmount()), nextChange(order, bill, previewAt)));
     }
 
@@ -592,9 +611,18 @@ public class OrderService {
             // 报一句「还有 X 秒进入下一档 ¥4」是假话。但包场快结束时得说一声
             return bookingEndingChange(order, at);
         }
+        // 封顶按半场累计、且跨订单：预告的「剩余额度」要把本单前面的段
+        // 与历史订单的实收一起扣掉 —— 与 calculateBill 里的预置同源
+        //（同一个 seedHalfPeriodUsage）。这里刻意再查一次库而不是把上一轮的
+        // usage 缓存下来：缓存的失效时机（结算、订单变化）比这一次索引查询
+        // 更需要小心，而预览本来就是低频轮询
+        HalfPeriodUsage seeded = new HalfPeriodUsage();
+        seedHalfPeriodUsage(seeded, order, at);
         return billingService.nextChange(ongoing.getStartTime(), at,
                 bill.getMonthSpentBefore(), queryCardCoverage(order),
-                queryFreeRanges(order, ongoing.getStartTime(), at));
+                queryFreeRanges(order, ongoing.getStartTime(), at),
+                billingService.halfPeriodUsedBefore(segments, ongoing,
+                        bill.isDiscounted(), seeded));
     }
 
     /**
@@ -923,13 +951,16 @@ public class OrderService {
     /**
      * 查询本月的累计消费与优惠资格。
      *
-     * <p>与结算用的是同一套口径：只算本月<b>已支付</b>订单的实付额、
-     * 不含月卡卡费、按订单开始时间归集。判定则直接调
-     * {@link BillingService#isDiscounted}，不在别处重写一遍门槛比较。
+     * <p>与结算用的是同一套口径：只算<b>已支付</b>订单的实付额、不含月卡卡费，
+     * 判定则直接调 {@link BillingService#isDiscounted}，
+     * 不在别处重写一遍门槛比较。
      *
      * <p>月份取<b>当前自然月</b>（而不是某一单的月份）—— 这个接口回答的是
      * 「我现在算什么状态、下一单要花多少钱」，本来就是看当下。
-     * 而结算时的判定仍按各单自己的开始时间，两者用途不同、口径不冲突。
+     * 而「一笔消费归哪个自然月」由<b>离场时刻</b>定（见
+     * {@code OrderMapper#selectMonthPaidAmount}）：8/31 进店、9/1 离店的夜单，
+     * 9 月 1 日就已经出现在这里。结算时判本单走不走优惠价取的是
+     * <b>订单开始月</b>，两者用途不同、口径不冲突。
      *
      * @param userId 当前登录用户
      * @return 本月累计额、门槛、是否已享优惠、还差多少
@@ -1344,15 +1375,66 @@ public class OrderService {
             return zeroBill(endTime, endTime, monthSpent);
         }
 
+        // ⚠️ 一个额度累计器贯穿所有区间：封顶是【按半场】算的，而同一个半场
+        // 可能被包场剪成好几截 —— 它们共享一份封顶额度（2026-10-10 的规则，
+        // 见 BillingService 的类注释）。逐截各自新建累计器的话，
+        // 每一截都能把封顶重收一遍
+        HalfPeriodUsage usage = new HalfPeriodUsage();
+        // 不止本单：同一半场里他此前已经付过的钱也占额度（拆单不能绕过封顶）
+        seedHalfPeriodUsage(usage, order, endTime);
+
+        // 起点取【实际计费起点】（第一段的开始），不是订单的开门时刻 ——
+        // 包场人提前到店时两者相差几小时，返回开门时刻会让前端展示出
+        // 与实际收费不符的账单
         List<BillingResult> parts = new ArrayList<>();
         for (TimeRange range : ranges) {
             parts.add(billingService.calculate(range.from(), range.to(), monthSpent,
-                    coverage, freeRanges));
+                    coverage, freeRanges, usage));
         }
         // 起点取【实际计费起点】（第一段的开始），不是订单的开门时刻 ——
         // 包场人提前到店时两者相差几小时，返回开门时刻会让前端展示出
         // 与实际收费不符的账单
         return mergeBills(parts, ranges.get(0).from(), endTime);
+    }
+
+    /**
+     * 把「该用户在同一半场内已支付的其它订单」的实收预置进半场额度。
+     *
+     * <p><b>为什么封顶要跨订单</b>：用户随时可以结算再重新开门（那是正常操作，
+     * 不是薅羊毛的手段），若额度只看本单，拆单就能绕过封顶 ——
+     * 玩满 4 小时 36 分（日场收 40 元封顶）、结算、再玩 4 小时 36 分，
+     * 两单合计 80 元，而这个半场本该最多收 40 元。
+     *
+     * <p>查询范围 = 本次计费涉及的半场窗口（起点取开门时刻所在半场的起点，
+     * 终点取离场时刻所在半场的终点）。命中的历史单一律交给
+     * {@link BillingService#seedUsage} 按段归位 —— 跨半场的订单会被拆到
+     * 各自半场的桶里，因此范围放宽无害，<b>漏掉才会少收钱</b>。
+     *
+     * <p>⚠️ <b>没有快照的历史订单不参与累计</b>（快照 2026-10-03 起才有）——
+     * 宁可不计（对顾客有利）也不去现算：那要走同一套「枚举可变输入」的重算，
+     * 而重算结果本来就只敢用于展示。
+     *
+     * <p>⚠️ <b>老订单重算（{@link #recomputeBill}）也会走到本方法</b>，
+     * 那时查询可能命中「本单之后开的单」—— 多扣额度会让重算与落库对不上，
+     * 结果自然回落到「不展示账单」（那条路本来就只在金额全等时才用），
+     * 不会把错的账当成历史事实。
+     *
+     * @param usage   待预置的累计器
+     * @param order   本次的订单（重算时是那笔老订单）
+     * @param endTime 计费截止时刻
+     */
+    private void seedHalfPeriodUsage(HalfPeriodUsage usage, Order order, LocalDateTime endTime) {
+        LocalDateTime from = billingService.halfPeriodStartAt(order.getStartTime());
+        LocalDateTime to = billingService.halfPeriodEndAt(endTime);
+        for (Order paid : orderMapper.selectPaidOverlapping(
+                order.getUserId(), order.getId(), from, to)) {
+            OrderBillSnapshot snapshot = parseSnapshot(paid);
+            if (snapshot == null || snapshot.getBill() == null
+                    || snapshot.getBill().getSegments() == null) {
+                continue;
+            }
+            billingService.seedUsage(usage, snapshot.getBill().getSegments());
+        }
     }
 
     /**
@@ -1438,14 +1520,22 @@ public class OrderService {
     }
 
     /**
-     * 查询本单结算前的当月累计实付额。
+     * 查询本单结算前、<b>订单开始那个月</b>的累计实付额。
      *
      * <p><b>月份由订单的 {@code startTime} 推出，不是 {@code now}</b> ——
-     * 跨零点结算的夜单不会跳到下个月，管理员事后修正时长也不会让
-     * 历史订单的优惠判定漂移。
+     * 判定依据必须跟着订单走：用户在零点前看预览、零点后点「停止计时」，
+     * 若按 {@code now} 取月份，两次取到的累计不同，页面上的价与实际收的价
+     * 就对不上了（预览与结算走的是同一个 {@code calculateBill}，
+     * 那是「预览价必然等于实际价」的实现基础）。管理员事后修正时长不会让
+     * 历史订单的优惠判定漂移，也是同一个道理。
+     *
+     * <p>⚠️ <b>这里取的是「开始月」，而被查的累计本身按离场月归集</b>
+     * （见 {@code OrderMapper#selectMonthPaidAmount} 的注释）：一笔 8/31 进店、
+     * 9/1 离店的夜单因此享 <b>8 月</b>已挣到的优惠资格，却计入 <b>9 月</b>的累计。
+     * 「判定跟着订单走、归集跟着离场走」是刻意的分工，改动前先读那一处。
      *
      * @param order 订单
-     * @return 当月累计实付额（元）；无记录时为 0
+     * @return 订单开始那个月的累计实付额（元）；无记录时为 0
      */
     private BigDecimal queryMonthSpent(Order order) {
         LocalDateTime monthStart = order.getStartTime().toLocalDate()
@@ -1607,30 +1697,6 @@ public class OrderService {
         return total == null || total.compareTo(BigDecimal.ZERO) <= 0
                 ? OrderStatus.PAID.name()
                 : OrderStatus.PENDING_PAYMENT.name();
-    }
-
-    /**
-     * 判断账单当前是否已全部达到封顶价 —— 各计费段的实收金额都已等于其封顶值。
-     *
-     * <p><b>不是「是否超顶」</b>：计费段的 {@code capped} 表示封顶前金额已超过封顶，
-     * 要到第 11 档（5 小时 6 分）起才为 true；而金额不再增长从第 10 档
-     * （4 小时 36 分）就开始了，那段时间 {@code capped} 是 false，
-     * 用它会漏报 ——「达到封顶」与「标记为超顶」是两回事，计费规则里专门写过这一条。
-     *
-     * <p>没有计费段时返回 false：整段被包场覆盖的账单是 0 元，
-     * 但「封顶」在这里不适用（包场结束后照样会重新计费）。
-     *
-     * <p><b>包级可见而非私有</b>，是为了让单元测试能直接断言各种情形 ——
-     * 与 {@link #billableRanges} 同一个理由：真要用订单去构造「已封顶」，
-     * 就得依赖「此刻落在哪个计费时段」，那种用例时灵时不灵，比没有还糟。
-     *
-     * @param segments 账单分段
-     * @return 各段实收均已达封顶返回 true
-     */
-    static boolean allSegmentsCapped(List<SegmentBill> segments) {
-        return !segments.isEmpty()
-                && segments.stream()
-                .allMatch(s -> s.getAmount().compareTo(s.getCapAmount()) >= 0);
     }
 
     // ==================================================================

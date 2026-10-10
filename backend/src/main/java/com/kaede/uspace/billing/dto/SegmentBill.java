@@ -64,6 +64,29 @@ public class SegmentBill {
     /** 是否触发了封顶。为 true 时说明原始金额已超过该时段的封顶金额 */
     private boolean capped;
 
+    /**
+     * 本段开始前，同一半场（当前优惠状态那一线）已经收掉的金额（元）。
+     *
+     * <p><b>它是账单解释「为什么这段只收 8 元」的依据</b>：封顶自 2026-10-10 起
+     * 按半场累计 —— 同一半场里前面几段（可能是被包场剪开的、也可能是被活动
+     * 切开的）收掉的每一分钱，都会压住本段能收的上限。
+     * 不记这个数的话，用户看到「原价 32 元、实收 8 元」只能看到一个没有来由的减法。
+     *
+     * <p>它<b>不含</b>本段自己的金额。为 0 有两种情形：本段是该半场的第一段，
+     * 或前面的段全被免掉了（免费段不消耗额度）。
+     */
+    private BigDecimal halfPeriodUsedBefore = BigDecimal.ZERO;
+
+    /**
+     * 本段因<b>半场累计</b>而少收的金额（元）。
+     *
+     * <p>口径：{@code min(封顶前金额, 封顶) − 实收}。它<b>不含</b>段级封顶的
+     * 那部分 —— 本段是第一段时该值恒为 0，「原始 44 收 40」的差额不记在这里。
+     * 与 {@link #capped} 配合读：{@code capped} 说「本段自己的原始金额超顶了」，
+     * 本字段说「其中有多少是因为半场前面已经收过钱而不再收的」。
+     */
+    private BigDecimal halfPeriodCutAmount = BigDecimal.ZERO;
+
     /** 本段是否被月卡覆盖（免费）。为 true 时 {@link #amount} 为 0 */
     private boolean freeByCard;
 
