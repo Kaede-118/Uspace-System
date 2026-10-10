@@ -17,7 +17,7 @@ import java.time.LocalDateTime;
  * 本类是白名单而非黑名单，将来给 {@code SysUser} 加敏感列也不会自动漏出来。
  *
  * <p><b>偏好只给 code，不给中文名</b>：{@code preference} 里是
- * {@code PAIPAI} 这样的字典 code（逗号分隔，可能多个），中文名由前端用
+ * {@code MAIMAI} 这样的字典 code（逗号分隔，可能多个），中文名由前端用
  * {@code GET /api/devices/types} 自己映射。那个接口是匿名开放的，
  * 且前端在「设置游玩偏好」时本来就要调它，多映射一次不增加任何成本；
  * 而后端为此引入一条 {@code order → device} 的依赖边则不划算。

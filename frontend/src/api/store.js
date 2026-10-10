@@ -92,7 +92,7 @@ export function getFreePeriods(limit) {
  *
  * <p>返回门店当前全部在店顾客，按进店时刻升序，<b>不含任何金额</b>。
  *
- * <p>⚠️ {@code preference} 是逗号分隔的 code（如 {@code "PAIPAI"}），
+ * <p>⚠️ {@code preference} 是逗号分隔的 code（如 {@code "MAIMAI"}），
  * <b>没有中文名</b> —— 中文名在 {@code /api/devices/types} 里，
  * 前端用它做映射。后端不给是刻意的：偏好中文名躺在 device 包，
  * 为一个翻译新开一条 {@code order → device} 依赖边不划算。

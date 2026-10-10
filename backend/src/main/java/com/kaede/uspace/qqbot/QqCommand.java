@@ -102,6 +102,19 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
         /** 查近期包场时间表（{@code fw包场}） */
         BOOKING_SCHEDULE,
 
+        /**
+         * 查门店公告（{@code fw公告}、{@code fwgg}、{@code fwnotice}）—— <b>纯查询</b>。
+         *
+         * <p>只列最近几条（{@code QqReplyText.NOTICE_LIST_MAX}），全部内容在网页端
+         * 「全部公告」页 —— 公告是只增不减的消息流（机台每变一次状况就多一条），
+         * 群里全铺开会把聊天窗口刷满。数据源是 {@code NoticeService#listForUser}
+         * （与网页端同一个方法），所以置顶的同样排在最前。
+         *
+         * <p>⚠️ <b>别名 {@code gg} 必须带 {@code fw} 前缀</b>：它在游戏群里是常见词
+         *（打完一局就发「gg」），裸发被认成指令就会满群乱答。
+         */
+        NOTICE_LIST,
+
         /** 查自己的资料与消费（{@code fw看看自己}） */
         ME,
 
@@ -193,6 +206,20 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
          * 查出 {@code sys_user.role} 之后拒绝非管理员。
          */
         STOCK_ADJUST,
+
+        /**
+         * 查店内设施与状况（{@code fw机台}、{@code fwdevice}）—— <b>纯查询</b>。
+         *
+         * <p>数据源是模块 4 的机台陈列（{@code DeviceService#listForDisplay}）——
+         * 与用户端「店内设施」页<b>同一个方法</b>，所以群里报的台数与状况
+         * 和网页上看到的必然一致。含维护中的机台：陈列的目的就是让人知道哪台在修，
+         * 藏起来会让顾客以为机器搬走了。
+         *
+         * <p>⚠️ <b>与 {@link #DEVICE_STATUS} 是两条不同的指令</b>：这一条只是查列表
+         *（谁都能发），那一条是按名字改单台状况（仅管理员）。两者语法不重叠 ——
+         * 后者要求「机台名 + 状况词」结尾（{@code fw拍拍机 1 号维护中}）。
+         */
+        DEVICE_LIST,
 
         /**
          * 调整机台状况（{@code fw拍拍机 1 号维护中}）—— <b>写指令，且仅管理员可用</b>。
@@ -291,6 +318,15 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
     }
 
     /**
+     * 构造「查门店公告」指令。
+     *
+     * @return 指令
+     */
+    public static QqCommand notices() {
+        return new QqCommand(Kind.NOTICE_LIST, null);
+    }
+
+    /**
      * 构造「看看自己」指令。
      *
      * @return 指令
@@ -384,6 +420,15 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
      */
     public static QqCommand stockAdjust(String name, Integer stock) {
         return new QqCommand(Kind.STOCK_ADJUST, name, stock);
+    }
+
+    /**
+     * 构造「查店内设施」指令。
+     *
+     * @return 指令
+     */
+    public static QqCommand deviceList() {
+        return new QqCommand(Kind.DEVICE_LIST, null);
     }
 
     /**

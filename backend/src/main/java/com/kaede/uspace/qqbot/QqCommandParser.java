@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
  *       （调整机台状况，仅管理员；状况词就是 {@code DeviceStatus} 的三个中文名）</li>
  *   <li>带了前缀但认不出 → {@link QqCommand.Kind#UNKNOWN_COMMAND}</li>
  *   <li><b>没有前缀 → 一律 {@link QqCommand.Kind#IGNORE}</b>。
- *       唯一的例外是 {@code kklm}，见 {@link #PREFIX_FREE_ALIASES}</li>
+ *       例外只有 {@code kklm} 与 {@code ping} 两个英文词，见 {@link #PREFIX_FREE_ALIASES}</li>
  * </ul>
  *
  * <p>⚠️ <b>商品下单也是封闭的</b>（2026-10-04 改）：它只认<b>带关键词</b>
@@ -78,27 +78,44 @@ public final class QqCommandParser {
      * 而它**依然走精确匹配**，所以「看看里面那个人是谁」这种闲聊不会误触发。
      *
      * <p>{@code kklm} 是「看看里面」的拼音首字母（2026-10-04 由用户要求加）——
-     * 全在英文键盘上，不必切中文输入法就能发。它只在解析器里认，
-     * {@code fw帮助} 不列（那边只给最好记的两三种写法）。
+     * 全在英文键盘上，不必切中文输入法就能发；它<b>免前缀</b>
+     * （见 {@link #PREFIX_FREE_ALIASES}），{@code fw帮助} 里也给了这个免前缀写法。
      * （同日删掉了 {@code rs}：它不缩写任何中文，记不住也用不上。）
      */
     private static final Set<String> INSTORE_ALIASES =
             Set.of("在店", "instore", "看看里面", "kklm");
 
     /**
-     * 免前缀的别名：<b>只有 {@code kklm}</b>（2026-10-10 由用户要求）。
+     * 免前缀的别名 → 对应的指令（2026-10-10 由用户要求）。
      *
-     * <p>它豁免的是一次前缀体检：四个英文字母的刻意输入不像闲聊，
-     * 而且全在英文键盘上 —— 店里想瞄一眼「现在有谁在」的人不必切中文输入法。
+     * <p>它们豁免的是那一次前缀体检：两个都是<b>刻意的英文输入</b>，
+     * 不像谁在群里随口说的话，而且全在英文键盘上。
      *
-     * <p>⚠️ <b>豁免只给这一个，中文别名与其余英文别名都必须带 {@code fw}</b>：
-     * 「在店」「看看里面」在群聊里是常见词，放了它们等于把「指令是封闭集合」
-     * 那条决定拆掉一半 —— 而那条决定的收益是「任何一次误判都可能真的建单计费」
-     * （见类注释）。{@code kklm} 没有这个风险，它是刻意的输入，不是谁的口头话。
+     * <ul>
+     *   <li>{@code kklm} → 在店名册：店里想瞄一眼「现在有谁在」的人，
+     *       不必切中文输入法就能发</li>
+     *   <li>{@code ping} → 连通性自检：网络里通行的自检词，
+     *       单独发一个 {@code ping} 就是在问「机器人还活着吗」，
+     *       与 {@code fw在吗} 同一个语义</li>
+     * </ul>
      *
-     * <p>仍走<b>整条精确匹配</b>：{@code kklm一下} 不是指令，照旧当闲聊静默。
+     * <p>⚠️ <b>豁免只给这两个英文词，中文别名与其余英文别名都必须带 {@code fw}</b>：
+     * 「在店」「在吗」「看看里面」在群聊里是常见词 —— 何况开头一个 @ 会被剥掉，
+     * 「@某人 在吗」剥完就是「在吗」—— 放了它们等于把「指令是封闭集合」
+     * 那条决定拆掉一半，而那条决定的收益是「任何一次误判都可能真的建单计费」
+     * （见类注释）。{@code kklm} 与 {@code ping} 没有这个风险，
+     * 它们是刻意的输入，不是谁的口头话。
+     *
+     * <p>仍走<b>整条精确匹配</b>：{@code kklm一下}、{@code ping一下} 都不是指令，
+     * 照旧当闲聊静默。
+     *
+     * <p>⚠️ <b>它是 Map 而不是集合</b>：两个词指向不同的指令，
+     * 集合表达不了这个对应关系。{@link QqCommand} 是不可变的 record，
+     * 所以每条指令只造一个实例、反复复用。
      */
-    private static final Set<String> PREFIX_FREE_ALIASES = Set.of("kklm");
+    private static final Map<String, QqCommand> PREFIX_FREE_ALIASES = Map.of(
+            "kklm", QqCommand.instore(),
+            "ping", QqCommand.ping());
 
     /** 同上 */
     private static final Set<String> HELP_ALIASES = Set.of("帮助", "help", "?");
@@ -108,6 +125,10 @@ public final class QqCommandParser {
      *
      * <p>中文别名给「在吗」—— 群里问「在吗」而机器人回一句「pong」，
      * 比让它对这个最常见的中文招呼保持沉默要自然得多。
+     *
+     * <p>⚠️ 但「在吗」<b>必须带前缀</b>：它在群里是再常见不过的招呼，
+     * 而且开头一个 @ 会被剥掉（「@某人 在吗」剥完就是「在吗」）——
+     * 免前缀的只有英文的 {@code ping}，见 {@link #PREFIX_FREE_ALIASES}。
      */
     private static final Set<String> PING_ALIASES = Set.of("ping", "在吗");
 
@@ -129,12 +150,28 @@ public final class QqCommandParser {
      * 删掉之后 {@code fw买单} 落到「没认出这条指令」，而那是个正确的反馈：
      * 它确实不是一条指令了。
      *
+     * <p>英文别名原来给的是 {@code settle}，2026-10-10 由用户要求换成 {@code pay} ——
+     * 少按三个键。⚠️ <b>是换掉而不是新增</b>：{@code fwsettle} 不再是一条指令，
+     * 发它会落到「没认出这条指令」，而那正是它该得的反馈。
+     *
      * <p>顺带一提，别名必须用<b>同一个 lower</b> 比较（见 {@code parse} 里那段说明）。
      */
-    private static final Set<String> SETTLE_ALIASES = Set.of("结账", "settle");
+    private static final Set<String> SETTLE_ALIASES = Set.of("结账", "pay");
 
     /** 查近期包场时间表 */
     private static final Set<String> BOOKING_ALIASES = Set.of("包场", "包场时间表", "booking");
+
+    /**
+     * 查门店公告。
+     *
+     * <p>别名给 {@code notice}（英文）与 {@code gg}（「公告」的拼音首字母，
+     * 与 {@code kklm} 同一套构词法）。
+     *
+     * <p>⚠️ <b>{@code gg} 必须带前缀</b>：它在游戏群里是常见词（打完一局就发
+     * 「gg」），裸发绝不能触发 —— 免前缀的只有 {@code kklm} 与 {@code ping}
+     * 两个刻意的词，见 {@link #PREFIX_FREE_ALIASES}。
+     */
+    private static final Set<String> NOTICE_ALIASES = Set.of("公告", "gg", "notice");
 
     /** 查自己的资料与消费 */
     private static final Set<String> ME_ALIASES = Set.of("看看自己", "我的", "me");
@@ -185,6 +222,17 @@ public final class QqCommandParser {
      * <p>「菜单」是店里更常说的那个词（卖饮料零食的那种柜子，顾客就管它叫菜单）。
      */
     private static final Set<String> MENU_ALIASES = Set.of("菜单", "menu");
+
+    /**
+     * 查店内设施与状况。
+     *
+     * <p>别名给 {@code device} —— 与 {@code menu} / {@code price} 这些英文别名同一风格。
+     *
+     * <p>⚠️ <b>它与「改机台状况」是两条不同的指令</b>（{@code fw拍拍机 1 号维护中}）：
+     * 这一条是查询、谁都能发，那一条是写指令、仅管理员。两者语法不重叠 ——
+     * 后者要求「机台名 + 状况词」结尾，而 {@code fw机台} 整条就是个别名。
+     */
+    private static final Set<String> DEVICE_LIST_ALIASES = Set.of("机台", "device");
 
     /**
      * 查网页端地址。
@@ -293,6 +341,7 @@ public final class QqCommandParser {
         names.addAll(OPEN_ALIASES);
         names.addAll(SETTLE_ALIASES);
         names.addAll(BOOKING_ALIASES);
+        names.addAll(NOTICE_ALIASES);
         names.addAll(ME_ALIASES);
         names.addAll(CURRENT_ORDER_ALIASES);
         names.addAll(UNPAID_ALIASES);
@@ -300,6 +349,7 @@ public final class QqCommandParser {
         names.addAll(PRICE_ALIASES);
         names.addAll(CARD_ALIASES);
         names.addAll(MENU_ALIASES);
+        names.addAll(DEVICE_LIST_ALIASES);
         names.addAll(WEB_ALIASES);
         names.addAll(VERIFY_KEYWORDS);
         names.addAll(CANCEL_KEYWORDS);
@@ -337,10 +387,11 @@ public final class QqCommandParser {
             return QqCommand.ignore();
         }
 
-        // ⓪ 免前缀的别名（只有 kklm）—— 它不必先说「我在跟机器人说话」，
+        // ⓪ 免前缀的别名（kklm 与 ping）—— 它们不必先说「我在跟机器人说话」，
         //    理由与边界见 PREFIX_FREE_ALIASES。放在剥前缀之前：剥不到前缀就走人了
-        if (PREFIX_FREE_ALIASES.contains(text.toLowerCase(Locale.ROOT))) {
-            return QqCommand.instore();
+        QqCommand prefixFree = PREFIX_FREE_ALIASES.get(text.toLowerCase(Locale.ROOT));
+        if (prefixFree != null) {
+            return prefixFree;
         }
 
         // ① 剥前缀（fw）。没有前缀的一律当闲聊 —— 见类注释里那条规矩。
@@ -394,6 +445,9 @@ public final class QqCommandParser {
         if (BOOKING_ALIASES.contains(lower)) {
             return QqCommand.bookingSchedule();
         }
+        if (NOTICE_ALIASES.contains(lower)) {
+            return QqCommand.notices();
+        }
         if (ME_ALIASES.contains(lower)) {
             return QqCommand.me();
         }
@@ -414,6 +468,9 @@ public final class QqCommandParser {
         }
         if (MENU_ALIASES.contains(lower)) {
             return QqCommand.productMenu();
+        }
+        if (DEVICE_LIST_ALIASES.contains(lower)) {
+            return QqCommand.deviceList();
         }
         if (WEB_ALIASES.contains(lower)) {
             return QqCommand.web();

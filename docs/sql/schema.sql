@@ -324,7 +324,7 @@ CREATE TABLE `biz_booking_participant` (
 -- ============================================================================
 -- 模块 4：设备管理 —— 设备类型字典
 --
--- 本表是「机器类型」的字典（拍拍机、抬手乐…）；
+-- 本表是「机器类型」的字典（音击、中二节奏、舞萌、日麻…）；
 -- biz_device（具体某台机器，待建）每台指向本表的一个类型。
 --
 -- 为什么单独建字典表而不是把类型写死在代码里：
@@ -339,8 +339,8 @@ CREATE TABLE `biz_booking_participant` (
 DROP TABLE IF EXISTS `biz_equipment_type`;
 CREATE TABLE `biz_equipment_type` (
   `id`         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `code`       VARCHAR(32)  NOT NULL                COMMENT '类型代码，如 PAIPAI / TAISHOU。存进 sys_user.preference 的就是它',
-  `name`       VARCHAR(50)  NOT NULL                COMMENT '类型名称，如「拍拍机」「抬手乐」',
+  `code`       VARCHAR(32)  NOT NULL                COMMENT '类型代码，如 ONGEKI / MAIMAI。存进 sys_user.preference 的就是它',
+  `name`       VARCHAR(50)  NOT NULL                COMMENT '类型名称，如「击」「萌」',
   `sort`       INT          NOT NULL DEFAULT 0      COMMENT '排序权重，越小越靠前。决定前端复选框与列表的显示顺序',
   `enabled`    TINYINT      NOT NULL DEFAULT 1      COMMENT '是否启用：1=启用 0=停用。停用后不再出现在可选项里，但历史偏好仍能解析出名称',
   `remark`     VARCHAR(255) DEFAULT NULL            COMMENT '备注',
@@ -352,13 +352,18 @@ CREATE TABLE `biz_equipment_type` (
   KEY `idx_enabled_sort` (`enabled`, `sort`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '设备类型字典';
 
--- 初始数据：当前场馆已知的三类机器。后续由运营在后台增删
+-- 初始数据：当前场馆已知的四类机器，展示顺序即 sort（击 → 中 → 萌 → 雀）。
+-- 名称是单字别名 —— 顾客在「游玩偏好」里看到的就是它们。
+-- 2026-10-10 由店主定稿：原「拍拍机 / 抬手乐 / 日麻」三条迁移而来
+-- （拍拍机 → MAIMAI、抬手乐 → CHUNI、日麻 → MAHJONG），另新增 ONGEKI。
+-- 后续仍由运营在后台增删。
 -- 注意显式给出 created_at / updated_at —— 这两列是 NOT NULL 且无默认值
 -- （业务表里它们由 MyBatis-Plus 自动填充，但建表脚本的 INSERT 得自己带上）
 INSERT INTO `biz_equipment_type` (`code`, `name`, `sort`, `created_at`, `updated_at`) VALUES
-  ('PAIPAI',  '拍拍机', 10, NOW(), NOW()),
-  ('TAISHOU', '抬手乐', 20, NOW(), NOW()),
-  ('RIMA',    '日麻',   30, NOW(), NOW());
+  ('ONGEKI',  '击', 10, NOW(), NOW()),
+  ('CHUNI',   '中', 20, NOW(), NOW()),
+  ('MAIMAI',  '萌', 30, NOW(), NOW()),
+  ('MAHJONG', '雀', 40, NOW(), NOW());
 
 
 -- ============================================================================
@@ -404,8 +409,9 @@ CREATE TABLE `biz_device` (
   KEY `idx_store_sort` (`store_id`, `sort`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '机台台账';
 
--- 初始数据：4 台拍拍机 + 2 台抬手乐，覆盖全部三种状况 ——
+-- 初始数据：4 台舞萌 + 2 台中二，覆盖全部三种状况 ——
 -- 演示时一屏就能看到「良好 / 待维护 / 维护中」三种标签长什么样。
+--（2026-10-10：随类型字典一起改名 —— 原「拍拍机 → 舞萌、抬手乐 → 中二」）
 --
 -- 写法说明：门店 ID 与类型 ID 都用子查询取，而不是写死 1 / 2 ——
 -- 自增值取决于脚本各段 INSERT 的先后，写死会在脚本顺序调整后静默错位。
@@ -417,12 +423,12 @@ INSERT INTO `biz_device` (`store_id`, `name`, `device_no`, `type_id`, `location`
 SELECT s.id, v.name, v.device_no, t.id, v.location, v.status, v.sort, NOW(), NOW()
   FROM (SELECT id FROM biz_store WHERE deleted = 0 ORDER BY id LIMIT 1) s
   JOIN (
-                 SELECT '拍拍机 1 号' AS name, 'PP-01' AS device_no, 'PAIPAI'  AS type_code, '靠窗第一台' AS location, 'NORMAL'       AS status, 10 AS sort
-       UNION ALL SELECT '拍拍机 2 号',        'PP-02',              'PAIPAI',                '靠窗第二台',          'NORMAL',              20
-       UNION ALL SELECT '拍拍机 3 号',        'PP-03',              'PAIPAI',                '靠墙第三台',          'NORMAL',              30
-       UNION ALL SELECT '拍拍机 4 号',        'PP-04',              'PAIPAI',                '靠墙第四台',          'NEEDS_REPAIR',        40
-       UNION ALL SELECT '抬手乐 1 号',        'TS-01',              'TAISHOU',               '进门左手边',          'NORMAL',              50
-       UNION ALL SELECT '抬手乐 2 号',        'TS-02',              'TAISHOU',               '进门右手边',          'MAINTAINING',         60
+                 SELECT '舞萌 1 号' AS name, 'MM-01' AS device_no, 'MAIMAI' AS type_code, '靠窗第一台' AS location, 'NORMAL'       AS status, 10 AS sort
+       UNION ALL SELECT '舞萌 2 号',        'MM-02',            'MAIMAI',              '靠窗第二台',          'NORMAL',              20
+       UNION ALL SELECT '舞萌 3 号',        'MM-03',            'MAIMAI',              '靠墙第三台',          'NORMAL',              30
+       UNION ALL SELECT '舞萌 4 号',        'MM-04',            'MAIMAI',              '靠墙第四台',          'NEEDS_REPAIR',        40
+       UNION ALL SELECT '中二 1 号',        'CH-01',            'CHUNI',               '进门左手边',          'NORMAL',              50
+       UNION ALL SELECT '中二 2 号',        'CH-02',            'CHUNI',               '进门右手边',          'MAINTAINING',         60
        ) v
   JOIN `biz_equipment_type` t ON t.code = v.type_code AND t.deleted = 0;
 

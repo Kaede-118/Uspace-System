@@ -6,16 +6,17 @@
  * 两个页面的卡片长得一样，只有第三行的信息不同（在店列表显示到店时刻与在店时长，
  * 我的页面显示消费与时长统计），所以第三行做成具名插槽 {@code #info}。
  *
- * <p><b>六行结构（2026-10-03 定稿）</b>：
+ * <p><b>六行结构（2026-10-03 定稿；2026-10-10 调过顺序）</b>：
  * <ol>
  *   <li>自定义 banner（3:1）—— <b>右侧不叠任何东西</b>：店里是音游机，
  *       顾客传的多半是舞萌 DX 姓名框素材，右侧往往是段位、Rating 这些要看的内容</li>
  *   <li>头像 · STAFF · 昵称</li>
  *   <li>游玩偏好的文字标签</li>
+ *   <li>月卡标签 —— 紧跟偏好（2026-10-10 由用户要求，从卡片最下面挪上来）</li>
  *   <li>到店时刻 —— 由调用方放进插槽（跨天时带「昨天 / 前天 / 几月几日」，
  *       见 {@code utils/format.js} 的 {@code formatArrivalTime}）</li>
- *   <li>在店时长 —— 同上，<b>两段各占一行</b></li>
- *   <li>月卡标签（放最下面）</li>
+ *   <li>在店时长 —— 同上，<b>两段各占一行、放在卡片底部左对齐</b>
+ *      （2026-10-10 由用户要求：从名字下面挪到底部；当天试过右对齐又改回左对齐）</li>
  * </ol>
  *
  * <p>⚠️ <b>偏好与月卡这两行「没内容也占位」</b>（CSS 用 min-height 撑住）：
@@ -137,10 +138,11 @@ const cardLabel = computed(() => {
 /**
  * 第四行最多显示几个偏好标签，超出的收成「+N」。
  *
- * <p>取 3 是因为设备类型字典目前就三条（拍拍机 / 抬手乐 / 日麻，
- * 见 schema.sql 的初始数据）—— 也就是说这里<b>实际上永远不会截断</b>。
- * 3 个三字标签按收紧后的内边距约 131px，而半宽卡片的内容宽约 136px，
- * 恰好排得下；再多就要换行了，所以才留这个上限。
+ * <p>取 3 是沿用当初的估算：那会儿字典是三条三字标签（拍拍机 / 抬手乐 / 日麻），
+ * 3 个按收紧后的内边距约 131px、半宽卡片内容宽约 136px，恰好排得下。
+ * ⚠️ 2026-10-10 字典改版后是四条**单字**标签（击 / 中 / 萌 / 雀），
+ * 空间比当初宽松得多 —— 但上限仍是 3：**用户选满四个时第 4 个会收成「+1」**，
+ * 这是该上限第一次真正生效的场景（`.tag-more` 那个样式就是为它准备的）。
  */
 const MAX_TAGS = 3
 
@@ -197,18 +199,20 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
     </div>
 
     <!--
-      第四、五行：调用方给的两段信息，**各占一行** ——
+      第四行：月卡标签 —— 紧跟昵称与偏好
+      （2026-10-10 由用户要求，从卡片最下面挪上来）。同样**没持卡也占这一行**。
+    -->
+    <div class="user-card__card-row">
+      <span v-if="cardLabel" class="tag tag-success">{{ cardLabel }}</span>
+    </div>
+
+    <!--
+      第五、六行：调用方给的两段信息，**各占一行、放在卡片底部（左对齐）**
+      （2026-10-10 由用户要求：从名字下面挪到底部；先试过右对齐，改回左对齐）——
       在店列表是「到店时刻 / 在店时长」，我的页面是「累计消费 / 累计时长」。
     -->
     <div class="user-card__foot">
       <slot name="info" />
-    </div>
-
-    <!--
-      第六行：月卡标签，放在最下面。同样**没持卡也占这一行**（与偏好同理）。
-    -->
-    <div class="user-card__card-row">
-      <span v-if="cardLabel" class="tag tag-success">{{ cardLabel }}</span>
     </div>
   </div>
 </template>
@@ -273,10 +277,11 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
   opacity: 0.3;
 }
 
-/* ---------- 第六行：月卡（放最下面） ---------- */
+/* ---------- 第四行：月卡 ---------- */
 
 /*
- * 月卡标签独占一行，放在卡片最下面。
+ * 月卡标签独占一行，紧跟昵称与偏好
+ *（2026-10-10 由用户要求，从卡片最下面挪上来）。
  *
  * ⚠️ 不挤进头像那一行是刻意的：它是顾客之间会看的信息（谁今天免单），
  * 而半宽卡片一行放不下「头像 + 月卡 + STAFF + 昵称」—— 挤在一起的结果
@@ -284,12 +289,14 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
  *
  * ⚠️ 没持卡时这一行【仍然占位】（min-height 撑住）：
  * 卡片在名册里是并排的，高矮不一会让整个栅格看起来参差。
- * 高度构成 = 标签本身 20px（base.css 的 .tag）+ 下内边距 8px。
+ * 高度构成 = 标签本身 20px（base.css 的 .tag）+ 上内边距 6px
+ *（上内边距与偏好那一行同款，两行标签的垂直节奏才一致；它现在是
+ *  「跟在偏好后面」而不是「收尾」，所以留白从上边走，不再从下边走）。
  */
 .user-card__card-row {
   display: flex;
-  padding: 0 var(--sp-2) var(--sp-2);
-  min-height: calc(20px + var(--sp-2));
+  padding: 6px var(--sp-2) 0;
+  min-height: calc(20px + 6px);
 }
 
 /* ---------- 第二行：头像 · STAFF · 昵称 ---------- */
@@ -362,7 +369,7 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
   white-space: nowrap;
 }
 
-/* ---------- 第五、六行：到店 / 在店 ---------- */
+/* ---------- 第五、六行（卡片底部）：到店 / 在店 ---------- */
 
 .user-card__foot {
   display: flex;
@@ -370,9 +377,24 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
      不必为了塞进一行而降字号（那是「两段挤一行」时的妥协） */
   flex-direction: column;
   gap: 1px;
+  /*
+   * ⚠️ 位置挪到了卡片最后一行（2026-10-10 由用户要求，原来在名字下面）——
+   * 上边留白 4px 与月卡隔开，下边 8px 收尾。
+   * 对齐保持左对齐：当天先试过右对齐，用户看过之后要求改回左对齐。
+   */
   padding: var(--sp-1) var(--sp-2) var(--sp-2);
-  color: var(--c-text-sub);
+  /*
+   * ⚠️ 2026-10-10 由用户要求加深加粗（--c-text-sub → --c-text、700）——
+   * 与群里的名册图同步：那边这两行从灰色（0x8A9099）改成了纯黑加粗。
+   * 用 --c-text（#2b2340）而不是纯黑：它就是这个设计系统里「最深的文字色」，
+   * 网页端不该为这一处破例。
+   * 字号维持 11px 不动 —— 同步的是颜色与字重，而两段各占一行的排法
+   * 正是为 11px 留的（见上面）。roomy 档（「我的」页）只覆写 padding 与字号，
+   * 颜色与字重跟着这里走，是刻意的（同一个组件、同一个观感）。
+   */
+  color: var(--c-text);
   font-size: 11px;
+  font-weight: 700;
   line-height: 1.35;
 }
 
@@ -426,7 +448,8 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
 .user-card--roomy .user-card__tags {
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4) 0;
-  min-height: calc(20px + var(--sp-2));
+  /* 22px 跟的是 .user-card__tags .tag 的高度（2026-10-10 放大加粗时从 20 提上来的） */
+  min-height: calc(22px + var(--sp-2));
 }
 
 .user-card--roomy .user-card__tags .tag {
@@ -435,21 +458,25 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
 }
 
 .user-card--roomy .user-card__foot {
-  padding: var(--sp-2) var(--sp-4) 0;
+  /* ⚠️ 它现在收尾，底部留白从这里给（原来由月卡那一行收尾） */
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
   font-size: 13px;
 }
 
 .user-card--roomy .user-card__card-row {
-  padding: 0 var(--sp-4) var(--sp-3);
-  min-height: calc(20px + var(--sp-3));
+  /* 与 roomy 的偏好那一行同款：留白从上边走（它现在是「跟在偏好后面」而非收尾） */
+  padding: var(--sp-2) var(--sp-4) 0;
+  min-height: calc(20px + var(--sp-2));
 }
 
 /* ---------- 第四行：偏好标签 ---------- */
 
 /*
  * ⚠️ 标签的左右内边距收到 4px（通用 .tag 是 8px）：半宽卡片的内容宽
- * 只有约 144px，而「拍拍机 + 抬手乐 + 日麻」按通用内边距要 147px ——
- * 正好放不下。收到 4px 后约 123px，三个标签能排成一行还有余量。
+ * 只有约 144px，而当年那三个三字标签（拍拍机 + 抬手乐 + 日麻）按通用内边距
+ * 要 147px —— 正好放不下。收到 4px 后约 123px，三个标签能排成一行还有余量。
+ * ⚠️ 2026-10-10 字典改版后标签都是单字（击 / 中 / 萌 / 雀），空间宽松了不少，
+ * 但这段收紧保留 —— 类型名随时可能再加长。
  *
  * flex-wrap 是兜底：更窄的屏（320px）上仍会换行 —— 那是可接受的，
  * 换行只是卡片高一点，而裁掉标签会真的丢信息。
@@ -461,15 +488,36 @@ const overflowCount = computed(() => Math.max(0, props.tags.length - visibleTags
   padding: 6px var(--sp-2) 0;
   /*
    * ⚠️ 没设偏好时这一行【仍然占位】（见模板注释）：与月卡那一行同理，
-   * 撑住高度是为了让同一行的卡片等高。高度 = 标签 20px + 上内边距 6px。
+   * 撑住高度是为了让同一行的卡片等高。高度 = 标签 22px + 上内边距 6px。
+   * ⚠️ 22px 与 .user-card__tags .tag 的高度是【一对】，改一处要改另一处。
    */
-  min-height: calc(20px + 6px);
+  min-height: calc(22px + 6px);
 }
 
 .user-card__tags .tag {
   /* 胶囊本身不压缩：压了会变形，宁可换行 */
   flex-shrink: 0;
   padding: 0 4px;
+  /*
+   * ⚠️ 2026-10-10 由用户要求放大加粗（11px / 500 → 12px / 700），
+   * 与群里的名册图同步（那边偏好胶囊也从 18 号常规调成了 20 号粗体）。
+   *
+   * 空间是算过的：⚠️ 2026-10-10 字典改版后标签都是单字（击 / 中 / 萌 / 雀），
+   * 三个加起来约 60px、选满四个也不到 80px，而这一行的内容宽约 160px
+   *（在店列表卡片 176px − 左右各 8px）—— 放得下、不会换行。
+   *（改版前是三个三字标签、约 140px，当时也放得下。）
+   * ⚠️ 改字号前先照着算一遍：这一行是 flex-wrap，放不下就会换行，
+   * 而并排卡片一旦不等高，名册「扫一眼就能比」就没了。
+   *
+   * ⚠️ 高度 22px 与下面 .user-card__tags 里 min-height 的 22px 是【一对】：
+   * 没设偏好的人那一行靠 min-height 占位，两个数不一致就会差几像素。
+   *
+   * ⚠️ 字号只在紧凑档覆盖（roomy 档本来就是 12px），字重与高度两档一起吃 ——
+   * 「我的」页的偏好标签跟着变大加粗，是刻意的（同一个组件、同一个观感）。
+   */
+  height: 22px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .tag-more {

@@ -34,7 +34,7 @@ public class DeviceVo {
     /** 设备类型 ID */
     private Long typeId;
 
-    /** 设备类型代码，如 {@code PAIPAI}。可为空（类型已被删除时） */
+    /** 设备类型代码，如 {@code MAIMAI}。可为空（类型已被删除时） */
     private String typeCode;
 
     /** 设备类型名称，如「拍拍机」。可为空（类型已被删除时） */

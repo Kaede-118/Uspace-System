@@ -5,8 +5,12 @@ import com.kaede.uspace.billing.dto.BillingRulesVo;
 import com.kaede.uspace.common.config.UploadProperties;
 import com.kaede.uspace.common.config.WebProperties;
 import com.kaede.uspace.common.result.BizResult;
+import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.device.DeviceService;
+import com.kaede.uspace.device.dto.DeviceGroupVo;
 import com.kaede.uspace.device.dto.EquipmentTypeVo;
+import com.kaede.uspace.notice.NoticeService;
+import com.kaede.uspace.notice.dto.NoticeVo;
 import com.kaede.uspace.order.InstoreService;
 import com.kaede.uspace.order.OrderProperties;
 import com.kaede.uspace.order.OrderService;
@@ -80,15 +84,18 @@ import java.util.Map;
  * <h3>依赖方向</h3>
  *
  * <p>本类调 {@link InstoreService}（模块 8）、{@link DeviceService}（模块 4）、
- * {@link BookingService}（模块 3）、{@link StoreService}（模块 3）、
- * {@link MonthlyCardService}（模块 9）、{@link OrderService}（模块 8），
+ * {@link NoticeService}（公告包）、{@link BookingService}（模块 3）、
+ * {@link StoreService}（模块 3）、{@link MonthlyCardService}（模块 9）、
+ * {@link OrderService}（模块 8）、{@link ProductService}（商品包），
  * 都是<b>只读查询</b>。反方向（那些包 import 本包）是禁止的，见包注释。
  *
- * <p>{@code DeviceService} 那条依赖是为「偏好」而引的：{@code InstoreUserVo.preference}
- * 里存的是 {@code PAIPAI} 这样的字典 code，中文名要另外映射 ——
+ * <p>{@code DeviceService} 那条依赖最初是为「偏好」而引的：{@code InstoreUserVo.preference}
+ * 里存的是 {@code MAIMAI} 这样的字典 code，中文名要另外映射 ——
  * 那个 VO 的注释写着「中文名由前端映射，后端为此引入依赖边不划算」，
  * 但那条理由针对的是 {@code order → device}（会与既有的 {@code device → space} 交织）。
  * 本包在最下游，加这些边不产生任何环，所以这里直接映射，把中文名送给群。
+ * 如今它还多供一处：{@code fw机台} 的陈列列表（{@link DeviceService#listForDisplay}
+ * 与用户端「店内设施」页同一个方法）。
  */
 @Slf4j
 @Service
@@ -106,6 +113,8 @@ public class QqCommandService {
     private final QqVerifyService qqVerifyService;
 
     private final DeviceService deviceService;
+
+    private final NoticeService noticeService;
 
     private final BookingService bookingService;
 
@@ -143,6 +152,7 @@ public class QqCommandService {
                             InstoreService instoreService,
                             QqVerifyService qqVerifyService,
                             DeviceService deviceService,
+                            NoticeService noticeService,
                             BookingService bookingService,
                             StoreService storeService,
                             MonthlyCardService monthlyCardService,
@@ -161,6 +171,7 @@ public class QqCommandService {
         this.instoreService = instoreService;
         this.qqVerifyService = qqVerifyService;
         this.deviceService = deviceService;
+        this.noticeService = noticeService;
         this.bookingService = bookingService;
         this.storeService = storeService;
         this.monthlyCardService = monthlyCardService;
@@ -232,6 +243,7 @@ public class QqCommandService {
             case HELP -> replyHelp(groupId, event.getUserId());
             case VERIFY_CODE -> replyVerifyCode(groupId, event, command.argument());
             case BOOKING_SCHEDULE -> replyBookingSchedule(groupId);
+            case NOTICE_LIST -> replyNotices(groupId);
             case ME -> replyMe(groupId, event.getUserId());
             case CURRENT_ORDER -> replyNow(groupId, event.getUserId());
             case UNPAID_BILLS -> replyUnpaid(groupId, event.getUserId());
@@ -240,6 +252,7 @@ public class QqCommandService {
             case CARD_TYPES -> replyCardTypes(groupId);
             case WEB -> replyWeb(groupId);
             case PRODUCT_MENU -> replyMenu(groupId);
+            case DEVICE_LIST -> replyDeviceList(groupId);
             case PRODUCT_ORDER -> writeCommandService.orderProduct(
                     groupId, event.getUserId(), command.argument(), command.quantity());
             // 调整库存：解析层不认人，是不是管理员由 writeCommandService 查库判
@@ -373,6 +386,29 @@ public class QqCommandService {
         }
         client.sendGroupMessage(groupId, QqReplyText.bookingSchedule(
                 result.getData(), orderProperties.getBookingLeadDuration(), LocalDate.now()));
+    }
+
+    /**
+     * 回复最近的门店公告（{@code fw公告}）。
+     *
+     * <p>数据源是 {@link NoticeService#listForUser} —— 与网页端「全部公告」页
+     * <b>同一个方法</b>（含置顶次序），所以群里看到的与网页上一致。
+     * 只取前 {@value QqReplyText#NOTICE_LIST_MAX} 条，其余指路网页端。
+     *
+     * @param groupId 目标群号
+     */
+    private void replyNotices(Long groupId) {
+        BizResult<PageResult<NoticeVo>> result =
+                noticeService.listForUser(1, QqReplyText.NOTICE_LIST_MAX);
+        if (!result.isSuccess() || result.getData() == null) {
+            log.error("[QQ机器人] 查公告失败：{}",
+                    result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
+            client.sendGroupMessage(groupId, "查不到公告，稍后再试。");
+            return;
+        }
+        PageResult<NoticeVo> page = result.getData();
+        client.sendGroupMessage(groupId, QqReplyText.notices(
+                page.getRecords(), page.getTotal(), baseUrl() + "/#/notices"));
     }
 
     /**
@@ -713,6 +749,30 @@ public class QqCommandService {
         }
         client.sendGroupMessage(groupId, QqReplyText.menu(
                 result.getData(), baseUrl() + "/#/mall", writeUsable()));
+    }
+
+    /**
+     * 回复店内设施列表（{@code fw机台}）。
+     *
+     * <p>数据源是 {@link DeviceService#listForDisplay()}（与用户端「店内设施」页
+     * <b>同一个方法</b>，所以群里的台数与状况和网页上看到的必然一致）。
+     * 含维护中的机台 —— 陈列的目的就是让人知道哪台在修，藏起来会造成搬走了的误解。
+     *
+     * <p>⚠️ 与 {@code fw拍拍机 1 号维护中}（改状况）是两条不同的指令：
+     * 这一条是查询、谁都能发；那一条是写指令、仅管理员。
+     *
+     * @param groupId 目标群号
+     */
+    private void replyDeviceList(Long groupId) {
+        BizResult<List<DeviceGroupVo>> result = deviceService.listForDisplay();
+        if (!result.isSuccess() || result.getData() == null) {
+            log.error("[QQ机器人] 查店内设施失败：{}",
+                    result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
+            client.sendGroupMessage(groupId, "查不到店内设施，稍后再试。");
+            return;
+        }
+        client.sendGroupMessage(groupId, QqReplyText.deviceList(
+                result.getData(), baseUrl() + "/#/devices"));
     }
 
     /**

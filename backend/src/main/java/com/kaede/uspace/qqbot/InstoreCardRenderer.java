@@ -29,8 +29,17 @@ import java.util.Map;
  * <p><b>版式照搬 Web 端「在店用户」页</b>（{@code InstoreView.vue} 的两列卡片栅格，
  * 2026-10-10 由用户定）：「宽两个用户信息卡片」，每张卡片的六行结构与
  * {@code UserCard.vue} 一致 ——
- * banner / 头像 · STAFF · 昵称 / 偏好标签 / 到店时刻 / 在店时长 / 月卡标签。
+ * banner / 头像 · STAFF · 昵称 / 偏好标签 / 月卡标签 / 到店时刻与在店时长（底部左对齐）。
+ *（顺序 2026-10-10 由用户要求调过：月卡从最下面挪到偏好之后，
+ * 两段信息从名字下面挪到卡片底部；对齐当天试过右对齐又改回左对齐）
  * 群里看到的与网页上看到的是同一张名册，只是载体从 DOM 换成了像素。
+ *
+ * <p>⚠️ <b>版式照搬网页端，颜色按「群里看得清」另行取值</b>（2026-10-10 三轮调整）：
+ * 网页端那两行次要信息用的是灰色，照搬进群会糊成一片（群消息会把图压缩过）——
+ * 这里一律用深色（到店 / 在店两行更是纯黑加粗），主次改由字号区分，
+ * 见 {@code drawCard} 里的说明；而偏好与月卡胶囊反过来<b>照搬网页端的色值</b>
+ *（{@code base.css} 的 {@code .tag} / {@code .tag-success}）—— 那边本来就有色相，
+ * 同步即可。
  *
  * <p><b>尺寸是网页端的等比放大</b>：网页卡片 160px 宽、内容 328px；
  * 图上卡片 340px 宽、总宽 768px —— 手机上点开清晰，又不至于大到被群里压缩。
@@ -85,8 +94,15 @@ public final class InstoreCardRenderer {
     /** banner 高 —— 3:1，与网页端 {@code UserCard} 的比例一致 */
     private static final int BANNER_H = 114;
 
-    /** 头像直径 */
-    private static final int AVATAR_D = 52;
+    /**
+     * 头像直径。
+     *
+     * <p>2026-10-10 由用户要求放大过（52 → 64）：原来的值相对整张图偏小 ——
+     * 网页端头像是 30px、图上元素按约 2.1 倍放大，30 × 2.1 ≈ 63，
+     * 52 相当于只放大了 1.7 倍，夹在 banner 与昵称之间显得小。
+     * 放大后头像占 identityY+10 … +74，与偏好行（identityY+84）仍留 10px。
+     */
+    private static final int AVATAR_D = 64;
 
     /**
      * 每张图固定画的卡片数：2×2 四个（2026-10-10 由用户定，每四人一张图）。
@@ -108,26 +124,56 @@ public final class InstoreCardRenderer {
     /** 主色浅底（头像兜底圆、banner 兜底底） */
     private static final Color ACCENT_PALE = new Color(0xE9EBFE);
 
-    /** 正文色 */
-    private static final Color TEXT = new Color(0x323842);
+    /**
+     * 正文色。
+     *
+     * <p>2026-10-10 由用户要求加深过一档（原来 {@code 0x323842}）：群里点开图
+     * 会被客户端压缩，浅一档的深灰在手机上就糊了 —— 名册要的是「扫一眼看得清」。
+     */
+    private static final Color TEXT = new Color(0x1F2329);
 
-    /** 次要文字色（到店/在店两行、还有 N 人） */
-    private static final Color MUTED = new Color(0x8A9099);
+    /**
+     * 到店 / 在店两行的颜色 —— <b>纯黑</b>，比正文（{@link #TEXT}）还深一档。
+     *
+     * <p>2026-10-10 两轮调整的落点：先去掉照搬网页端的次要灰（灰字在群里
+     * 被压缩后最先糊），用户看过之后要求「再深一点、粗一点」—— 于是索性更深一档、
+     * 字重加粗。这两行是名册上真正被读的字段（谁、几点来、待了多久），
+     * 值得比昵称之外的一切都醒目。主次现在只由字号区分（昵称 24、这两行 19）。
+     */
+    private static final Color INFO = new Color(0x000000);
 
-    /** 中性标签底（偏好胶囊） */
-    private static final Color TAG_BG = new Color(0xEEEDF3);
+    /**
+     * 偏好胶囊底色 —— 浅紫，<b>与网页端 {@code base.css} 的 {@code .tag} 同一取值</b>
+     * （{@code #e3daf7}）。
+     *
+     * <p>2026-10-10 由用户要求同步网页端：原来这里是 {@code 0xEEEDF3}（近乎无色的
+     * 浅灰紫），群里看过去就是一个个灰胶囊 ——「偏好没颜色」说的就是它。
+     * 网页端那个浅紫才是有色相的。
+     */
+    private static final Color TAG_BG = new Color(0xE3DAF7);
 
-    /** 标签文字色 */
-    private static final Color TAG_TEXT = new Color(0x5D5476);
+    /**
+     * 偏好胶囊文字色 —— 深紫，与底色同源自网页端 {@code .tag}（{@code #533a8f}）。
+     *
+     * <p>2026-10-10 走过两步：先去灰调（原来 {@code 0x5D5476}），
+     * 再整体同步网页端取值 —— 与浅紫底拉开对比，群消息里压缩之后仍然读得清。
+     */
+    private static final Color TAG_TEXT = new Color(0x533A8F);
 
     /** STAFF 徽章底色 —— 比主色系的绿浅一档（与网页端 {@code .badge-staff} 同一取值） */
     private static final Color STAFF_BG = new Color(0x5FC08F);
 
-    /** 月卡胶囊底色（浅绿） */
-    private static final Color CARD_TAG_BG = new Color(0xE4F6EC);
+    /**
+     * 月卡胶囊底色 —— 浅绿，<b>与网页端 {@code .tag-success} 同一取值</b>
+     * （{@code #cdead9}）。
+     *
+     * <p>2026-10-10 随偏好胶囊一起对齐过：原来是一种更亮的绿（{@code 0xE4F6EC}），
+     * 与网页端不是同一个色 —— 既然同类胶囊都在同步，就同步到底。
+     */
+    private static final Color CARD_TAG_BG = new Color(0xCDEAD9);
 
-    /** 月卡胶囊文字色（深绿） */
-    private static final Color CARD_TAG_TEXT = new Color(0x2F9E68);
+    /** 月卡胶囊文字色 —— 同上，网页端 {@code .tag-success} 的 {@code #2b7d52} */
+    private static final Color CARD_TAG_TEXT = new Color(0x2B7D52);
 
     /** 头像兜底圆的浅底（比主色淡的更中性一点） */
     private static final Color ICON_BG = new Color(0xEDECF3);
@@ -287,22 +333,38 @@ public final class InstoreCardRenderer {
         for (String tag : preferenceTags(user.getPreference(), labels)) {
             tagCursor = drawPill(g, tag, tagCursor, tagY, TAG_BG, TAG_TEXT) + 8;
             if (tagCursor > x + CARD_W - 50) {
+                // 放不下就停在前面几个，但【不静默】：少画一个标签在图上没有任何报错，
+                // 将来有人把字号或留白调大时，这行 warn 是唯一的信号
+                log.warn("[QQ机器人] 名册图的偏好标签放不下，已省略后面的 tag={}", tag);
                 break;
             }
         }
 
-        // 第 4、5 行：到店时刻 / 在店时长（与网页端的两行各占一行一致）
-        g.setColor(MUTED);
-        g.setFont(new Font(FONT_FAMILY, Font.PLAIN, 19));
-        int infoY = tagY + 62;
-        g.drawString(arrivalText(user.getStartTime()), x + 18, infoY);
-        g.drawString("在店 " + durationText(user.getStayMinutes()), x + 18, infoY + 30);
-
-        // 第 6 行：月卡标签（放最下面，与网页端一致）
+        // 第 4 行：月卡标签 —— 紧跟偏好
+        //（2026-10-10 由用户要求，从卡片最下面挪上来；与网页端同一顺序）
         if (user.getCardTypeLabel() != null && !user.getCardTypeLabel().isBlank()) {
-            drawPill(g, user.getCardTypeLabel(), x + 18, y + CARD_H - 56,
+            drawPill(g, user.getCardTypeLabel(), x + 18, tagY + 46,
                     CARD_TAG_BG, CARD_TAG_TEXT);
         }
+
+        // 第 5、6 行：到店时刻 / 在店时长 —— 卡片底部、左对齐
+        //（2026-10-10 由用户要求：从名字下面挪到底部；当天试过右对齐又改回左对齐。
+        // 与网页端同一顺序、同一对齐）
+        //
+        // ⚠️ 【刻意不用次要灰色】（2026-10-10 由用户要求）：网页端这两行用的是
+        // --c-text-sub，照搬过来在群里就糊了 —— 图片会被客户端压缩，灰字首当其冲。
+        // 当天稍后又按用户要求「再深一点、粗一点」：颜色用纯黑（{@link #INFO}，
+        // 比正文还深一档）、字重加粗 —— 这两行是名册上真正被读的字段。
+        // 主次现在只由【字号】区分：上面昵称 24、这里 19
+        g.setColor(INFO);
+        g.setFont(new Font(FONT_FAMILY, Font.BOLD, 19));
+        String arrival = arrivalText(user.getStartTime());
+        String stay = "在店 " + durationText(user.getStayMinutes());
+        // 左对齐到卡片的内边距处；整体贴底（下留白 20px 给 descent 与呼吸感）
+        int infoX = x + 18;
+        int lastBaseline = y + CARD_H - 20;
+        g.drawString(arrival, infoX, lastBaseline - 30);
+        g.drawString(stay, infoX, lastBaseline);
 
         g.setClip(oldClip);
     }
@@ -339,14 +401,23 @@ public final class InstoreCardRenderer {
      * @return 胶囊右缘的 x
      */
     private static int drawPill(Graphics2D g, String text, int x, int y, Color bg, Color color) {
-        Font font = new Font(FONT_FAMILY, Font.PLAIN, 18);
+        // 20 号粗体（2026-10-10 由用户要求，从 18 号常规放大加粗）——
+        // 胶囊随字一起长大：高 38、全圆角 19、基线 27，文字保持垂直居中。
+        // ⚠️ 微软雅黑下 BOLD 与 PLAIN 同宽（每字 ≈ 字号），加粗不吃横向空间；
+        // 真正吃空间的是字号 —— 见下面那行注释
+        Font font = new Font(FONT_FAMILY, Font.BOLD, 20);
         FontMetrics metrics = g.getFontMetrics(font);
+        // ⚠️ 左右留白 24（单边 12）是当初按三个**三字**标签（拍拍机 + 抬手乐 + 日麻）
+        // 算的 —— 20 号字下从 x+18 排到 x+266，与「放不下就停」那道阈值的 x+290
+        // 只差 24px。⚠️ 2026-10-10 字典改版后标签都是单字（击 / 中 / 萌 / 雀），
+        // 空间宽松得多，但这条预算继续按三字留 —— 类型名随时可能再加长
+        //（实测每字宽 ≈ 字号：3 字标签 84px、2 字 64px；BOLD 与 PLAIN 同宽）
         int w = Math.min(metrics.stringWidth(text) + 24, 180);
         g.setColor(bg);
-        g.fillRoundRect(x, y, w, 34, 17, 17);
+        g.fillRoundRect(x, y, w, 38, 19, 19);
         g.setFont(font);
         g.setColor(color);
-        g.drawString(ellipsize(text, metrics, w - 20), x + 12, y + 24);
+        g.drawString(ellipsize(text, metrics, w - 20), x + 12, y + 27);
         return x + w;
     }
 
@@ -370,7 +441,8 @@ public final class InstoreCardRenderer {
             g.setColor(ICON_BG);
             g.fill(circle);
             g.setColor(ACCENT);
-            g.setFont(new Font(FONT_FAMILY, Font.BOLD, 20));
+            // 首字母字号跟着头像一起放大（2026-10-10：20 → 24，与 AVATAR_D 同比例）
+            g.setFont(new Font(FONT_FAMILY, Font.BOLD, 24));
             drawCentered(g, initial, x + AVATAR_D / 2, y + AVATAR_D / 2);
         }
         g.setClip(oldClip);

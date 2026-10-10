@@ -101,7 +101,7 @@ public class RegisterRequest {
     private String challengeId;
 
     /**
-     * 游玩偏好，逗号分隔的设备类型 code（如 {@code PAIPAI,TAISHOU}）。选填。
+     * 游玩偏好，逗号分隔的设备类型 code（如 {@code ONGEKI,MAIMAI}）。选填。
      *
      * <p>取值由模块 4 的字典表 {@code biz_equipment_type} 维护。
      * 这里只做长度限制，具体格式（空项、重复项）由 Service 校验并给出友好提示 ——

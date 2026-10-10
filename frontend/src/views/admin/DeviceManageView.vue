@@ -316,7 +316,7 @@ onMounted(load)
     >
       <div class="field">
         <label class="field-label" for="d-name">机台名称</label>
-        <input id="d-name" v-model="form.name" class="field-input" maxlength="50" placeholder="如：拍拍机 1 号" />
+        <input id="d-name" v-model="form.name" class="field-input" maxlength="50" placeholder="如：舞萌 1 号" />
       </div>
 
       <div class="field">

@@ -21,7 +21,7 @@ public class EquipmentTypeVo {
     /** 类型 ID。机台表引用的是它 */
     private Long id;
 
-    /** 类型代码，如 {@code PAIPAI}。用户偏好存的就是这个值 */
+    /** 类型代码，如 {@code MAIMAI}。用户偏好存的就是这个值 */
     private String code;
 
     /** 类型名称，如「拍拍机」。前端展示用 */

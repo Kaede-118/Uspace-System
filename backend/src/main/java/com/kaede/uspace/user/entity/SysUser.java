@@ -63,7 +63,7 @@ public class SysUser extends BaseEntity {
     /**
      * 游玩偏好：逗号分隔的设备类型 code，多选，可为空。
      *
-     * <p>取值来自模块 4 的字典表 {@code biz_equipment_type}，如 {@code PAIPAI,TAISHOU}。
+     * <p>取值来自模块 4 的字典表 {@code biz_equipment_type}，如 {@code ONGEKI,MAIMAI}。
      * 存逗号串而非关联表，是因为取值只有几个到十几个，
      * 且没有「按偏好精确筛选用户」这类需要索引的查询。
      *

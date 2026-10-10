@@ -35,7 +35,7 @@ public class EquipmentType extends BaseEntity {
     private Long id;
 
     /**
-     * 类型代码，如 {@code PAIPAI} / {@code TAISHOU}，唯一。
+     * 类型代码，如 {@code ONGEKI} / {@code MAIMAI}，唯一。
      *
      * <p>存进 {@code sys_user.preference} 的就是它，所以<b>代码一旦被使用就不该改</b> ——
      * 改了会让已有用户的偏好字符串解析不出名称。要改就停用旧代码、新增一个。

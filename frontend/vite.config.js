@@ -77,7 +77,10 @@ export default defineConfig(({ mode }) => {
     // frpc 连接对，页面却打不开（2026-10-09 实测踩过，排查绕了一圈）。
     // 用数组精确白名单，不用 `true` —— 后者是整个关掉这道防护。
     // ⚠️ 换域名时改这里；后端 `uspace.web.base-url` 是同一件事的另一端。
-    server.allowedHosts = ['nsfwonly.fans']
+    // 樱花 frp 写精确域名；natapp 写【通配】—— 前导点表示放行该后缀的全部
+    // 子域（Vite 5.4.12+ 支持）。natapp 免费隧道重建后会换域名，用通配就
+    // 不必每次回来改这一行；范围仍有限（只放行 natapp 这一个后缀）。
+    server.allowedHosts = ['nsfwonly.fans', '.natappfree.cc']
   }
 
   return {

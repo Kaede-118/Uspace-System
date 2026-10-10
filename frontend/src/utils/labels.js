@@ -247,7 +247,7 @@ export function reconcileDiffTypeCls(type) {
  * 抽到这里是因为<b>两处各写一份迟早分岔</b>，而分岔的表现只是两边文案不同，
  * 不会有任何报错。
  *
- * @param {string} preference 逗号分隔的偏好 code，如 "PAIPAI,RIMA"；可为空
+ * @param {string} preference 逗号分隔的偏好 code，如 "ONGEKI,MAIMAI"；可为空
  * @param {Object} typeMap    code → 中文名的字典（来自 GET /api/devices/types）
  * @returns {string[]} 中文名数组；没设偏好时返回空数组
  */

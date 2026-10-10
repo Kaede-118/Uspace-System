@@ -19,7 +19,7 @@ import java.util.List;
 @Data
 public class DeviceGroupVo {
 
-    /** 类型代码，如 {@code PAIPAI}。类型已被删除时为空 */
+    /** 类型代码，如 {@code MAIMAI}。类型已被删除时为空 */
     private String typeCode;
 
     /** 类型名称，如「拍拍机」。前端用作分组标题 */

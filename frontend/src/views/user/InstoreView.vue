@@ -11,7 +11,7 @@
  * 页面宽度已锚定手机竖屏（见 base.css 的 --page-max，内容 328px），
  * 每张卡片因此恒为 160px —— 与手机上严格一致，不随设备漂移。
  *
- * <p>⚠️ 偏好只有 code（如 {@code PAIPAI}），<b>没有中文名</b> ——
+ * <p>⚠️ 偏好只有 code（如 {@code MAIMAI}），<b>没有中文名</b> ——
  * 后端刻意不给：偏好中文名躺在 device 包，为翻译一个 code 新开一条
  * {@code order → device} 依赖边不划算。中文名由本页调 {@code /api/devices/types}
  * 取回来，卡片第四行显示什么文案由 {@code utils/labels.js} 的

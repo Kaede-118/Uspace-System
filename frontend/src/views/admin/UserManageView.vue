@@ -417,7 +417,7 @@ onMounted(load)
             v-model="form.preference"
             class="field-input"
             type="text"
-            placeholder="逗号分隔的类型 code，如 PAIPAI,TAISHOU"
+            placeholder="逗号分隔的类型 code，如 ONGEKI,MAIMAI"
           />
         </div>
 

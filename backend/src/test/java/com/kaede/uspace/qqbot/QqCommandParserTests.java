@@ -31,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class QqCommandParserTests {
 
     // ==================================================================
-    // 前缀：只有 fw 一种，且【必须有】（唯一豁免是 kklm，见下方用例）
+    // 前缀：只有 fw 一种，且【必须有】
+    // （豁免只有 kklm 与 ping 两个刻意的英文词，见下方用例）
     // ==================================================================
 
     @Test
@@ -90,7 +91,7 @@ class QqCommandParserTests {
     }
 
     @Test
-    @DisplayName("解析：kklm 免前缀（唯一豁免），其余指令仍必须有前缀")
+    @DisplayName("解析：kklm 免前缀，其余指令仍必须有前缀")
     void parse_prefixFreeKklm() {
         assertEquals(QqCommand.Kind.INSTORE, QqCommandParser.parse("kklm").kind(),
                 "2026-10-10 起它不需要 fw：四个英文字母的刻意输入，不像闲聊");
@@ -104,7 +105,26 @@ class QqCommandParserTests {
         assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("看看里面").kind(),
                 "中文别名不享受豁免：它是群聊常见词，误触发就是满群乱答");
         assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("instore").kind(),
-                "英文别名同理 —— 豁免只给 kklm 一个");
+                "英文别名同理 —— 豁免只给 kklm 与 ping 这两个刻意的词");
+    }
+
+    @Test
+    @DisplayName("解析：ping 免前缀 —— 与 kklm 同一道豁免")
+    void parse_prefixFreePing() {
+        assertEquals(QqCommand.Kind.PING, QqCommandParser.parse("ping").kind(),
+                "2026-10-10 起它不需要 fw：单独发一个 ping 就是在问「机器人还活着吗」");
+        assertEquals(QqCommand.Kind.PING, QqCommandParser.parse("PING").kind(),
+                "大小写不敏感 —— 与其余英文别名同一套 lower");
+        assertEquals(QqCommand.Kind.PING,
+                QqCommandParser.parse("[CQ:at,qq=123] ping").kind(),
+                "开头的 @ 提及照旧先剥掉");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("ping一下").kind(),
+                "⚠️ 豁免只认【整条相等】—— 带尾巴的仍当闲聊");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("在吗").kind(),
+                "⚠️ 中文别名不享受豁免：它恰恰是群里最常见的招呼，"
+                        + "而且开头一个 @ 会被剥掉（「@某人 在吗」剥完就是「在吗」）");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("pong").kind(),
+                "机器人的回复本身解析为闲聊 ——「自己发的消息」那条防回环判据靠的就是它");
     }
 
     @Test
@@ -113,7 +133,10 @@ class QqCommandParserTests {
         assertEquals(QqCommand.Kind.OPEN_DOOR, QqCommandParser.parse("fw开门").kind());
         assertEquals(QqCommand.Kind.OPEN_DOOR, QqCommandParser.parse("fw开门").kind());
         assertEquals(QqCommand.Kind.SETTLE, QqCommandParser.parse("fw结账").kind());
-        assertEquals(QqCommand.Kind.SETTLE, QqCommandParser.parse("fwsettle").kind());
+        assertEquals(QqCommand.Kind.SETTLE, QqCommandParser.parse("fwpay").kind(),
+                "2026-10-10 起英文别名是 pay（原来是 settle，用户要求短一点）");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fwsettle").kind(),
+                "⚠️ pay 是【换掉】settle 的而不是新增 —— 旧写法该回「没认出这条指令」");
         assertEquals(QqCommand.Kind.BOOKING_SCHEDULE, QqCommandParser.parse("fw包场").kind());
         assertEquals(QqCommand.Kind.ME, QqCommandParser.parse("fw看看自己").kind());
         assertEquals(QqCommand.Kind.STORE_STATUS, QqCommandParser.parse("fw营业").kind());
@@ -517,6 +540,64 @@ class QqCommandParserTests {
 
         assertEquals(QqCommand.Kind.PRODUCT_ORDER, QqCommandParser.parse("fw冰-红茶-2").kind(),
                 "要买 2 件「冰-红茶」得在末尾补一个横杠 —— 两条路的区别只有一个分隔符");
+    }
+
+    // ==================================================================
+    // 店内设施列表（fw机台 / fwdevice）
+    // ==================================================================
+
+    @Test
+    @DisplayName("解析：fw机台 与 fwdevice 都识别为设施列表")
+    void parse_recognizesDeviceList() {
+        assertEquals(QqCommand.Kind.DEVICE_LIST, QqCommandParser.parse("fw机台").kind());
+        assertEquals(QqCommand.Kind.DEVICE_LIST, QqCommandParser.parse("fwdevice").kind(),
+                "英文别名 —— 与 fwmenu / fwprice 同一风格");
+        assertEquals(QqCommand.Kind.DEVICE_LIST, QqCommandParser.parse("FW机台").kind(),
+                "前缀大小写不敏感");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("机台").kind(),
+                "⚠️ 中文别名不免前缀 —— 豁免只有 kklm 与 ping 两个刻意的英文词");
+    }
+
+    @Test
+    @DisplayName("解析：查设施与改状况是两条指令，别名还挡住了错怪")
+    void parse_deviceListVsDeviceStatus() {
+        assertEquals(QqCommand.Kind.DEVICE_LIST, QqCommandParser.parse("fw机台").kind(),
+                "整条就是别名：查列表，谁都能发");
+        assertEquals(QqCommand.Kind.DEVICE_STATUS,
+                QqCommandParser.parse("fw机台1号维护中").kind(),
+                "「名字 + 状况词」结尾仍走改状况 —— 别名走的是整条精确匹配");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fwdevice5").kind(),
+                "⚠️「device」进了保留字：带尾巴的不是别名，也不该被当成商品名去查一遍");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fw机台维护中").kind(),
+                "名字「机台」撞上别名 —— 打错的指令该回「没认出这条指令」，"
+                        + "而不是拿它去查一遍机台");
+    }
+
+    // ==================================================================
+    // 门店公告（fw公告 / fwgg / fwnotice）
+    // ==================================================================
+
+    @Test
+    @DisplayName("解析：fw公告 与 fwgg / fwnotice 都识别为公告查询")
+    void parse_recognizesNoticeList() {
+        assertEquals(QqCommand.Kind.NOTICE_LIST, QqCommandParser.parse("fw公告").kind());
+        assertEquals(QqCommand.Kind.NOTICE_LIST, QqCommandParser.parse("fwgg").kind(),
+                "「公告」的拼音首字母 —— 与 kklm 同一套构词法");
+        assertEquals(QqCommand.Kind.NOTICE_LIST, QqCommandParser.parse("fwnotice").kind(),
+                "英文别名 —— 与 fwmenu / fwdevice 同一风格");
+        assertEquals(QqCommand.Kind.NOTICE_LIST, QqCommandParser.parse("FW公告").kind(),
+                "前缀大小写不敏感");
+    }
+
+    @Test
+    @DisplayName("解析：gg 必须带前缀 —— 它在游戏群里是常见词")
+    void parse_noticeAliasNeedsPrefix() {
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("gg").kind(),
+                "⚠️ 打完一局发「gg」是游戏群的日常 —— 裸发绝不能触发公告查询");
+        assertEquals(QqCommand.Kind.IGNORE, QqCommandParser.parse("公告").kind(),
+                "中文别名同理：一律不带前缀就不认");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fwgg5").kind(),
+                "「gg」进了保留字：带尾巴的不是别名，也不该被当成商品名去查一遍");
     }
 
     // ==================================================================

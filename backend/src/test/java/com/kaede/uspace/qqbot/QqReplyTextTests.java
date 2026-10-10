@@ -5,7 +5,10 @@ import com.kaede.uspace.billing.dto.BillingResult;
 import com.kaede.uspace.billing.dto.BillingRulesVo;
 import com.kaede.uspace.billing.event.FreePeriodChangeAction;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.device.dto.DeviceDisplayVo;
+import com.kaede.uspace.device.dto.DeviceGroupVo;
 import com.kaede.uspace.notice.NoticePublishMode;
+import com.kaede.uspace.notice.dto.NoticeVo;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.dto.InstoreUserVo;
 import com.kaede.uspace.order.dto.MonthSpentVo;
@@ -459,6 +462,104 @@ class QqReplyTextTests {
     }
 
     // ==================================================================
+    // 店内设施
+    // ==================================================================
+
+    @Test
+    @DisplayName("设施：按类型分组，报台数与状况，维护中的照列")
+    void deviceList_listsGroupedDevices() {
+        DeviceGroupVo paipai = deviceGroup("PAIPAI", "拍拍机", List.of(
+                deviceDisplay("拍拍机 1 号", "良好", "靠窗第二台"),
+                deviceDisplay("拍拍机 2 号", "维护中", null)));
+        DeviceGroupVo taisheng = deviceGroup("TAISHENG", "抬手乐", List.of(
+                deviceDisplay("抬手乐 1 号", "待维护", null)));
+
+        String text = QqReplyText.deviceList(List.of(paipai, taisheng), "http://x/#/devices");
+
+        assertTrue(text.contains("共 3 台"), "台数是跨全部类型数的：" + text);
+        assertTrue(text.contains("【拍拍机】") && text.contains("【抬手乐】"),
+                "按类型分组，组标题用后端给的类型名：" + text);
+        assertTrue(text.contains("拍拍机 1 号 --- 良好 -- 靠窗第二台"),
+                "状况是主信息、位置有才显示：" + text);
+        assertTrue(text.contains("拍拍机 2 号 --- 维护中"),
+                "⚠️ 维护中的照列 —— 藏起来会让顾客以为机器搬走了：" + text);
+        assertTrue(text.contains("抬手乐 1 号 --- 待维护"),
+                "状况用后端给的中文，不在这里另翻一份：" + text);
+        assertTrue(text.contains("http://x/#/devices"), "要给网页端入口：" + text);
+    }
+
+    @Test
+    @DisplayName("设施：一台都没有时回一句人话（含空组与 null）")
+    void deviceList_saysSoWhenEmpty() {
+        assertFalse(QqReplyText.deviceList(List.of(), "http://x/#/devices").isBlank(),
+                "没有机台时也要回一句话，不能返回空串");
+        assertFalse(QqReplyText.deviceList(null, "http://x/#/devices").isBlank(),
+                "null 同样给人话 —— 不能抛异常");
+        assertTrue(QqReplyText.deviceList(
+                        List.of(deviceGroup("PAIPAI", "拍拍机", List.of())), "http://x/#/devices")
+                        .contains("暂无机台"),
+                "空组不该渲染出一个光秃秃的【拍拍机】，也不能说「共 0 台」");
+    }
+
+    // ==================================================================
+    // 门店公告
+    // ==================================================================
+
+    @Test
+    @DisplayName("公告：标题带时间，手写公告带正文，超出条数时交代总数")
+    void notices_listsTitleTimeAndBody() {
+        NoticeVo manual = notice("本周六场地维护", "18:00–22:00 暂停接待，请提前安排。",
+                LocalDateTime.of(2026, 10, 8, 16, 0));
+        NoticeVo auto = notice("3 号机台由 良好 转为 维护中", null,
+                LocalDateTime.of(2026, 10, 7, 9, 30));
+
+        String text = QqReplyText.notices(List.of(manual, auto), 12, "http://x/#/notices");
+
+        assertTrue(text.contains("共 12 条，显示最近 2 条"),
+                "总数要交代 —— 只说五条的话，读者不知道后面还有没有：" + text);
+        assertTrue(text.contains("📢 本周六场地维护 -- 10月8日 16:00"),
+                "标题带时间：群里不会实时刷新，绝对时刻比「3 分钟前」稳：" + text);
+        assertTrue(text.contains("18:00–22:00 暂停接待，请提前安排。"),
+                "手写公告带一行正文：" + text);
+        assertTrue(text.contains("📢 3 号机台由 良好 转为 维护中 -- 10月7日 09:30"),
+                "自动公告没有正文，标题本身就是一句完整的事件描述：" + text);
+        assertTrue(text.contains("http://x/#/notices"), "要给网页端入口：" + text);
+    }
+
+    @Test
+    @DisplayName("公告：全部都在上面时不提「只显示最近几条」")
+    void notices_hidesHintWhenAllShown() {
+        String text = QqReplyText.notices(
+                List.of(notice("暂停营业", null, LocalDateTime.of(2026, 10, 8, 16, 0))),
+                1, "http://x/#/notices");
+
+        assertTrue(text.contains("共 1 条"), text);
+        assertFalse(text.contains("显示最近"), "全都在上面了，不必说「只显示」：" + text);
+    }
+
+    @Test
+    @DisplayName("公告：长正文压平并截断（与发布播报共用一套 truncate）")
+    void notices_truncatesLongBody() {
+        String longBody = "第一行\n第二行".repeat(30);
+
+        String text = QqReplyText.notices(
+                List.of(notice("长公告", longBody, LocalDateTime.of(2026, 10, 8, 16, 0))),
+                1, "http://x/#/notices");
+
+        assertTrue(text.contains("…"), "超长要截断并给省略号：" + text);
+        assertFalse(text.contains("第二行\n"), "换行要压平 —— 多行正文会把群消息撑得很难读：" + text);
+    }
+
+    @Test
+    @DisplayName("公告：一条都没有时回一句人话（含 null）")
+    void notices_saysSoWhenEmpty() {
+        assertFalse(QqReplyText.notices(List.of(), 0, "http://x/#/notices").isBlank(),
+                "没有公告时也要回一句话，不能返回空串");
+        assertFalse(QqReplyText.notices(null, 0, "http://x/#/notices").isBlank(),
+                "null 同样给人话 —— 不能抛异常");
+    }
+
+    // ==================================================================
     // 月卡说明
     // ==================================================================
 
@@ -527,6 +628,12 @@ class QqReplyTextTests {
         assertTrue(text.contains("fw月卡"), "月卡说明要列出来，否则没人知道有这条：" + text);
         assertTrue(text.contains("fw价格"), "计费规则同理：" + text);
         assertTrue(text.contains("fw菜单"), "商品目录同理：" + text);
+        assertTrue(text.contains("fw公告"), "公告查询要列出来，否则没人知道有：" + text);
+        assertTrue(text.contains("fw买n个可乐"),
+                "下单那条要给出可变数量的写法 —— 只给「买个」的话，"
+                        + "想买多个的人不知道该怎么写：" + text);
+        assertTrue(text.contains("也可直接发 ping"),
+                "自检那条要写明免前缀的写法 —— 没写的话没人知道可以直接发 ping：" + text);
     }
 
     @Test
@@ -1050,5 +1157,57 @@ class QqReplyTextTests {
         BillingResult bill = new BillingResult();
         bill.setTotalAmount(new BigDecimal(amount));
         return bill;
+    }
+
+    /**
+     * 造一台机台的陈列视图。
+     *
+     * <p>状况直接给中文（{@code statusLabel}）—— 那是后端按枚举翻好的，
+     * 这里不重复走一遍枚举（那属于模块 4 的测试）。
+     *
+     * @param name     机台名
+     * @param label    状况中文
+     * @param location 位置，可为 null
+     * @return 陈列视图
+     */
+    private static DeviceDisplayVo deviceDisplay(String name, String label, String location) {
+        DeviceDisplayVo device = new DeviceDisplayVo();
+        device.setName(name);
+        device.setStatusLabel(label);
+        device.setLocation(location);
+        return device;
+    }
+
+    /**
+     * 造一个机台类型分组。
+     *
+     * @param typeCode 类型代码
+     * @param typeName 类型中文名
+     * @param devices  组内机台
+     * @return 分组视图
+     */
+    private static DeviceGroupVo deviceGroup(String typeCode, String typeName,
+                                             List<DeviceDisplayVo> devices) {
+        DeviceGroupVo group = new DeviceGroupVo();
+        group.setTypeCode(typeCode);
+        group.setTypeName(typeName);
+        group.setDevices(devices);
+        return group;
+    }
+
+    /**
+     * 造一条公告视图。
+     *
+     * @param title     标题
+     * @param content   正文，可为 null（自动公告没有正文）
+     * @param createdAt 发布时刻
+     * @return 公告视图
+     */
+    private static NoticeVo notice(String title, String content, LocalDateTime createdAt) {
+        NoticeVo vo = new NoticeVo();
+        vo.setTitle(title);
+        vo.setContent(content);
+        vo.setCreatedAt(createdAt);
+        return vo;
     }
 }

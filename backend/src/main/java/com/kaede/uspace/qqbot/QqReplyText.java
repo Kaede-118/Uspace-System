@@ -3,7 +3,10 @@ package com.kaede.uspace.qqbot;
 import com.kaede.uspace.billing.dto.BillingRulesVo;
 import com.kaede.uspace.billing.event.FreePeriodChangeAction;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.device.dto.DeviceDisplayVo;
+import com.kaede.uspace.device.dto.DeviceGroupVo;
 import com.kaede.uspace.notice.NoticePublishMode;
+import com.kaede.uspace.notice.dto.NoticeVo;
 import com.kaede.uspace.order.OrderStatus;
 import com.kaede.uspace.order.PaymentTargetType;
 import com.kaede.uspace.order.dto.InstoreUserVo;
@@ -54,6 +57,16 @@ public final class QqReplyText {
 
     /** 名册一次最多列几个人。群消息有长度上限，而名单是随人数线性增长的 */
     public static final int DEFAULT_MAX_LISTED = 30;
+
+    /**
+     * 公告一次列几条（{@code fw公告}）。
+     *
+     * <p>公告是<b>只增不减</b>的消息流（机台每变一次状况就多一条），
+     * 群里全铺开会把聊天窗口刷满 —— 看更多去网页端「全部公告」页。
+     * 与 {@link #DEFAULT_MAX_LISTED} 取值的差别有理由：名册是「此刻谁在」
+     * 的实时快照，多列几个人无妨；公告是历史堆积，后面还有的是。
+     */
+    public static final int NOTICE_LIST_MAX = 5;
 
     /**
      * 这个 QQ 还没绑定账号时的提示。
@@ -515,6 +528,102 @@ public final class QqReplyText {
     }
 
     /**
+     * 店内设施列表：按类型分组，逐台报状况。
+     *
+     * <p>数据源是 {@code DeviceService.listForDisplay()} —— 与用户端「店内设施」页
+     * <b>同一个方法</b>（与 {@link #menu} 同一条口径），所以群里报的台数与状况
+     * 和网页上看到的必然一致，不会出现「群里说 6 台、设施页说 5 台」。
+     *
+     * <p><b>维护中的机台照列</b>（同陈列页）：藏起来会让顾客以为机器搬走了。
+     * 状况直接用后端给的中文名（{@code statusLabel}），不在这里按枚举名另翻一份 ——
+     * 各写一份的话，加一态时漏改的那处会让群里显示一个谁也看不懂的英文名。
+     *
+     * <p>每行形如 {@code 拍拍机 1 号 --- 良好 -- 靠窗第二台}：状况是主信息、
+     * 位置是补充（有才显示）。<b>资产编号不列</b> —— 它是留着与现场贴纸核对的，
+     * 站在机器前才用得上，塞进群里只会把每行撑长。
+     *
+     * @param groups     按类型分组的机台（组的先后由后台的类型排序权重决定）
+     * @param devicesUrl 网页端「店内设施」页地址
+     * @return 多行文本；一台机台都没有时回一句人话
+     */
+    public static String deviceList(List<DeviceGroupVo> groups, String devicesUrl) {
+        StringBuilder body = new StringBuilder();
+        int total = 0;
+        if (groups != null) {
+            for (DeviceGroupVo group : groups) {
+                List<DeviceDisplayVo> devices = group.getDevices();
+                // 空组不出现在回复里（后端组装时本就不产生空组，这里防的是脏数据）——
+                // 一行孤零零的【拍拍机】比不显示更让人困惑
+                if (devices == null || devices.isEmpty()) {
+                    continue;
+                }
+                body.append("【").append(group.getTypeName()).append("】\n");
+                for (DeviceDisplayVo device : devices) {
+                    body.append(device.getName())
+                            .append(" --- ").append(device.getStatusLabel());
+                    String location = device.getLocation();
+                    if (location != null && !location.isBlank()) {
+                        body.append(" -- ").append(location);
+                    }
+                    body.append('\n');
+                }
+                total += devices.size();
+            }
+        }
+        if (total == 0) {
+            return "店内暂无机台登记。";
+        }
+        return new StringBuilder("店内设施（共 ").append(total).append(" 台）：\n")
+                .append(body)
+                .append("详情请前往：").append(devicesUrl)
+                .toString();
+    }
+
+    /**
+     * 门店公告（{@code fw公告}）—— 只列最近几条。
+     *
+     * <p>数据源是 {@code NoticeService.listForUser} —— 与网页端「全部公告」页
+     * <b>同一个方法</b>，置顶的同样排在最前（次序由后端定，这里不再排一遍，
+     * 与 {@code NoticeListView.vue} 同一条纪律）。
+     *
+     * <p>每条形如「📢 标题 -- 10月8日 16:00」；手写公告带一行正文
+     *（压平截断，与发布播报共用 {@link #truncate}），自动公告没有正文 ——
+     * 它的标题本身就是一句完整的事件描述（「3 号机台由 良好 转为 维护中」）。
+     *
+     * <p>末尾交代总条数：只给五条而不说一共多少条的话，读到的人不知道
+     * 后面还有没有 —— 「共 12 条，显示最近 5 条」这一句就是给网页端那条路的指引。
+     *
+     * @param notices    本轮要展示的公告（置顶在前，最多 {@value #NOTICE_LIST_MAX} 条）
+     * @param total      公告总条数
+     * @param noticesUrl 网页端「全部公告」页地址
+     * @return 多行文本；一条公告都没有时回一句人话
+     */
+    public static String notices(List<NoticeVo> notices, long total, String noticesUrl) {
+        if (notices == null || notices.isEmpty()) {
+            return "当前暂无公告。";
+        }
+        StringBuilder text = new StringBuilder("门店公告（共 ").append(total).append(" 条");
+        if (total > notices.size()) {
+            text.append("，显示最近 ").append(notices.size()).append(" 条");
+        }
+        text.append("）：\n");
+
+        for (NoticeVo notice : notices) {
+            text.append("📢 ").append(notice.getTitle());
+            if (notice.getCreatedAt() != null) {
+                text.append(" -- ").append(DATE_TIME.format(notice.getCreatedAt()));
+            }
+            String body = truncate(notice.getContent(), NOTICE_CONTENT_MAX);
+            if (body != null) {
+                text.append('\n').append(body);
+            }
+            text.append('\n');
+        }
+        text.append("全部公告请前往：").append(noticesUrl);
+        return text.toString();
+    }
+
+    /**
      * 网页端地址。
      *
      * <p>⚠️ <b>拆成两条消息发</b>（2026-10-09 由用户要求）：一条讲解用途、一条<b>只放网址</b>。
@@ -824,7 +933,9 @@ public final class QqReplyText {
         text.append("fw在店 或 fw看看里面，也可直接发 kklm —— 查看当前在店人员\n");
         text.append("fw营业 或 fwstatus —— 查看门店营业状态\n");
         text.append("fw包场 或 fwbooking —— 查看近期包场安排\n");
+        text.append("fw公告 或 fwgg —— 查看最近门店公告\n");
         text.append("fw菜单 或 fwmenu —— 查看在售商品与库存\n");
+        text.append("fw机台 或 fwdevice —— 查看店内设施与状况\n");
         text.append("fw价格 或 fwprice —— 查看计费规则\n");
         text.append("fw月卡 或 fwpass —— 查看月卡种类与价格\n");
 
@@ -836,8 +947,8 @@ public final class QqReplyText {
         if (writeEnabled) {
             text.append("\n【常用】\n");
             text.append("fw开门 或 fwopen —— 开始计时并获取门锁密码\n");
-            text.append("fw结账 或 fwsettle —— 停止计时并前往付款\n");
-            text.append("fw买个可乐 或 fw可乐-2 —— 下单购买商品\n");
+            text.append("fw结账 或 fwpay —— 停止计时并前往付款\n");
+            text.append("fw买个可乐 或 fw买n个可乐 或 fw可乐-2 —— 下单购买商品\n");
             text.append("fw取消 <单号> —— 取消未付款的商品单、月卡购买单或包场\n");
         }
         if (writeEnabled && admin) {
@@ -849,7 +960,7 @@ public final class QqReplyText {
 
         text.append("\n【其他】\n");
         text.append("fwweb 或 fw网址 —— 查看网页端地址（下单、查账单）\n");
-        text.append("fwping 或 fw在吗 —— 检测机器人是否在线\n");
+        text.append("fwping 或 fw在吗，也可直接发 ping —— 检测机器人是否在线\n");
         text.append("fw帮助 或 fwhelp —— 显示本消息\n");
 
         text.append("\n注册时网页会提供一条以「fw验证 」开头的指令，复制发送到群里即可完成 QQ 号绑定。");
@@ -1419,7 +1530,7 @@ public final class QqReplyText {
      *
      * <p>⚠️ <b>映射不出来的 code 直接丢弃，不原样显示</b>：字典里查不到说明
      * 那个类型已被停用（{@code listSelectableTypes} 只给启用中的），
-     * 把 {@code PAIPAI} 这种内部代号甩到群里，用户只会以为系统出错了。
+     * 把 {@code MAIMAI} 这种内部代号甩到群里，用户只会以为系统出错了。
      * 代价是「设了 3 个偏好只显示 2 个」，而那种情况本来就少见。
      *
      * <p>包级可见：{@code QqCommandService} 组装「看看自己」时也要用它
