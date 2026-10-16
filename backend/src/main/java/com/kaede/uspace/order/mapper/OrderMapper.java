@@ -550,6 +550,43 @@ public interface OrderMapper extends BaseMapper<Order> {
                                     @Param("to") LocalDateTime to,
                                     @Param("adjusted") Integer adjusted);
 
+    /**
+     * 导出用：与 {@link #selectPageForAdmin} 同一套筛选口径，但<b>不分页</b>。
+     *
+     * <p>导出到 Excel 就是为了拿出去做透视与求和，只导当前页没有意义 ——
+     * 所以这里刻意不复用分页方法，而是另写一条同样条件、<b>带硬上限</b>的查询。
+     *
+     * <p>⚠️ <b>{@code limit} 不是可选的</b>：没有它，某天筛选条件写错（比如
+     * 时间范围传成 1970 到现在）就会把全表读进内存拼 xlsx。
+     * 调用方传上限并在超出时告知用户缩小范围，见 {@code OrderExportService}。
+     *
+     * @param userId   用户 ID，可空
+     * @param status   状态，可空
+     * @param from     计费起点下界（含），可空
+     * @param to       计费起点上界（不含），可空
+     * @param adjusted 是否人工调整，可空
+     * @param limit    最多返回多少行
+     * @return 订单列表，按 id 倒序
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND (#{userId}   IS NULL OR user_id = #{userId})
+               AND (#{status}   IS NULL OR #{status} = '' OR status = #{status})
+               AND (#{from}     IS NULL OR start_time >= #{from})
+               AND (#{to}       IS NULL OR start_time <  #{to})
+               AND (#{adjusted} IS NULL OR adjusted = #{adjusted})
+             ORDER BY id DESC
+             LIMIT #{limit}
+            """)
+    List<Order> selectForExport(@Param("userId") Long userId,
+                                @Param("status") String status,
+                                @Param("from") LocalDateTime from,
+                                @Param("to") LocalDateTime to,
+                                @Param("adjusted") Integer adjusted,
+                                @Param("limit") int limit);
+
     // ==================================================================
     // 更新
     // ==================================================================

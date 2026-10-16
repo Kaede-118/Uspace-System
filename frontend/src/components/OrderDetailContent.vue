@@ -175,6 +175,14 @@ const userText = computed(() =>
     <div v-if="order.adjusted === 1" class="card detail__adjusted">
       <div class="card-title">时长经人工调整</div>
       <p class="text-sm text-sub">{{ order.adjustReason || '（未填写原因）' }}</p>
+      <!--
+        处理人与调整时刻：只有后台那两条查询会填（用户端的订单接口不给，
+        顾客不必知道是哪个管理员改的），所以这一行在用户端自然不出现
+      -->
+      <p v-if="order.adjustedByName || order.adjustedAt" class="detail__adjust-meta">
+        处理人：{{ order.adjustedByName || '—' }}
+        <template v-if="order.adjustedAt"> · 调整时间：{{ formatDateTime(order.adjustedAt) }}</template>
+      </p>
     </div>
   </div>
 </template>
@@ -227,6 +235,13 @@ const userText = computed(() =>
 
 .detail__row--note {
   font-size: 12px;
+  color: var(--c-text-muted);
+}
+
+/* 处理人与调整时刻：比原因弱一档 —— 原因是要读的，这两项是要核对的 */
+.detail__adjust-meta {
+  margin-top: var(--sp-2);
+  font-size: 11px;
   color: var(--c-text-muted);
 }
 

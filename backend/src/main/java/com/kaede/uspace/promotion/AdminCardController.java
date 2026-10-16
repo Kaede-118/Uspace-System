@@ -3,6 +3,7 @@ package com.kaede.uspace.promotion;
 import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.promotion.dto.IssueCardRequest;
+import com.kaede.uspace.promotion.dto.MonthlyCardOrderVo;
 import com.kaede.uspace.promotion.dto.MonthlyCardVo;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -19,7 +20,8 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 月卡管理接口（模块 9，运营后台）。
  *
- * <p>三个动作：查询、<b>开卡</b>与<b>停卡</b>。
+ * <p>四个动作：查<b>卡</b>、查<b>购买单</b>、<b>开卡</b>与<b>停卡</b>。
+ * 两种查询是两张表的两种流水，别混（见 {@link #listOrders} 的注释）。
  *
  * <p><b>开卡补的是「面对面收款」那条路</b>：顾客在店里当面付了钱
  *（现金 / 当面转账），管理员在这里一次点完 —— 不必让他掏出手机
@@ -63,6 +65,40 @@ public class AdminCardController {
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String cardType) {
         return ApiResult.of(cardService.listCards(pageNum, pageSize, userId, status, cardType));
+    }
+
+    /**
+     * 分页查询月卡<b>购买单</b>（运营后台「订单流水」页的「月卡」流水）。
+     *
+     * <p><b>它与上面的 {@link #list} 是两张表的两种流水</b>：那边回答「手上有什么卡」，
+     * 这边回答「买过几次、付没付成」。未付款与已关闭的单<b>只存在于购买单表</b> ——
+     * 卡表里根本没有它们（还没付钱的卡不是卡），所以「这人到底下过单没有」
+     * 只能看这里；反过来「这人现在有没有卡」也只能看卡表。
+     *
+     * <p>⚠️ <b>路径取 {@code /orders} 是安全的</b>：本类没有
+     * {@code GET /{id}} 这类通配端点（只有 {@code POST /{id}/revoke}），
+     * 因此不会出现「{@code orders} 被当成 ID」的歧义。将来若要加查单条卡的路由，
+     * 别写成能同时匹配 {@code /orders} 的形式。
+     *
+     * <p>状态与卡种的合法性由 Service 校验：库里两列都是 {@code VARCHAR}，
+     * 非法值拿去做等值查询不会报错，只会查出一片空白。
+     *
+     * @param pageNum  页码，从 1 开始（与月卡列表同一套命名，不是 {@code page}）
+     * @param pageSize 每页条数
+     * @param userId   购买人用户 ID 筛选，可空
+     * @param status   购买单状态筛选（PENDING_PAYMENT / PAID / CLOSED），可空
+     * @param cardType 卡种筛选（ALL_DAY / NIGHT / STAFF），可空
+     * @return 分页结果，每条含中文的 {@code statusLabel} / {@code cardTypeLabel}
+     *         与批量补上的 {@code userNickname}；状态或卡种取值非法时返回 {@code PARAM_INVALID}
+     */
+    @GetMapping("/orders")
+    public ResponseEntity<ApiResult<PageResult<MonthlyCardOrderVo>>> listOrders(
+            @RequestParam(defaultValue = "1") long pageNum,
+            @RequestParam(defaultValue = "10") long pageSize,
+            @RequestParam(required = false) Long userId,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String cardType) {
+        return ApiResult.of(cardService.listCardOrders(pageNum, pageSize, userId, status, cardType));
     }
 
     /**

@@ -12,6 +12,7 @@ import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
+import com.kaede.uspace.promotion.dto.MonthlyCardOrderVo;
 import com.kaede.uspace.promotion.dto.MonthlyCardVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
@@ -32,6 +33,9 @@ import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 月卡服务（模块 9）。
@@ -478,6 +482,84 @@ public class MonthlyCardService {
                 new Page<>(pageNum, pageSize), userId, statusFilter, typeFilter);
         LocalDate today = LocalDate.now();
         return BizResult.ok(PageResult.of(page, card -> MonthlyCardVo.from(card, today)));
+    }
+
+    /**
+     * 分页查询月卡购买单，供运营后台的「月卡」流水使用。
+     *
+     * <p><b>它与 {@link #listCards} 是两张表的两种流水</b>：那边回答「手上有什么卡」，
+     * 这边回答「买过几次、付没付成」。未付款与已关闭的单<b>只存在于本表</b> ——
+     * 卡表里根本没有它们（还没付钱的卡不是卡），所以后台要查「这人到底下过单没有」
+     * 只能看这里；反过来「这人现在有没有卡」也只能看卡表。
+     *
+     * <p>状态与卡种在这里校验合法性：库里两列都是 {@code VARCHAR}，非法值拿去做等值查询
+     * <b>不会报错</b>，只会查出一片空白 —— 与「确实没有符合条件的记录」长得一模一样。
+     *
+     * @param pageNum  页码，从 1 开始
+     * @param pageSize 每页条数
+     * @param userId   购买人用户 ID，可空
+     * @param status   购买单状态（PENDING_PAYMENT / PAID / CLOSED），可空
+     * @param cardType 卡种（ALL_DAY / NIGHT / STAFF），可空
+     * @return 分页结果；状态或卡种取值非法时返回 {@link ErrorCode#PARAM_INVALID}
+     */
+    public BizResult<PageResult<MonthlyCardOrderVo>> listCardOrders(long pageNum, long pageSize,
+                                                                    Long userId, String status,
+                                                                    String cardType) {
+        String statusFilter = trimToNull(status);
+        String typeFilter = trimToNull(cardType);
+        if (statusFilter != null && !CardOrderStatus.isValid(statusFilter)) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "月卡购买单状态取值不合法");
+        }
+        if (typeFilter != null && !MonthlyCardType.isValid(typeFilter)) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "月卡类型取值不合法");
+        }
+
+        IPage<MonthlyCardOrder> page = orderMapper.selectPageForAdmin(
+                new Page<>(pageNum, pageSize), userId, statusFilter, typeFilter);
+        PageResult<MonthlyCardOrderVo> result = PageResult.of(page, MonthlyCardOrderVo::from);
+        // 后台的流水要一眼看出「这是谁买的」—— 逐条查用户是 N+1，批量补一次
+        attachUserNames(result.getRecords());
+        return BizResult.ok(result);
+    }
+
+    /**
+     * 给一批购买单视图补上购买人昵称（后台流水用）。
+     *
+     * <p>昵称取 {@code nickname}、没填时回落到登录名 —— 与后台用户列表、
+     * 订单流水、商品流水的展示口径一致（几处都要能认出同一个人）。
+     *
+     * <p>查不到的用户（已注销）留 null，前端回落成「用户 #ID」：
+     * 这里不填一个编造的名字，免得把「查不到」伪装成「叫这个名字」。
+     *
+     * @param records 当前页的购买单视图，原地补 {@code userNickname}
+     */
+    private void attachUserNames(List<MonthlyCardOrderVo> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        List<Long> userIds = records.stream()
+                .map(MonthlyCardOrderVo::getUserId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return;
+        }
+        Map<Long, String> names = sysUserMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, MonthlyCardService::displayName));
+        records.forEach(vo -> vo.setUserNickname(names.get(vo.getUserId())));
+    }
+
+    /**
+     * 用户显示名：昵称优先，没填时回落登录名。
+     *
+     * @param user 用户实体
+     * @return 展示用的名字
+     */
+    private static String displayName(SysUser user) {
+        return user.getNickname() == null || user.getNickname().isBlank()
+                ? user.getUsername()
+                : user.getNickname();
     }
 
     // ==================================================================

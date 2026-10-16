@@ -145,6 +145,36 @@ public interface ProductOrderMapper extends BaseMapper<ProductOrder> {
                                      @Param("status") String status);
 
     /**
+     * 导出用：与 {@link #selectPageBy} 同一套筛选口径，但<b>不分页</b>、带硬上限。
+     *
+     * <p>理由与 {@code OrderMapper#selectForExport} 一字不差 —— 导出要的是整份流水，
+     * 而 {@code limit} 是防止「筛选条件写错就把全表读进内存」的那道闸。
+     *
+     * <p>⚠️ <b>与列表口径唯一的差别：未指定状态时排除「已关闭」</b>（{@code CLOSED}）。
+     * 那是「下了单、没付款就取消」——<b>一分钱没动</b>（交易流水里记的是
+     * {@code CANCEL_UNPAID}），混进做账用的流水里只是噪音。
+     * 但<b>显式筛「已关闭」时照样导</b>：那是有人专门要看它们，不该被拦。
+     *
+     * @param userId 购买人 ID，可空
+     * @param status 状态，可空
+     * @param limit  最多返回多少行
+     * @return 商品购买单列表，按 id 倒序
+     */
+    @Select("""
+            SELECT *
+              FROM biz_product_order
+             WHERE deleted = 0
+               AND (#{userId} IS NULL OR user_id = #{userId})
+               AND (#{status} IS NULL OR #{status} = '' OR status = #{status})
+               AND (COALESCE(#{status}, '') <> '' OR status <> 'CLOSED')
+             ORDER BY id DESC
+             LIMIT #{limit}
+            """)
+    List<ProductOrder> selectForExport(@Param("userId") Long userId,
+                                       @Param("status") String status,
+                                       @Param("limit") int limit);
+
+    /**
      * 统计一批商品各自被<b>未超时</b>的待支付单占掉多少件。
      *
      * <p>供「可售量 = 库存 − 占用量」这条软检查使用（见

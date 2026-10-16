@@ -1,5 +1,6 @@
 package com.kaede.uspace.space.dto;
 
+import com.kaede.uspace.space.BookingStatus;
 import com.kaede.uspace.space.entity.Booking;
 import lombok.Data;
 
@@ -44,6 +45,21 @@ public class BookingVo {
 
     /** 状态：PENDING_PAYMENT / PAID / CANCELLED / CLOSED，见 {@code BookingStatus} */
     private String status;
+
+    /**
+     * 状态中文名，如「待付款」。
+     *
+     * <p><b>2026-10-16 补上</b>：此前包场的中文只存在于前端
+     * {@code utils/labels.js} 的 {@code BOOKING_STATUS}，而项目既定做法是
+     * 「中文对照表只维护一份，放在枚举旁边」（订单、月卡、商品购买单的 VO
+     * 都带 {@code statusLabel}，只有包场没带）。{@code BookingStatus#labelOf}
+     * 本来就是为后端生成流水导出文件而写的，这里把它接到 VO 上 ——
+     * 后台订单流水页的「包场」tab 因此不必自己映射一遍中文。
+     *
+     * <p>前端的 {@code BOOKING_STATUS} 保留：它的 {@code label} 仍要用来
+     * 构造筛选下拉的选项（后端没有「全部状态」的字典接口）。
+     */
+    private String statusLabel;
 
     /** 支付通道，未付款时为空 */
     private String paymentMethod;
@@ -110,6 +126,7 @@ public class BookingVo {
         setEndAt(booking.getEndAt());
         setPrice(booking.getPrice());
         setStatus(booking.getStatus());
+        setStatusLabel(BookingStatus.labelOf(booking.getStatus()));
         setPaymentMethod(booking.getPaymentMethod());
         setPaidAt(booking.getPaidAt());
         setRemark(booking.getRemark());

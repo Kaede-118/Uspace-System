@@ -88,4 +88,39 @@ public enum BookingStatus {
     public static boolean occupiesSlot(String name) {
         return PENDING_PAYMENT.name().equals(name) || PAID.name().equals(name);
     }
+
+    /**
+     * 状态中文名，供「后端直接出文案」的场景用（如流水导出）。
+     *
+     * <p>⚠️ <b>这份中文与前端 {@code utils/labels.js} 的 {@code BOOKING_STATUS} 是同一套</b> ——
+     * 包场不像订单那样在 VO 上带 {@code statusLabel}（见 {@code BookingVo}），
+     * 所以中文此前只存在于前端。导出是后端生成文件、拿不到前端那份，只能在这里再写一遍；
+     * <b>改一处要改两处</b>。
+     * 正解是把前端那份也收归到这里（给 {@code BookingVo} 补 {@code statusLabel}），
+     * 本次没动前端，先在这里留一句。
+     *
+     * <p>与别处同一条取向：认不出的取值<b>原样返回</b>，不伪装成一个正常状态名 ——
+     * 状态列是 {@code VARCHAR}，手工改过库的数据可能落在枚举之外。
+     *
+     * @param name 状态名，可为 null
+     * @return 中文名；认不出时原样返回
+     */
+    public static String labelOf(String name) {
+        if (PENDING_PAYMENT.name().equals(name)) {
+            return "待付款";
+        }
+        if (PAID.name().equals(name)) {
+            return "已付款";
+        }
+        if (CANCELLED.name().equals(name)) {
+            return "已取消";
+        }
+        if (REFUNDED.name().equals(name)) {
+            return "已退款";
+        }
+        if (CLOSED.name().equals(name)) {
+            return "已结束";
+        }
+        return name;
+    }
 }

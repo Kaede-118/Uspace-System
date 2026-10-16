@@ -6,10 +6,12 @@ import com.kaede.uspace.billing.CardCoverage;
 import com.kaede.uspace.billing.CardScope;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
 import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
+import com.kaede.uspace.promotion.dto.MonthlyCardOrderVo;
 import com.kaede.uspace.promotion.dto.MonthlyCardVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
@@ -464,6 +466,85 @@ class MonthlyCardServiceTests {
     }
 
     // ==================================================================
+    // 后台流水：月卡购买单
+    // ==================================================================
+
+    @Test
+    @DisplayName("后台月卡流水：按下单倒序，中文与购买人昵称都由后端补齐")
+    void listCardOrders_returnsPageWithLabelsAndNicknames() {
+        userMapper.seed(userOf(USER_ID));
+        // 第二个用户刻意不填昵称：展示口径是「昵称优先、回落登录名」
+        SysUser nameless = new SysUser();
+        nameless.setId(OTHER_USER_ID);
+        nameless.setUsername("user" + OTHER_USER_ID);
+        userMapper.seed(nameless);
+
+        orderMapper.seed(pendingOrder(USER_ID, LocalDateTime.now().minusMinutes(30)));
+        orderMapper.seed(orderOf(USER_ID, CardOrderStatus.PAID,
+                LocalDateTime.now().minusMinutes(20)));
+        orderMapper.seed(orderOf(OTHER_USER_ID, CardOrderStatus.CLOSED,
+                LocalDateTime.now().minusMinutes(10)));
+
+        BizResult<PageResult<MonthlyCardOrderVo>> result =
+                service.listCardOrders(1, 10, null, null, null);
+
+        assertTrue(result.isSuccess(), "不带筛选条件应当查得到");
+        PageResult<MonthlyCardOrderVo> page = result.getData();
+        assertEquals(3, page.getTotal());
+        assertEquals(3, page.getRecords().size());
+
+        List<MonthlyCardOrderVo> records = page.getRecords();
+        assertEquals(CardOrderStatus.CLOSED.name(), records.get(0).getStatus(),
+                "按下单先后倒序：最近的一单排在最前");
+        assertEquals("已关闭", records.get(0).getStatusLabel(),
+                "状态中文由后端给，前端不再自己映射一遍枚举");
+        assertEquals(MonthlyCardType.ALL_DAY.name(), records.get(0).getCardType());
+        assertEquals("全天月卡", records.get(0).getCardTypeLabel());
+        assertEquals("user" + OTHER_USER_ID, records.get(0).getUserNickname(),
+                "没填昵称时回落登录名 —— 与后台用户列表、订单流水同一口径");
+
+        MonthlyCardOrderVo paid = records.get(1);
+        assertEquals("已支付", paid.getStatusLabel());
+        assertEquals("测试用户" + USER_ID, paid.getUserNickname(), "填了昵称就优先用昵称");
+        assertEquals("待支付", records.get(2).getStatusLabel(),
+                "未付款的单只在购买单表里，卡表根本没有它");
+    }
+
+    @Test
+    @DisplayName("后台月卡流水：状态、卡种、购买人三个筛选各自生效，空串等同不过滤")
+    void listCardOrders_filtersByStatusCardTypeAndUser() {
+        MonthlyCardOrder pending = orderMapper.seed(pendingOrder(USER_ID, LocalDateTime.now()));
+        MonthlyCardOrder night = orderMapper.seed(
+                orderOf(OTHER_USER_ID, CardOrderStatus.PAID, LocalDateTime.now()));
+        night.setCardType(MonthlyCardType.NIGHT.name());
+
+        assertEquals(List.of(pending.getId()),
+                idsOf(service.listCardOrders(1, 10, null,
+                        CardOrderStatus.PENDING_PAYMENT.name(), null)),
+                "按状态筛");
+        assertEquals(List.of(night.getId()),
+                idsOf(service.listCardOrders(1, 10, null, null, MonthlyCardType.NIGHT.name())),
+                "按卡种筛");
+        assertEquals(List.of(night.getId()),
+                idsOf(service.listCardOrders(1, 10, OTHER_USER_ID, null, null)),
+                "按购买人筛");
+        assertEquals(2, idsOf(service.listCardOrders(1, 10, null, "", "")).size(),
+                "空串等同不过滤 —— 真 SQL 为状态与卡种两列都写了等于空串的那一支，"
+                        + "传空串不该查出一片空白（那种错不会有任何报错）");
+    }
+
+    @Test
+    @DisplayName("后台月卡流水：状态或卡种取值非法时返回参数错误，而不是静默查空")
+    void listCardOrders_illegalValueFailsFast() {
+        assertEquals(ErrorCode.PARAM_INVALID,
+                service.listCardOrders(1, 10, null, "NOPE", null).getError(),
+                "库列是 VARCHAR，非法状态名做等值查询不会报错、只会查出一片空白");
+        assertEquals(ErrorCode.PARAM_INVALID,
+                service.listCardOrders(1, 10, null, null, "NOPE").getError(),
+                "卡种同理");
+    }
+
+    // ==================================================================
     // 构造辅助
     // ==================================================================
 
@@ -532,5 +613,19 @@ class MonthlyCardServiceTests {
         order.setStatus(status.name());
         order.setCreatedAt(createdAt);
         return order;
+    }
+
+    /**
+     * 取分页结果里的 ID 列表，供筛选类断言使用。
+     *
+     * <p>断言「返回了哪几条」用 ID 比用整条记录稳：筛选条件测的是「筛没筛对」，
+     * 与订单上的其余字段无关，逐字段比会把无关的差异也读成失败。
+     *
+     * @param result 服务返回的分页结果
+     * @return 当前页记录的 ID 列表
+     */
+    private static List<Long> idsOf(BizResult<PageResult<MonthlyCardOrderVo>> result) {
+        assertTrue(result.isSuccess(), "筛选条件合法，不该走到失败分支");
+        return result.getData().getRecords().stream().map(MonthlyCardOrderVo::getId).toList();
     }
 }

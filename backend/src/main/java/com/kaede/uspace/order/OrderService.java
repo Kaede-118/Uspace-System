@@ -1078,6 +1078,8 @@ public class OrderService {
         PageResult<OrderVo> result = PageResult.of(page, OrderVo::from);
         // 后台的流水要一眼看出「这是谁的单」—— 逐条查用户是 N+1，批量补一次
         attachUserNames(result.getRecords());
+        // 「已调整」标签的悬停要说得清「谁改的、什么时候改的」，同样批量补一次
+        attachAdjusterNames(result.getRecords());
         return BizResult.ok(result);
     }
 
@@ -1110,12 +1112,47 @@ public class OrderService {
     }
 
     /**
+     * 给一批订单视图补上「调整人」的展示名（后台列表与详情用）。
+     *
+     * <p>与 {@link #attachUserNames} 同一条路、同一个口径：批量查一次
+     * {@code sys_user}，不在循环里逐条查（那是 N+1）。
+     *
+     * <p>只对 {@code adjustedBy} 非空的单子查：没调整过的订单这一项是 null，
+     * 连 ID 收集都不必参与。
+     *
+     * <p>查不到的管理员（账号已不存在）留 null，前端回落成「—」——
+     * 不编一个名字，免得把「查不到」伪装成「叫这个名字」。
+     *
+     * @param records 当前页（或单条）的订单视图，原地补 {@code adjustedByName}
+     */
+    private void attachAdjusterNames(List<OrderVo> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        List<Long> adjusterIds = records.stream()
+                .map(OrderVo::getAdjustedBy)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (adjusterIds.isEmpty()) {
+            return;
+        }
+        Map<Long, String> names = sysUserMapper.selectBatchIds(adjusterIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, OrderService::displayName));
+        records.forEach(vo -> vo.setAdjustedByName(names.get(vo.getAdjustedBy())));
+    }
+
+    /**
      * 用户显示名：昵称优先，没填时回落登录名。
+     *
+     * <p><b>包级可见</b>：流水导出（{@code OrderExportService}）要按同一口径给
+     * 导出的表补昵称 —— 两处各写一份「昵称优先、回落登录名」的话，迟早出现
+     * 「页面上叫张三、Excel 里叫 zhangsan」这种不报错的分岔。
      *
      * @param user 用户实体
      * @return 展示用的名字
      */
-    private static String displayName(SysUser user) {
+    static String displayName(SysUser user) {
         return user.getNickname() == null || user.getNickname().isBlank()
                 ? user.getUsername()
                 : user.getNickname();
@@ -1139,6 +1176,7 @@ public class OrderService {
         OrderVo vo = OrderVo.from(order);
         attachBill(vo, order);
         attachUserNames(List.of(vo));
+        attachAdjusterNames(List.of(vo));
         return BizResult.ok(vo);
     }
 

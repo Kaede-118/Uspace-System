@@ -1,17 +1,25 @@
 <script setup>
 /**
- * 订单流水（运营后台）：<b>计时订单</b>与<b>商品订单</b>两条流水。
+ * 订单流水（运营后台）：<b>计时订单</b>、<b>商品订单</b>、<b>月卡</b>与<b>包场</b>四条流水。
  *
  * <p><b>2026-10-16 合并成一页</b>：商品订单原先是「商品」页的第二个 tab，
  * 现在搬到这里与计时订单并列 —— 两者回答的是同一个问题「谁、什么时候、花了多少」，
  * 管理员比对两条流水时不必在两个页面之间来回切；商品页从此只管货架维护。
  *
- * <p><b>为什么是两个 tab、而不是合成一张表</b>：两条流水的字段几乎没有一个重合
- * （一边是「在店多久」，另一边是「买了什么 × 几件」），筛选能力也不一样 ——
- * 计时订单能按时间范围与「只看人工调整」筛，商品订单接口不支持这两种。
- * 硬凑成一张表，一半的列会永远空着，筛选栏还得为两套口径各解释一遍。
+ * <p><b>同一天又加了「月卡」与「包场」两条</b>：它们原先分别散在「用户」页的月卡弹层
+ * 与「包场」页 —— 那两处回答的是「这份权益现在怎么样」，而不是「这笔钱什么时候收的」。
+ * 收款流水凑在一页，对账时不必开四个页面。
+ * <b>它们只有列表、没有导出</b>：导出类型（TIMING_ORDER / PRODUCT_ORDER / ALL_ORDERS）
+ * 是后端按单据形状定制的，月卡与包场还没有对应的导出实现 —— 宁可没有按钮，
+ * 也不给一个点了导出却是别的东西的按钮。
  *
- * <p><b>两个 tab 各有自己的筛选与分页</b>，互不影响：来回切换时各自停在上次
+ * <p><b>为什么是几个 tab、而不是合成一张表</b>：几条流水的字段几乎没有一个重合
+ * （一边是「在店多久」，一边是「买了什么 × 几件」，一边是「哪张卡、付没付成」），
+ * 筛选能力也不一样 —— 计时订单能按时间范围与「只看人工调整」筛，商品订单只有状态与用户，
+ * 包场只有后端定义的两档视图。硬凑成一张表，一半的列会永远空着，
+ * 筛选栏还得为几套口径各解释一遍。
+ *
+ * <p><b>每个 tab 各有自己的筛选与分页</b>，互不影响：来回切换时各自停在上次
  * 看到的位置，来回比对不必重填一遍条件。
  *
  * <p><b>「包场单」标记为什么值得显示</b>：命中包场的订单会剪掉那段计费时长
@@ -40,17 +48,30 @@
  * 只给未了结的订单（使用中 / 待支付 / 凭证未通过）显示：已支付的单调整必然改金额，
  * 改完要牵出退款，后端会拒（{@code ORDER_NOT_ADJUSTABLE}）。
  *
- * <p>⚠️ <b>两个接口的分页参数不一样</b>（后端如此，不是笔误）：
- * 计时订单用 {@code page} / {@code size}，商品订单用 {@code pageNum} / {@code pageSize}。
+ * <p>⚠️ <b>各接口的分页参数不一样</b>（后端如此，不是笔误）：
+ * 计时订单与包场用 {@code page} / {@code size}，
+ * 商品订单与月卡购买单用 {@code pageNum} / {@code pageSize}。
  * 传错不会报错，只会永远返回第一页 —— 表现为「翻页没反应」。
  *
- * <p>⚠️ <b>商品订单的卡片不跳详情</b>：它的「详情」是商品与数量，
- * 卡片上已经写全了；订单详情那一页讲的是时长与分段账单，对它是另一回事。
- * 所以只有计时订单的卡片可点。
+ * <p>⚠️ <b>商品、月卡、包场三张卡片都不跳详情</b>：订单详情那一页讲的是时长与分段账单，
+ * 对它们不是一回事；这几张卡片上的字段已经写全了。
+ *
+ * <p>⚠️ <b>包场流水没有「按用户筛」</b>：{@code GET /api/admin/bookings} 只支持
+ * {@code scope} 这一个筛选参数（后端如此），卡片上那枚用户 ID 因此<b>不可点</b> ——
+ * 点了也没有接口能按它筛，做成能点的反而误导。
  */
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listOrders, listAdminProductOrders, adjustOrder } from '@/api/admin'
+import {
+  listOrders,
+  listAdminProductOrders,
+  listCardOrders,
+  listBookings,
+  adjustOrder,
+  createExport,
+  downloadExport,
+  getFinanceSummary
+} from '@/api/admin'
 import { toastError, toastSuccess } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import {
@@ -67,7 +88,11 @@ import {
   ORDER_STATUS,
   orderStatusCls,
   PRODUCT_ORDER_STATUS,
-  productOrderStatusCls
+  productOrderStatusCls,
+  MONTHLY_CARD_ORDER_STATUS,
+  cardOrderStatusCls,
+  MONTHLY_CARD_TYPES,
+  BOOKING_STATUS
 } from '@/utils/labels'
 import AdminPager from '@/components/AdminPager.vue'
 import AdminSheet from '@/components/AdminSheet.vue'
@@ -80,8 +105,26 @@ const PAGE_SIZE = 10
 const route = useRoute()
 const router = useRouter()
 
-/** 当前 tab：timing 计时订单 / product 商品订单 */
+/**
+ * 当前 tab：timing 计时订单 / product 商品订单 / card 月卡 / booking 包场。
+ *
+ * <p>四个值同时也是 URL 上 {@code type} 参数的取值（计时订单不写，保持默认 URL 干净）。
+ */
 const type = ref('timing')
+
+/**
+ * 包场的 {@code scope} 筛选选项。
+ *
+ * <p><b>后端只给两档视图、不给逐状态筛选</b>（{@code GET /api/admin/bookings} 的
+ * {@code scope} 要么 active、要么 void），所以这里照它的口径列两项。
+ * 中文由前端写：它不是「某个状态的中文名」，而是后端两个视图的说明
+ *（{@code active} = 已生效 + 待付款，{@code void} = 已取消 + 已退款）——
+ * 后端没有对应的字典接口，而选项必须齐全，不能靠数据里恰好出现过哪几种推导。
+ */
+const BOOKING_SCOPES = [
+  { value: 'active', label: '已生效与待付款' },
+  { value: 'void', label: '已取消与已退款' }
+]
 
 /* ==================== tab 一：计时订单 ==================== */
 
@@ -206,15 +249,20 @@ async function loadProductOrders() {
 /**
  * 切 tab。
  *
- * <p>商品订单是只读的、且多半不是管理员进来要看的那一条，所以<b>切过去时才拉</b>：
- * 打开页面就打两个请求，等于让每次看计时订单都白等一次商品订单的查询。
+ * <p>后三条流水都是只读的、且多半不是管理员进来要看的那一条，所以<b>切过去时才拉</b>：
+ * 打开页面就打四个请求，等于让每次看计时订单都白等三次别的查询。
  *
- * @param {string} next timing / product
+ * <p>不拉数据的那两个分支照样往下走 —— 它们只把 URL 改掉，查询交给
+ * {@code onMounted} 的那套分发（刷新页面与点 tab 因此是同一条路）。
+ *
+ * @param {string} next timing / product / card / booking
  */
 function switchType(next) {
   type.value = next
   syncQuery()
   if (next === 'product' && !productLoaded.value) loadProductOrders()
+  if (next === 'card' && !cardLoaded.value) loadCardOrders()
+  if (next === 'booking' && !bookingLoaded.value) loadBookings()
 }
 
 /** 改商品订单的筛选：回第一页再查 */
@@ -227,6 +275,179 @@ function applyProductFilters() {
 function resetProductFilters() {
   productFilters.value = { status: '', userId: '' }
   applyProductFilters()
+}
+
+/* ==================== tab 三：月卡购买单 ==================== */
+
+const cardPage = ref(1)
+const cardTotal = ref(0)
+const cardOrders = ref([])
+const cardLoading = ref(false)
+/** 是否已经拉过 —— 切到那个 tab 时才第一次拉，打开页面时不必打四个请求 */
+const cardLoaded = ref(false)
+
+/** 月卡购买单的筛选。⚠️ 这个接口同样不支持时间范围与「只看人工调整」 */
+const cardFilters = ref({ status: '', cardType: '', userId: '' })
+
+/**
+ * 拉取月卡购买单的当前页。
+ *
+ * <p>⚠️ <b>分页参数是 pageNum / pageSize</b>（与月卡列表、商品列表同一套惯例），
+ * 不是计时订单那套 page / size。传错不会报错，只会永远返回第一页。
+ *
+ * <p>状态与卡种的中文都不在这里映射：行内用后端给的 statusLabel / cardTypeLabel，
+ * 本页只从 labels.js 取配色与下拉选项（「后端给了的一律用后端的」那条规矩）。
+ */
+async function loadCardOrders() {
+  cardLoading.value = true
+  // 筛选与页码写进 URL，切回这一页时不丢（见 syncQuery 的说明）
+  syncQuery()
+  try {
+    const params = { pageNum: cardPage.value, pageSize: PAGE_SIZE }
+    if (cardFilters.value.status) params.status = cardFilters.value.status
+    if (cardFilters.value.cardType) params.cardType = cardFilters.value.cardType
+    if (cardFilters.value.userId.trim()) params.userId = cardFilters.value.userId.trim()
+
+    const resp = await listCardOrders(params)
+    const count = resp.data?.total || 0
+    const maxPage = Math.max(1, Math.ceil(count / PAGE_SIZE))
+    if (cardPage.value > maxPage) {
+      cardPage.value = maxPage
+      return loadCardOrders()
+    }
+    cardOrders.value = resp.data?.records || []
+    cardTotal.value = count
+    cardLoaded.value = true
+  } catch (err) {
+    toastError(errorMessage(err, '加载月卡流水失败'))
+  } finally {
+    cardLoading.value = false
+  }
+}
+
+/** 改月卡流水的筛选：回第一页再查 */
+function applyCardFilters() {
+  cardPage.value = 1
+  loadCardOrders()
+}
+
+/** 清空月卡流水的筛选 */
+function resetCardFilters() {
+  cardFilters.value = { status: '', cardType: '', userId: '' }
+  applyCardFilters()
+}
+
+/**
+ * 点月卡卡片上的用户 ID：就地按这个购买人筛一遍。
+ *
+ * <p>与计时订单、商品订单是同一条路（回第 1 页、重查、条件写进 URL）——
+ * 看到「这笔单不太对」之后紧接着的动作就是「把他这阵子的购卡记录都拉出来」。
+ *
+ * @param {number} userId 用户 ID
+ */
+function filterCardByUser(userId) {
+  cardFilters.value.userId = String(userId)
+  applyCardFilters()
+}
+
+/**
+ * 卡种标签的配色（中文用后端给的 cardTypeLabel）。
+ *
+ * @param {string} cardType 卡种 code
+ * @returns {string} 形如 "tag tag-success"
+ */
+function cardTypeCls(cardType) {
+  const item = MONTHLY_CARD_TYPES.find((c) => c.value === cardType)
+  return item ? item.cls : 'tag'
+}
+
+/* ==================== tab 四：包场 ==================== */
+
+const bookingPage = ref(1)
+const bookingTotal = ref(0)
+const bookings = ref([])
+const bookingLoading = ref(false)
+const bookingLoaded = ref(false)
+
+/** 包场的筛选。⚠️ 这个接口只支持 scope 一个参数，没有「按用户筛」 */
+const bookingFilters = ref({ scope: '' })
+
+/**
+ * 拉取包场流水的当前页。
+ *
+ * <p>⚠️ <b>分页参数是 page / size</b>（包场接口的惯例），不是月卡那条的
+ * pageNum / pageSize。
+ *
+ * <p>状态中文用后端给的 statusLabel（BookingVo 2026-10-16 起带上它），
+ * 本页只从 labels.js 取配色。
+ */
+async function loadBookings() {
+  bookingLoading.value = true
+  syncQuery()
+  try {
+    const params = { page: bookingPage.value, size: PAGE_SIZE }
+    if (bookingFilters.value.scope) params.scope = bookingFilters.value.scope
+
+    const resp = await listBookings(params)
+    const count = resp.data?.total || 0
+    const maxPage = Math.max(1, Math.ceil(count / PAGE_SIZE))
+    if (bookingPage.value > maxPage) {
+      bookingPage.value = maxPage
+      return loadBookings()
+    }
+    bookings.value = resp.data?.records || []
+    bookingTotal.value = count
+    bookingLoaded.value = true
+  } catch (err) {
+    toastError(errorMessage(err, '加载包场流水失败'))
+  } finally {
+    bookingLoading.value = false
+  }
+}
+
+/** 改包场流水的筛选：回第一页再查 */
+function applyBookingFilters() {
+  bookingPage.value = 1
+  loadBookings()
+}
+
+/** 清空包场流水的筛选 */
+function resetBookingFilters() {
+  bookingFilters.value = { scope: '' }
+  applyBookingFilters()
+}
+
+/**
+ * 包场状态的标签配色（中文用后端给的 statusLabel）。
+ *
+ * <p>认不出的状态名退回默认灰标签，与其余几处同一取向 ——
+ * 状态列是 VARCHAR，手工改过库的数据可能落在枚举之外。
+ *
+ * @param {string} status 状态名
+ * @returns {string} 形如 "tag tag-warning"
+ */
+function bookingStatusCls(status) {
+  return BOOKING_STATUS[status] ? BOOKING_STATUS[status].cls : 'tag'
+}
+
+/**
+ * 包场时段的展示文本。
+ *
+ * <p>与订单的起止时刻同一套写法：同一天只写一次日期、去掉秒（流水只需要
+ * 「一眼看出大概是哪一段」）。包场是整段排好的，所以不会出现「→ 进行中」。
+ *
+ * @param {object} b 包场行
+ * @returns {string} 形如 "2026-10-20 14:00 → 18:00"
+ */
+function bookingRangeText(b) {
+  if (!b.startAt) return '—'
+  const from = formatDate(b.startAt) + ' ' + formatTime(b.startAt)
+  if (!b.endAt) return from
+  const to =
+    formatDate(b.startAt) === formatDate(b.endAt)
+      ? formatTime(b.endAt)
+      : formatDate(b.endAt) + ' ' + formatTime(b.endAt)
+  return from + ' → ' + to
 }
 
 /* ==================== 筛选状态与 URL 的同步 ==================== */
@@ -248,10 +469,16 @@ function resetProductFilters() {
  *
  * <p>空值一概不写进 URL（{@code ?status=} 与不写是同义的），页码 1 也不写 ——
  * 让「默认状态」的 URL 保持干净。
+ *
+ * <p>⚠️ <b>四套筛选各带前缀，互不共用键名</b>：计时订单无前缀，商品订单 {@code p}，
+ * 月卡 {@code c}，包场 {@code b}。混用（比如两个月卡字段写成同一个键）不会报错，
+ * 只会让「切回某个 tab 看到的是别人的筛选」。
  */
 function syncQuery() {
   const q = {}
   if (type.value === 'product') q.type = 'product'
+  else if (type.value === 'card') q.type = 'card'
+  else if (type.value === 'booking') q.type = 'booking'
 
   const f = filters.value
   if (f.status) q.status = f.status
@@ -265,6 +492,17 @@ function syncQuery() {
   if (p.status) q.pStatus = p.status
   if (p.userId.trim()) q.pUserId = p.userId.trim()
   if (productPage.value > 1) q.pPage = String(productPage.value)
+
+  // 月卡与包场各自带前缀（c / b）：四套筛选字段名互不相同，
+  // 混用的话「切回某个 tab 看到的是别人的筛选」不会有任何报错
+  const c = cardFilters.value
+  if (c.status) q.cStatus = c.status
+  if (c.cardType) q.cCardType = c.cardType
+  if (c.userId.trim()) q.cUserId = c.userId.trim()
+  if (cardPage.value > 1) q.cPage = String(cardPage.value)
+
+  if (bookingFilters.value.scope) q.bScope = bookingFilters.value.scope
+  if (bookingPage.value > 1) q.bPage = String(bookingPage.value)
 
   router.replace({ path: '/admin/orders', query: q })
 }
@@ -282,7 +520,12 @@ function initFromQuery() {
   const q = route.query
   const str = (v) => (typeof v === 'string' ? v : '')
 
-  if (str(q.type) === 'product') type.value = 'product'
+  // 只认这四个取值：URL 是手可以改的，写个别的进来时回落到计时订单，
+  // 而不是让 type 停在一个没有对应模板的值上（那样整页会什么都不渲染）
+  const nextType = str(q.type)
+  if (nextType === 'product' || nextType === 'card' || nextType === 'booking') {
+    type.value = nextType
+  }
 
   filters.value.status = str(q.status)
   filters.value.userId = str(q.userId)
@@ -296,6 +539,16 @@ function initFromQuery() {
   productFilters.value.userId = str(q.pUserId)
   const pp = Number.parseInt(str(q.pPage), 10)
   if (Number.isInteger(pp) && pp > 1) productPage.value = pp
+
+  cardFilters.value.status = str(q.cStatus)
+  cardFilters.value.cardType = str(q.cCardType)
+  cardFilters.value.userId = str(q.cUserId)
+  const cp = Number.parseInt(str(q.cPage), 10)
+  if (Number.isInteger(cp) && cp > 1) cardPage.value = cp
+
+  bookingFilters.value.scope = str(q.bScope)
+  const bp = Number.parseInt(str(q.bPage), 10)
+  if (Number.isInteger(bp) && bp > 1) bookingPage.value = bp
 }
 
 /**
@@ -563,21 +816,181 @@ async function submitAdjust() {
  * <p>⚠️ 商品 tab 也一样要复原：URL 上写着 {@code type=product} 时直接打开这一页
  * 就该落在商品流水上，而不是先闪一下计时订单、再去查商品。
  */
+/* ==================== 收支概览与导出（2026-10-16 加） ==================== */
+
+/**
+ * 收支概览；加载失败时保持 null。
+ *
+ * <p>失败就整张卡不显示，而不是渲染一排空数字 —— 「取不到数」与「这个月是 0」
+ * 在屏幕上是两回事。
+ */
+const finance = ref(null)
+
+/** 导出进行中：生成一次要查全库，连点会堆请求，用户也会以为没反应 */
+const exporting = ref(false)
+
+async function loadFinance() {
+  try {
+    finance.value = (await getFinanceSummary()).data
+  } catch (err) {
+    // 概览失败不该挡住流水本身：列表照常可用，这里只在控制台留一声
+    console.warn('[订单流水] 收支概览加载失败', err)
+  }
+}
+
+/** 计时订单的导出参数：与 loadTiming 的筛选口径逐条对齐。 */
+function timingExportParams() {
+  const params = { type: 'TIMING_ORDER' }
+  const f = filters.value
+  if (f.status) params.status = f.status
+  if (f.userId.trim()) params.userId = f.userId.trim()
+  if (f.from) {
+    const from = fromInputDateTime(f.from)
+    if (from) params.from = from
+  }
+  if (f.to) {
+    const to = fromInputDateTime(f.to)
+    if (to) params.to = to
+  }
+  if (f.adjustedOnly) params.adjusted = 1
+  return params
+}
+
+/** 商品订单的导出参数（那个接口同样不支持时间范围与「只看人工调整」）。 */
+function productExportParams() {
+  const params = { type: 'PRODUCT_ORDER' }
+  if (productFilters.value.status) params.status = productFilters.value.status
+  if (productFilters.value.userId.trim()) params.userId = productFilters.value.userId.trim()
+  return params
+}
+
+/**
+ * 导出当前筛选条件下的<b>全量</b>流水为 xlsx。
+ *
+ * <p>⚠️ 导的是整份筛选结果，不是当前页：筛了「只看人工调整」就导出所有被调整过的单，
+ * 哪怕列表上只显示 10 条 —— 这正是「拿出去做流水计算」需要的东西。
+ *
+ * <p>⚠️ 后端到行数上限时会回 {@code truncated}，必须提示用户：
+ * 一份看起来完整、实际少了一截的流水，比直接导出失败更危险。
+ */
+async function onExport() {
+  await runExport(type.value === 'product' ? productExportParams() : timingExportParams())
+}
+
+/**
+ * 导出「总流水」：计时订单与商品单合并成一张表。
+ *
+ * <p>⚠️ 它<b>不传筛选条件</b> —— 那两张表能筛的维度不一样（计时单有时间范围与
+ * 「只看人工调整」，商品单只有状态），混着传会让「这次导的到底是什么口径」说不清。
+ */
+async function onExportAll() {
+  await runExport({ type: 'ALL_ORDERS' })
+}
+
+/**
+ * 生成并下载一份导出文件；两个入口（单表 / 总流水）共用这一段。
+ *
+ * <p>⚠️ 后端到行数上限时会回 {@code truncated}，必须提示用户：
+ * 一份看起来完整、实际少了一截的流水，比直接导出失败更危险。
+ */
+async function runExport(params) {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const resp = await createExport(params)
+    const { token, fileName, rows, truncated } = resp.data
+    await downloadExport(token, fileName)
+    if (truncated) {
+      toastError(`只导出了前 ${rows} 行（已达上限），请缩小时间范围再导一次`)
+    } else {
+      toastSuccess(`已导出 ${rows} 行`)
+    }
+  } catch (err) {
+    toastError(errorMessage(err, '导出失败'))
+  } finally {
+    exporting.value = false
+  }
+}
+
 onMounted(() => {
   initFromQuery()
+  // 四个 tab 各查各的：URL 上写着哪个 type 就先落在哪一条流水上
   if (type.value === 'product') loadProductOrders()
+  else if (type.value === 'card') loadCardOrders()
+  else if (type.value === 'booking') loadBookings()
   else loadTiming()
+  // 概览与列表分开拉：它慢一点不该拖着列表不出来
+  loadFinance()
 })
 </script>
 
 <template>
   <div class="page">
+    <!-- ---------------- 收支概览（2026-10-16 加） ---------------- -->
+    <div v-if="finance" class="card">
+      <div class="card-title">收支概览</div>
+      <!--
+        收入取「到账」事件而不是订单金额之和：顾客 8/31 进店、9/1 离场、9/2 付款，
+        这笔钱 9 月才到手 —— 统计的是钱什么时候到的，不是服务什么时候消费的
+      -->
+      <p class="fin__source">
+        收入 = 交易流水里的「到账」事件，按到账时刻归月；不含提交凭证与取消（那两类没有钱发生）
+      </p>
+
+      <div class="fin__group-title">收入</div>
+      <div class="fin__grid">
+        <div class="fin__cell">
+          <div class="fin__label">本月 · {{ finance.thisMonthLabel }}</div>
+          <div class="fin__value">¥{{ formatMoney(finance.thisMonthIncome) }}</div>
+        </div>
+        <div class="fin__cell">
+          <div class="fin__label">上月 · {{ finance.lastMonthLabel }}</div>
+          <div class="fin__value">¥{{ formatMoney(finance.lastMonthIncome) }}</div>
+        </div>
+        <div class="fin__cell">
+          <div class="fin__label">累计</div>
+          <div class="fin__value">¥{{ formatMoney(finance.totalIncome) }}</div>
+        </div>
+      </div>
+
+      <div class="fin__group-title fin__group-title--gap">支出</div>
+      <div class="fin__grid">
+        <div class="fin__cell">
+          <div class="fin__label">本月</div>
+          <div class="fin__value fin__value--none">—</div>
+        </div>
+        <div class="fin__cell">
+          <div class="fin__label">上月</div>
+          <div class="fin__value fin__value--none">—</div>
+        </div>
+        <div class="fin__cell">
+          <div class="fin__label">累计</div>
+          <div class="fin__value fin__value--none">—</div>
+        </div>
+      </div>
+      <p class="fin__note">
+        系统还没做支出记账（没有对应的表），所以这里显示「—」而不是 ¥0.00 ——
+        0 会被读成「本月没有支出」，而事实是「不知道」。将来做账时补一张支出表即可。
+      </p>
+    </div>
+
     <div class="card">
-      <div class="card-title">订单流水</div>
+      <div class="card-title om__title">
+        <span>订单流水</span>
+        <!--
+          「导出总流水」：把计时订单与商品单拼成一张表（2026-10-16 加）。
+          它不吃任何筛选条件 —— 那两张表能筛的维度不一样（计时单有时间范围与
+          「只看人工调整」，商品单只有状态），混着传会让「这次导的是什么口径」说不清。
+          因此它属于页面级、不属于任何一个 tab
+        -->
+        <button class="btn btn-ghost om__btn" :disabled="exporting" @click="onExportAll">
+          {{ exporting ? '导出中…' : '导出总流水' }}
+        </button>
+      </div>
 
       <!--
-        两条流水做成两张卡片，不是一个下拉筛选 —— 它们是这一页的【两种内容】，
-        而不是同一个列表的筛选条件。做成大按钮一眼看得出这一页有哪两条流水，
+        四条流水做成四张卡片，不是一个下拉筛选 —— 它们是这一页的【四种内容】，
+        而不是同一个列表的筛选条件。做成大按钮一眼看得出这一页有哪四条流水，
         副标题顺手写清各自的字段口径，省得挨个点进去试
       -->
       <div class="om__types">
@@ -596,6 +1009,22 @@ onMounted(() => {
         >
           <span class="om__type-name">商品订单</span>
           <span class="om__type-desc">商城购买单 · 商品与数量</span>
+        </button>
+        <button
+          class="om__type"
+          :class="{ 'om__type--on': type === 'card' }"
+          @click="switchType('card')"
+        >
+          <span class="om__type-name">月卡</span>
+          <span class="om__type-desc">购卡单 · 卡种与支付状态</span>
+        </button>
+        <button
+          class="om__type"
+          :class="{ 'om__type--on': type === 'booking' }"
+          @click="switchType('booking')"
+        >
+          <span class="om__type-name">包场</span>
+          <span class="om__type-desc">排期场次 · 时段与包场费</span>
         </button>
       </div>
 
@@ -631,6 +1060,13 @@ onMounted(() => {
           </label>
           <button class="btn btn-ghost om__btn" @click="applyTimingFilters">查询</button>
           <button class="btn btn-ghost om__btn" @click="resetTimingFilters">重置</button>
+          <!--
+            导出的是「当前筛选下的全量」，不是这一页 —— 所以它贴着筛选栏，
+            而不是放在分页器旁边（放那儿会被读成「导出当前页」）
+          -->
+          <button class="btn btn-ghost om__btn" :disabled="exporting" @click="onExport">
+            {{ exporting ? '导出中…' : '导出 xlsx' }}
+          </button>
         </div>
 
         <LoadingMask :loading="loading" />
@@ -654,10 +1090,10 @@ onMounted(() => {
               <!-- 状态中文用后端给的 statusText，只有配色取自 labels.js -->
               <span :class="orderStatusCls(o.status)">{{ o.statusText }}</span>
               <!--
-                「已调整」是「用户忘了点结束」的高发信号，值得定期过一眼；
-                鼠标悬停能看到调整原因（那是审计信息，不摊在流水上）
+                「已调整」是「用户忘了点结束」的高发信号，值得定期过一眼。
+                原因 / 处理人 / 调整时刻不藏在这里，直接印在卡片底部（见下面那段）
               -->
-              <span v-if="o.adjusted === 1" class="tag tag-warning" :title="o.adjustReason || ''">
+              <span v-if="o.adjusted === 1" class="tag tag-warning">
                 已调整
               </span>
               <span v-if="o.bookingId" class="tag">包场单</span>
@@ -728,6 +1164,18 @@ onMounted(() => {
               </span>
               <span class="orow__cut orow__cut--sum">共减 ¥{{ formatMoney(discountTotal(o)) }}</span>
             </div>
+
+            <!--
+              人工调整的三项留痕（原因 / 处理人 / 时刻）直接印在卡片上（2026-10-16 改）：
+              它们原先只挂在「已调整」标签的 tooltip 里 —— 而悬停既不好读、也复制不走，
+              偏偏这条正是要「定期过一眼」的那类信息，审计的东西不该藏在鼠标后面
+            -->
+            <p v-if="o.adjusted === 1" class="orow__adjust">
+              <span class="orow__adjust-tag">人工调整</span>
+              {{ o.adjustReason || '（未填写原因）' }}
+              <span v-if="o.adjustedByName"> · {{ o.adjustedByName }}</span>
+              <span v-if="o.adjustedAt"> · {{ formatDateTime(o.adjustedAt) }}</span>
+            </p>
           </div>
         </div>
 
@@ -747,7 +1195,7 @@ onMounted(() => {
       </template>
 
       <!-- ============ tab 二：商品订单 ============ -->
-      <template v-else>
+      <template v-else-if="type === 'product'">
         <div class="om__filters">
           <select
             v-model="productFilters.status"
@@ -769,6 +1217,9 @@ onMounted(() => {
           />
           <button class="btn btn-ghost om__btn" @click="applyProductFilters">查询</button>
           <button class="btn btn-ghost om__btn" @click="resetProductFilters">重置</button>
+          <button class="btn btn-ghost om__btn" :disabled="exporting" @click="onExport">
+            {{ exporting ? '导出中…' : '导出 xlsx' }}
+          </button>
         </div>
 
         <LoadingMask :loading="productLoading" />
@@ -820,14 +1271,174 @@ onMounted(() => {
           @update:page="loadProductOrders"
         />
       </template>
+
+      <!-- ============ tab 三：月卡购买单 ============ -->
+      <template v-else-if="type === 'card'">
+        <div class="om__filters">
+          <select
+            v-model="cardFilters.status"
+            class="field-input om__sel"
+            @change="applyCardFilters"
+          >
+            <option value="">全部状态</option>
+            <option v-for="s in MONTHLY_CARD_ORDER_STATUS" :key="s.value" :value="s.value">
+              {{ s.label }}
+            </option>
+          </select>
+          <select
+            v-model="cardFilters.cardType"
+            class="field-input om__sel"
+            @change="applyCardFilters"
+          >
+            <option value="">全部卡种</option>
+            <option v-for="t in MONTHLY_CARD_TYPES" :key="t.value" :value="t.value">
+              {{ t.label }}
+            </option>
+          </select>
+          <input
+            v-model="cardFilters.userId"
+            class="field-input om__uid"
+            type="text"
+            inputmode="numeric"
+            placeholder="用户 ID"
+            @keyup.enter="applyCardFilters"
+          />
+          <button class="btn btn-ghost om__btn" @click="applyCardFilters">查询</button>
+          <button class="btn btn-ghost om__btn" @click="resetCardFilters">重置</button>
+          <!-- 这一条没有导出实现，所以这里没有导出按钮（见文件头那段说明） -->
+        </div>
+
+        <LoadingMask :loading="cardLoading" />
+
+        <div v-if="cardOrders.length" class="om__list">
+          <div v-for="o in cardOrders" :key="o.id" class="orow">
+            <div class="orow__head">
+              <span class="orow__no">{{ o.orderNo }}</span>
+              <!-- 状态中文用后端给的 statusLabel，只有配色取自 labels.js -->
+              <span :class="cardOrderStatusCls(o.status)">{{ o.statusLabel }}</span>
+            </div>
+
+            <!-- 与另两条同一种排布：左边买的是什么卡、右边多少钱 -->
+            <div class="orow__line">
+              <span class="orow__left">
+                <span :class="cardTypeCls(o.cardType)">{{ o.cardTypeLabel }}</span>
+              </span>
+              <span class="orow__right">
+                <span class="orow__amount">¥{{ formatMoney(o.price) }}</span>
+              </span>
+            </div>
+
+            <!--
+              购买人放最前 —— 后台看流水最先要答的是「这是谁买的」。昵称由后端批量补
+              （userNickname，昵称优先、回落登录名）；用户已注销时回落成「用户 #ID」，
+              不编一个名字，因为「查不到」与「叫这个名字」是两回事
+            -->
+            <p class="orow__meta">
+              购买人 {{ userText(o) }}
+              <span
+                class="orow__uid"
+                title="只看该用户的购卡记录"
+                @click="filterCardByUser(o.userId)"
+                >#{{ o.userId }}</span
+              >
+              · 下单于 {{ formatDateTime(o.createdAt) }}
+              <template v-if="o.paidAt"> · 付款于 {{ formatDateTime(o.paidAt) }}</template>
+              <template v-if="o.paymentMethod"> · 通道 {{ o.paymentMethod }}</template>
+            </p>
+          </div>
+        </div>
+
+        <EmptyState
+          v-else-if="!cardLoading"
+          icon="💳"
+          text="还没有月卡购买单"
+          hint="顾客在商城买卡后这里就会有 —— 未付款与已关闭的单也在其中"
+        />
+
+        <AdminPager
+          v-model:page="cardPage"
+          :size="PAGE_SIZE"
+          :total="cardTotal"
+          @update:page="loadCardOrders"
+        />
+      </template>
+
+      <!-- ============ tab 四：包场 ============ -->
+      <template v-else>
+        <div class="om__filters">
+          <select
+            v-model="bookingFilters.scope"
+            class="field-input om__sel"
+            @change="applyBookingFilters"
+          >
+            <option value="">全部场次</option>
+            <option v-for="s in BOOKING_SCOPES" :key="s.value" :value="s.value">
+              {{ s.label }}
+            </option>
+          </select>
+          <button class="btn btn-ghost om__btn" @click="applyBookingFilters">查询</button>
+          <button class="btn btn-ghost om__btn" @click="resetBookingFilters">重置</button>
+          <!-- 这一条同样没有导出实现 -->
+        </div>
+
+        <LoadingMask :loading="bookingLoading" />
+
+        <div v-if="bookings.length" class="om__list">
+          <div v-for="b in bookings" :key="b.id" class="orow">
+            <div class="orow__head">
+              <span class="orow__no">{{ b.bookingNo }}</span>
+              <!-- 状态中文用后端给的 statusLabel（BookingVo 2026-10-16 起带上它） -->
+              <span :class="bookingStatusCls(b.status)">{{ b.statusLabel }}</span>
+            </div>
+
+            <!-- 左边是包场时段（这一条流水的主信息）、右边是包场费 -->
+            <div class="orow__line">
+              <span class="orow__left">{{ bookingRangeText(b) }}</span>
+              <span class="orow__right">
+                <span class="orow__amount">¥{{ formatMoney(b.price) }}</span>
+              </span>
+            </div>
+
+            <!--
+              包场人只有 ID、没有昵称（BookingVo 不带），而接口也不支持按用户筛 ——
+              所以这里只把 ID 印出来供核对，不像其余几条那样做成可点的
+            -->
+            <p class="orow__meta">
+              包场人 用户 #{{ b.hostUserId }}
+              · 排期于 {{ formatDateTime(b.createdAt) }}
+              <template v-if="b.paidAt"> · 付款于 {{ formatDateTime(b.paidAt) }}</template>
+              <template v-if="b.refundAmount != null">
+                · 已退 ¥{{ formatMoney(b.refundAmount) }}
+              </template>
+              <template v-if="b.remark"> · {{ b.remark }}</template>
+            </p>
+          </div>
+        </div>
+
+        <EmptyState
+          v-else-if="!bookingLoading"
+          icon="🎫"
+          text="还没有包场场次"
+          hint="在「包场」页排一场，或等顾客付款后回这里看"
+        />
+
+        <AdminPager
+          v-model:page="bookingPage"
+          :size="PAGE_SIZE"
+          :total="bookingTotal"
+          @update:page="loadBookings"
+        />
+      </template>
     </div>
 
     <p class="om__hint">
-      两条流水都在这一页：<b>计时订单</b>（用户端「开门计时」产生的）与<b>商品订单</b>（商城购买单）。
-      <b>包场</b>在「包场」页、<b>月卡</b>在「用户」页的月卡弹层 —— 它们交付的是「权益」，
-      要先经管理员复核，与这两条「提交即交付」的流水不是一回事。
+      <b>四条流水都在这一页</b>：<b>计时订单</b>（用户端「开门计时」产生的）、
+      <b>商品订单</b>（商城购买单）、<b>月卡</b>（购卡单，未付款与已关闭的也在其中）与
+      <b>包场</b>（排期场次，含退款记录）。开卡、停卡、排期、取消这些<b>动作</b>仍在
+      「用户」页的月卡弹层与「包场」页里 —— 这一页只管「谁、什么时候、花了多少」。
       <b>点计时订单的任意一单可看订单详情</b>（与用户端订单详情是同一份账单）；
       金额上带「计价 / 实付」与减免明细，指的就是月度优惠、月卡与活动各自免了多少。
+      <b>月卡与包场没有导出按钮</b>：后端还没有这两类单据的导出实现（见文件头那段说明）。
     </p>
 
     <!-- ---------------- 人工调整时长 ---------------- -->
@@ -880,15 +1491,26 @@ onMounted(() => {
 
 <style scoped>
 /*
- * 两条流水的切换卡片。
+ * 四条流水的切换卡片。
  *
- * 两列等宽、每张卡片自带一行副标题说明口径：管理员不必点进去才知道
+ * 列宽自适应（每列至少 150px）：窄屏两列、宽屏四列 —— 写死四列在手机上会把
+ * 「计时订单」压成两三个字一行，而这一页的手机使用场景是真实存在的。
+ * 每张卡片自带一行副标题说明口径：管理员不必点进去才知道
  * 「商品订单」里装的是购买单、也没有「在店时长」。
  * 选中态的配色与后台顶部导航的高亮一致（主色底 + 主色字），一眼认得出。
  */
+/* 标题行：左边标题、右边「导出总流水」—— 它不属于任何一个 tab，所以放页面级 */
+.om__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
 .om__types {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: var(--sp-2);
   margin-bottom: var(--sp-3);
 }
@@ -1168,8 +1790,84 @@ onMounted(() => {
   font-weight: 600;
 }
 
+/*
+ * 人工调整的留痕（原因 / 处理人 / 时刻）：2026-10-16 从 tooltip 挪到卡片上。
+ * 左侧那道黄边与头部的「已调整」标签同一套配色 —— 两者说的本来就是同一件事，
+ * 一处在头部当标记、一处在底部当说明
+ */
+.orow__adjust {
+  margin-top: var(--sp-2);
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--c-warning);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--c-text-sub);
+}
+
+.orow__adjust-tag {
+  margin-right: var(--sp-1);
+  font-weight: 600;
+  color: var(--c-warning);
+}
+
 .orow__meta {
   margin-top: var(--sp-1);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--c-text-muted);
+}
+
+/* ---------- 收支概览（2026-10-16 加） ---------- */
+.fin__source {
+  margin-bottom: var(--sp-3);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--c-text-muted);
+}
+
+.fin__group-title {
+  margin-bottom: var(--sp-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-text-sub);
+}
+
+.fin__group-title--gap {
+  margin-top: var(--sp-4);
+}
+
+.fin__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-2);
+}
+
+.fin__cell {
+  padding: var(--sp-3);
+  border-radius: var(--r-btn);
+  background: var(--c-card);
+}
+
+.fin__label {
+  font-size: 11px;
+  color: var(--c-text-muted);
+}
+
+.fin__value {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 支出：做成一眼看得出的「无数据」，而不是一个像真数据的数字 */
+.fin__value--none {
+  color: var(--c-text-muted);
+}
+
+.fin__note {
+  margin-top: var(--sp-2);
   font-size: 11px;
   line-height: 1.6;
   color: var(--c-text-muted);

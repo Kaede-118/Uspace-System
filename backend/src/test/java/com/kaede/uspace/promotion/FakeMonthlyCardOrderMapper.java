@@ -1,5 +1,6 @@
 package com.kaede.uspace.promotion;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
 import com.kaede.uspace.promotion.mapper.MonthlyCardOrderMapper;
 
@@ -104,6 +105,7 @@ public class FakeMonthlyCardOrderMapper implements InvocationHandler {
             case "selectLatestByUser" -> selectLatestByUser((Long) args[0]);
             case "markPaid" -> markPaid(args);
             case "closePending" -> closePending((Long) args[0]);
+            case "selectPageForAdmin" -> selectPageForAdmin(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
                             + " —— 出现这个错误说明 Service 调用了预期之外的方法，"
@@ -248,6 +250,38 @@ public class FakeMonthlyCardOrderMapper implements InvocationHandler {
     }
 
     /**
+     * 按条件筛选后填充分页结果，供后台「月卡流水」使用。
+     *
+     * <p>不做真的分页（测试只关心筛选条件对不对），但 total 与 records 都按
+     * 真实语义给出，免得调用方拿到的结构自相矛盾 —— 与
+     * {@link FakeMonthlyCardMapper#selectPageBy} 是同一套写法。
+     *
+     * <p>排序照真 SQL 的 {@code ORDER BY id DESC}：流水页看的是「最近发生了什么」。
+     *
+     * @param args 依次为分页参数、购买人 ID、状态、卡种
+     * @return 填好的分页结果
+     */
+    @SuppressWarnings("unchecked")
+    private IPage<MonthlyCardOrder> selectPageForAdmin(Object[] args) {
+        IPage<MonthlyCardOrder> page = (IPage<MonthlyCardOrder>) args[0];
+        Long userId = (Long) args[1];
+        String status = (String) args[2];
+        String cardType = (String) args[3];
+
+        List<MonthlyCardOrder> matched = rows.values().stream()
+                .filter(FakeMonthlyCardOrderMapper::isAlive)
+                .filter(o -> userId == null || Objects.equals(o.getUserId(), userId))
+                .filter(o -> isBlank(status) || status.equals(o.getStatus()))
+                .filter(o -> isBlank(cardType) || cardType.equals(o.getCardType()))
+                .sorted(Comparator.comparing(MonthlyCardOrder::getId).reversed())
+                .toList();
+
+        page.setRecords(matched);
+        page.setTotal(matched.size());
+        return page;
+    }
+
+    /**
      * 判断记录是否存在且未被逻辑删除。
      *
      * @param order 购买单，可为 null
@@ -255,5 +289,19 @@ public class FakeMonthlyCardOrderMapper implements InvocationHandler {
      */
     private static boolean isAlive(MonthlyCardOrder order) {
         return order != null && !Integer.valueOf(1).equals(order.getDeleted());
+    }
+
+    /**
+     * 判断字符串为空。
+     *
+     * <p>真 SQL 里 {@code status = ''} 与不传等价（见 {@code selectPageForAdmin}
+     * 的注解 SQL），假实现照做 —— 少了这一条，「传空串被当成一个筛选条件」
+     * 这类静默出错就测不出来。
+     *
+     * @param value 待判断的字符串，可为 null
+     * @return 为 null 或空串时返回 true
+     */
+    private static boolean isBlank(String value) {
+        return value == null || value.isEmpty();
     }
 }

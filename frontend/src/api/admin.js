@@ -665,6 +665,30 @@ export function revokeCard(id) {
   return http.post(`/api/admin/cards/${id}/revoke`)
 }
 
+/**
+ * 分页查月卡**购买单**（运营后台「订单流水」页的「月卡」流水）。
+ *
+ * <p>⚠️ <b>它与 {@link listAdminCards} 是两张表的两种流水</b>：那条查「手上有什么卡」，
+ * 这条查「买过几次、付没付成」。<b>未付款与已关闭的单只存在于本表</b> ——
+ * 卡表里根本没有它们（还没付钱的卡不是卡），所以「这人到底下过单没有」只能看这里。
+ *
+ * <p>⚠️ 分页参数是 `pageNum` + `pageSize`（与月卡列表、商品列表同一套惯例，
+ * 不是订单那套 `page` / `size`）。
+ *
+ * @param {object} [params]
+ * @param {number} [params.pageNum]  页码，从 1 开始
+ * @param {number} [params.pageSize] 每页条数
+ * @param {number|string} [params.userId] 按购买人筛
+ * @param {string} [params.status] PENDING_PAYMENT / PAID / CLOSED
+ * @param {string} [params.cardType] ALL_DAY / NIGHT / STAFF
+ * @returns {Promise<{data:{total, current, size, records}}>}
+ *          `records` 每项含后端给的中文 `statusLabel` / `cardTypeLabel`，
+ *          以及批量补上的 `userNickname`（昵称优先、回落登录名）
+ */
+export function listCardOrders(params = {}) {
+  return http.get('/api/admin/cards/orders', { params })
+}
+
 /* ==================== 门锁（应急） ==================== */
 
 /**
@@ -1028,6 +1052,72 @@ export function handleReconcileDiff(id, note) {
   return http.post(`/api/admin/reconcile-diffs/${id}/handle`, { note })
 }
 
+/* ---------------- 流水导出与收支概览（模块 8 / 10，2026-10-16 加） ---------------- */
+
+/**
+ * 生成一份流水导出文件。
+ *
+ * <p><b>为什么分成「生成」与「下载」两步</b>：导出要查全库、拼几千行 xlsx，
+ * 把它和下载塞进同一个请求，前端就只能对着一个不确定大小的响应转圈。
+ * 这里先拿一个短 token（文件已放在服务端缓存里），再去下载接口取 ——
+ * 用户感受仍是一次点击。
+ *
+ * @param {object} data 导出类型与筛选条件
+ *        （type: TIMING_ORDER / PRODUCT_ORDER，其余同列表接口的筛选）
+ * @returns {Promise<{data:{token, fileName, rows, truncated}}>}
+ */
+export function createExport(data) {
+  return http.post('/api/admin/exports', data)
+}
+
+/**
+ * 下载已生成的导出文件。
+ *
+ * <p>⚠️ <b>不能用 {@code <a href>} 打开下载地址</b>：那样不带
+ * {@code Authorization} 头，拿到的是 401。必须走 blob ——
+ * 与 {@code downloadReconcileBill} 是同一条规矩（见那里的说明）。
+ *
+ * <p>⚠️ 失败时后端返回的是<b>统一 JSON 错误体</b>而不是文件，
+ * 但 {@code responseType: 'blob'} 会把它也包成 Blob —— 所以出错时
+ * 抛出来的错误对象里没有可读的 message，调用方按「导出文件已失效」提示即可。
+ *
+ * @param {string} token    生成接口返回的 token
+ * @param {string} fileName 下载时的文件名（用后端给的那个，带时刻）
+ * @returns {Promise<void>}
+ */
+export async function downloadExport(token, fileName = '流水.xlsx') {
+  const resp = await http.get(`/api/admin/exports/${token}`, { responseType: 'blob' })
+  // ⚠️ resp 就是 Blob 本身：响应拦截器已经把 axios 那一层剥掉了（见 http.js 的成功分支，
+  // 它 return 的是 response.data）。写成 resp.data 会拿到 undefined，
+  // 报出来的是 createObjectURL 的 "Overload resolution failed" —— 那个错指不到这一行
+  const url = URL.createObjectURL(resp)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = fileName
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+/**
+ * 收支概览：本月 / 上月 / 累计。
+ *
+ * <p>收入只算<b>已到账</b>（交易流水里的 PAY_RECEIVED）；支出当前恒为 null
+ * 且 {@code expenseSupported} 为 false —— 系统还没做支出记账，
+ * 前端要显示「—」而不是 ¥0.00（那会被读成「本月没花钱」）。
+ *
+ * @returns {Promise<{data:{thisMonthIncome, lastMonthIncome, totalIncome,
+ *          thisMonthExpense, lastMonthExpense, totalExpense, expenseSupported,
+ *          thisMonthLabel, lastMonthLabel}}>}
+ */
+export function getFinanceSummary() {
+  return http.get('/api/admin/stats/finance')
+}
+
 /**
  * 下载账单原文件。
  *
@@ -1046,7 +1136,12 @@ export async function downloadReconcileBill(id, fileName = '账单') {
   const resp = await http.get(`/api/admin/reconcile-batches/${id}/file`, {
     responseType: 'blob'
   })
-  const url = URL.createObjectURL(resp.data)
+  // ⚠️ resp 就是 Blob 本身（响应拦截器已剥掉 axios 那一层）——
+  // 这里原先写的是 resp.data，于是 createObjectURL 拿到 undefined 直接抛
+  // "Overload resolution failed"，对账账单**根本下不下来**，而控制台里
+  // 只有这一句指向 URL API 的英文报错，指不到真正的原因。
+  // 2026-10-16 做流水导出时照抄这处，才把它一起踩出来
+  const url = URL.createObjectURL(resp)
   try {
     const link = document.createElement('a')
     link.href = url

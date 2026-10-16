@@ -1,6 +1,7 @@
 package com.kaede.uspace.promotion.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -153,4 +154,43 @@ public interface MonthlyCardOrderMapper extends BaseMapper<MonthlyCardOrder> {
                AND deleted = 0
             """)
     int closePending(@Param("id") Long id);
+
+    /**
+     * 分页查询月卡购买单，供运营后台的「月卡」流水使用。
+     *
+     * <p><b>三个筛选条件都可空，空则不过滤</b> —— 用
+     * {@code #{x} IS NULL OR ...} 的写法而不是动态标签，与月卡列表、
+     * 用户列表的查询保持一致。真拼动态 SQL 的话，「传空串」与「不传」
+     * 会走出两条不同的分支，而其中一条查出来是空的，谁都不会察觉。
+     *
+     * <p>⚠️ <b>手写 SQL 必须自己带 {@code deleted = 0}</b>：全局逻辑删除配置
+     * 只管 MyBatis-Plus 自己生成的方法，管不到注解里的 SQL。漏写的后果不是报错，
+     * 而是「删掉的购买单又冒出来」。
+     *
+     * <p>⚠️ <b>状态取值在注解 SQL 里只能写字面量</b>（无法拼接枚举），
+     * 改动 {@link com.kaede.uspace.promotion.CardOrderStatus} 的取值时，
+     * 记得同步检查本方法；调用方在 Service 层已做过一次合法性校验。
+     *
+     * <p>按 {@code id DESC} 排序：流水页看的是「最近发生了什么」，
+     * 下单越晚的越靠前，与其余后台列表同一口径。
+     *
+     * @param page     分页参数，由 MyBatis-Plus 的分页插件处理
+     * @param userId   购买人用户 ID，可空
+     * @param status   购买单状态（PENDING_PAYMENT / PAID / CLOSED），可空
+     * @param cardType 卡种（ALL_DAY / NIGHT / STAFF），可空
+     * @return 分页结果
+     */
+    @Select("""
+            SELECT *
+              FROM biz_monthly_card_order
+             WHERE deleted = 0
+               AND (#{userId}   IS NULL OR user_id   = #{userId})
+               AND (#{status}   IS NULL OR #{status}   = '' OR status    = #{status})
+               AND (#{cardType} IS NULL OR #{cardType} = '' OR card_type = #{cardType})
+             ORDER BY id DESC
+            """)
+    IPage<MonthlyCardOrder> selectPageForAdmin(IPage<MonthlyCardOrder> page,
+                                               @Param("userId") Long userId,
+                                               @Param("status") String status,
+                                               @Param("cardType") String cardType);
 }

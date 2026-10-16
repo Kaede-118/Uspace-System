@@ -62,8 +62,11 @@ export function periodPhaseOf(startAt, endAt) {
 /**
  * 包场状态（后端 {@code BookingStatus}）。
  *
- * <p>⚠️ {@code BookingVo} 只有状态名、<b>没有 statusLabel</b>（订单有，包场没有），
- * 所以包场的中文只能在前端映射。用户端的包场列表与后台的包场页共用这一份。
+ * <p>⚠️ <b>2026-10-16 起后端 {@code BookingVo} 也带 {@code statusLabel} 了</b>
+ * （订单流水页的「包场」tab 用它，与月卡、商品一样「后端给的一律用后端的」）。
+ * 本表留下的用途有两个：<b>构造筛选下拉的选项</b>（后端没有状态字典接口），
+ * 以及包场管理页 / 用户端包场列表的<b>配色</b> —— 那两处的行内中文仍是本表的
+ * {@code label}，文案与 {@code BookingStatus#labelOf} 逐字一致，改动时要一起改。
  *
  * <p>五种状态：待付款 / 已付款 / 已取消 / <b>已退款</b> / 已结束。
  * 「已付款」与「已结束」都是业务上的正常终态，不是异常。
@@ -171,6 +174,38 @@ export function cardStatusCls(status) {
     default:
       return 'tag'
   }
+}
+
+/**
+ * 月卡购买单状态（后端 {@code CardOrderStatus}），三态。
+ *
+ * <p>⚠️ <b>它与 {@link cardStatusCls} 不是一回事</b>：那条讲的是「卡的状态」
+ * （生效中 / 已过期 / 已退款 / 已停用），这条讲的是「购买单的状态」
+ * （待支付 / 已支付 / 已关闭）—— 未付款的意向还不是卡。
+ * 拿卡状态去翻购买单状态不会有任何报错，只会把 PENDING_PAYMENT 原样印在界面上。
+ *
+ * <p>与商品购买单同一条规矩：{@code label} 供筛选下拉使用，
+ * 行内展示用后端 {@code MonthlyCardOrderVo} 给的 {@code statusLabel}
+ *（「后端给了的一律用后端的」那条规矩）。
+ */
+export const MONTHLY_CARD_ORDER_STATUS = [
+  { value: 'PENDING_PAYMENT', label: '待支付', cls: 'tag tag-warning' },
+  { value: 'PAID', label: '已支付', cls: 'tag tag-success' },
+  { value: 'CLOSED', label: '已关闭', cls: 'tag' }
+]
+
+/**
+ * 取月卡购买单状态的标签配色。
+ *
+ * <p>认不出的取值退回默认灰标签，不抛异常（与其他几个 {@code xxxCls} 同一条规矩）——
+ * 状态列是 VARCHAR，手工改过库的数据可能落在枚举之外。
+ *
+ * @param {string} status 状态名
+ * @returns {string} 形如 "tag tag-success"
+ */
+export function cardOrderStatusCls(status) {
+  const item = MONTHLY_CARD_ORDER_STATUS.find((s) => s.value === status)
+  return item ? item.cls : 'tag'
 }
 
 /**
@@ -311,11 +346,38 @@ export function reconcileDiffTypeCls(type) {
  * @param {Object} typeMap    code → 中文名的字典（来自 GET /api/devices/types）
  * @returns {string[]} 中文名数组；没设偏好时返回空数组
  */
-export function preferenceLabels(preference, typeMap = {}) {
+export function parsePreference(preference) {
   if (!preference) return []
   return String(preference)
     .split(',')
     .map((code) => code.trim())
     .filter(Boolean)
-    .map((code) => typeMap[code] || code)
+}
+
+/**
+ * 把 code 数组拼回逗号串；一个都没选时返回 {@code null}（= 清空该项）。
+ *
+ * <p>与 {@link parsePreference} 成对：两个页面的「读出来 → 改 → 存回去」
+ * 都走这一对函数，免得一处按数组存、另一处按字符串存，接缝上静默丢数据
+ * （{@code PUT} 是全量替换语义，传 null 即清空）。
+ *
+ * @param {string[]} codes 选中的 code 数组
+ * @returns {string|null} 形如 "ONGEKI,MAIMAI"；空数组时为 null
+ */
+export function joinPreference(codes) {
+  return Array.isArray(codes) && codes.length ? codes.join(',') : null
+}
+
+/**
+ * 把偏好的逗号串翻译成中文名数组。
+ *
+ * <p>用 {@link parsePreference} 拆串，保证「拆」只有一处实现 ——
+ * 三个调用点（在店名册、我的、后台用户列表）看到的切分规则必须一模一样。
+ *
+ * @param {string} preference 逗号分隔的偏好 code，如 "ONGEKI,MAIMAI"；可为空
+ * @param {Object} typeMap    code → 中文名的字典（来自 GET /api/devices/types）
+ * @returns {string[]} 中文名数组；没设偏好时返回空数组
+ */
+export function preferenceLabels(preference, typeMap = {}) {
+  return parsePreference(preference).map((code) => typeMap[code] || code)
 }

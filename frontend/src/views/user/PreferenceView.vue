@@ -17,11 +17,13 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getProfile, updateProfile } from '@/api/user'
 import { listEquipmentTypes } from '@/api/device'
+import { parsePreference, joinPreference } from '@/utils/labels'
 import { setUser } from '@/stores/user'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import NavBar from '@/components/NavBar.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
+import PreferencePicker from '@/components/PreferencePicker.vue'
 
 const router = useRouter()
 
@@ -33,9 +35,12 @@ const profile = ref(null)
 const loading = ref(true)
 const saving = ref(false)
 
-const isSelected = (code) => selected.value.includes(code)
-
-/** 已选数量，用于按钮上的一句话。 */
+/**
+ * 已选类型的中文名，用于下面那行「当前：」。
+ *
+ * <p>选项的渲染与切换都在 {@code PreferencePicker} 里（与后台编辑用户弹层共用），
+ * 这里只负责把选中集合拼成一句话。
+ */
 const selectedText = computed(() => {
   if (!selected.value.length) return '未设置'
   const names = types.value
@@ -43,15 +48,6 @@ const selectedText = computed(() => {
     .map((t) => t.name)
   return names.join('、')
 })
-
-function toggle(code) {
-  const i = selected.value.indexOf(code)
-  if (i > -1) {
-    selected.value.splice(i, 1)
-  } else {
-    selected.value.push(code)
-  }
-}
 
 async function load() {
   loading.value = true
@@ -62,10 +58,7 @@ async function load() {
     ])
     profile.value = profileRes.data
     types.value = typesRes.data || []
-    selected.value = (profileRes.data?.preference || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
+    selected.value = parsePreference(profileRes.data?.preference)
   } catch (err) {
     toastError(errorMessage(err, '加载失败'))
   } finally {
@@ -83,7 +76,7 @@ async function onSave() {
       phone: profile.value?.phone ?? null,
       qq: profile.value?.qq ?? null,
       // 一个都没选时传 null（清空偏好），而不是空串
-      preference: selected.value.length ? selected.value.join(',') : null
+      preference: joinPreference(selected.value)
     })
     setUser(resp.data)
     toastSuccess('偏好已保存')
@@ -111,17 +104,7 @@ onMounted(load)
         不代表你此刻正在使用哪台机台。
       </p>
 
-      <div class="pref__options">
-        <button
-          v-for="t in types"
-          :key="t.code"
-          class="pref__option"
-          :class="{ 'pref__option--on': isSelected(t.code) }"
-          @click="toggle(t.code)"
-        >
-          {{ t.name }}
-        </button>
-      </div>
+      <PreferencePicker v-model="selected" :types="types" />
 
       <p class="pref__current">当前：{{ selectedText }}</p>
     </div>
@@ -138,28 +121,6 @@ onMounted(load)
   line-height: 1.7;
   color: var(--c-text-sub);
   margin-bottom: var(--sp-4);
-}
-
-.pref__options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-
-.pref__option {
-  padding: var(--sp-2) var(--sp-4);
-  border-radius: var(--r-pill);
-  border: 1px solid var(--c-border);
-  background: #fff;
-  font-size: 13px;
-  color: var(--c-text-sub);
-}
-
-.pref__option--on {
-  border-color: var(--c-primary);
-  background: var(--c-primary-pale);
-  color: var(--c-primary);
-  font-weight: 500;
 }
 
 .pref__current {

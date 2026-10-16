@@ -162,6 +162,21 @@ public class OrderVo {
     /** 时长是否经人工调整：0=否 1=是 */
     private Integer adjusted;
 
+    /** 调整人（管理员 ID），未调整时为 null */
+    private Long adjustedBy;
+
+    /**
+     * 调整人的展示名（昵称优先、回落登录名）。
+     *
+     * <p><b>只有后台那两条查询会填</b>（{@code OrderService} 的列表与详情，与
+     * {@code userNickname} 走同一条路）—— 顾客不必知道是哪个管理员改的时长，
+     * 用户端拿到的这一项始终是 null，前端因此不必维护两套文案。
+     */
+    private String adjustedByName;
+
+    /** 调整时刻，未调整时为 null。与 {@link #adjustedByName} 同来同去 */
+    private LocalDateTime adjustedAt;
+
     /** 调整原因，未调整时为 null */
     private String adjustReason;
 
@@ -207,6 +222,9 @@ public class OrderVo {
         vo.setPaymentMethodLabel(PaymentChannel.userLabelOf(order.getPaymentMethod()));
         vo.setPaidAt(order.getPaidAt());
         vo.setAdjusted(order.getAdjusted());
+        vo.setAdjustedBy(order.getAdjustedBy());
+        vo.setAdjustedAt(order.getAdjustedAt());
+        // adjustedByName 不在这里填：它要查用户表，只有后台那两条路需要（见字段注释）
         vo.setAdjustReason(order.getAdjustReason());
         vo.setCreatedAt(order.getCreatedAt());
         return vo;

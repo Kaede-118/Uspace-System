@@ -2,6 +2,11 @@ package com.kaede.uspace.order.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.kaede.uspace.order.entity.TradeLog;
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 /**
  * 交易流水的数据访问接口。
@@ -17,4 +22,30 @@ import com.kaede.uspace.order.entity.TradeLog;
  * 与 {@code PaymentProofMapper}、{@code AccessRecordMapper} 是同一条注意。
  */
 public interface TradeLogMapper extends BaseMapper<TradeLog> {
+
+    /**
+     * 汇总某个时间区间内<b>真正到账</b>的金额（模块 10 的收支概览用）。
+     *
+     * <p>只算 {@code PAY_RECEIVED}：提交凭证、驳回、取消未付款单这几类事件
+     * <b>没有钱发生</b>，把它们算进收入会让账面凭空多出钱。
+     *
+     * <p>⚠️ <b>本表没有 {@code deleted} 列</b>（append-only，见类注释）——
+     * 手写 SQL 里一个 {@code deleted = 0} 都不要写，照抄别的 Mapper 会
+     * 直接 {@code Unknown column}，而那个错只在跑到这条 SQL 时才出现。
+     *
+     * <p>{@code COALESCE} 是必需的：区间内一条到账都没有时 {@code SUM} 返回 null，
+     * 而「这个月收了 0 元」与「没查到」对页面是两回事 —— 前者要显示 ¥0.00。
+     *
+     * @param from 下界（含）
+     * @param to   上界（不含）
+     * @return 区间内的到账合计；无记录时为 0
+     */
+    @Select("""
+            SELECT COALESCE(SUM(amount), 0)
+              FROM biz_trade_log
+             WHERE event_type = 'PAY_RECEIVED'
+               AND created_at >= #{from}
+               AND created_at <  #{to}
+            """)
+    BigDecimal sumPaidIncome(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 }

@@ -32,11 +32,19 @@ import { userState } from '@/stores/user'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatDateTime } from '@/utils/format'
-import { cardTypeLabel, cardStatusCls, MONTHLY_CARD_TYPES } from '@/utils/labels'
+import {
+  cardTypeLabel,
+  cardStatusCls,
+  MONTHLY_CARD_TYPES,
+  parsePreference,
+  joinPreference
+} from '@/utils/labels'
+import { listEquipmentTypes } from '@/api/device'
 import AdminPager from '@/components/AdminPager.vue'
 import AdminSheet from '@/components/AdminSheet.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
+import PreferencePicker from '@/components/PreferencePicker.vue'
 
 /** 每页条数。与 AdminPager 的口径共用同一个常量 */
 const PAGE_SIZE = 10
@@ -69,9 +77,18 @@ const desc = ref(true)
 const formVisible = ref(false)
 /** 正在编辑的那条 */
 const editing = ref(null)
-const form = ref({ nickname: '', phone: '', qq: '', preference: '' })
+/**
+ * 弹层表单。
+ *
+ * <p>⚠️ {@code preference} 是<b>数组</b>（多选），提交时才用
+ * {@code joinPreference} 拼回逗号串。这里若还留着字符串，
+ * 多选组件会直接报 {@code includes is not a function} —— 是响的，不是静默错。
+ */
+const form = ref({ nickname: '', phone: '', qq: '', preference: [] })
 /** 弹层内的错误文案。⚠️ 不能靠 toast —— 它的层级比弹层低，会被遮罩压住 */
 const formError = ref('')
+/** 游玩偏好的选项来源（设备类型字典，进页面时拉一次） */
+const prefTypes = ref([])
 const submitting = ref(false)
 
 /* ---------------- 启停用确认 ---------------- */
@@ -172,9 +189,27 @@ function openEdit(user) {
     nickname: user.nickname || '',
     phone: user.phone || '',
     qq: user.qq || '',
-    preference: user.preference || ''
+    preference: parsePreference(user.preference)
   }
+  // 字典可能没拉到（首次请求失败、或返回得比列表慢），打开时补一次 ——
+  // 否则多选是空的，管理员一保存就把这个人的偏好连同未知项一起清掉了
+  if (!prefTypes.value.length) loadPrefTypes()
   formVisible.value = true
+}
+
+/**
+ * 拉设备类型字典，作为偏好多选的选项来源。
+ *
+ * <p>失败时给一句 toast：多选空着不等于「他没设偏好」，
+ * 不提示的话管理员只会以为这个人本来就没选。
+ */
+async function loadPrefTypes() {
+  try {
+    const resp = await listEquipmentTypes()
+    prefTypes.value = resp.data || []
+  } catch (err) {
+    toastError(errorMessage(err, '设备类型加载失败，偏好暂时无法修改'))
+  }
 }
 
 async function submitForm() {
@@ -187,7 +222,7 @@ async function submitForm() {
       nickname: form.value.nickname.trim() || null,
       phone: form.value.phone.trim() || null,
       qq: form.value.qq.trim() || null,
-      preference: form.value.preference.trim() || null
+      preference: joinPreference(form.value.preference)
     })
     formVisible.value = false
     toastSuccess('已保存')
@@ -422,7 +457,10 @@ async function confirmRole(role) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadPrefTypes()
+})
 </script>
 
 <template>
@@ -554,14 +592,12 @@ onMounted(load)
         </div>
 
         <div class="field">
-          <label class="field-label" for="f-pref">游玩偏好</label>
-          <input
-            id="f-pref"
-            v-model="form.preference"
-            class="field-input"
-            type="text"
-            placeholder="逗号分隔的类型 code，如 ONGEKI,MAIMAI"
-          />
+          <label class="field-label">游玩偏好</label>
+          <PreferencePicker v-model="form.preference" :types="prefTypes" />
+          <p class="form__hint">
+            选项来自设备类型字典（后台「机台」页维护），点一下选中 / 取消，一个都不选 = 清空。
+            虚线框的是字典里已停用、而他仍选着的类型。
+          </p>
         </div>
 
         <p class="form__note">

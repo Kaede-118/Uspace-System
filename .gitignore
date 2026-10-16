@@ -40,6 +40,9 @@ application-local.yml
 CLAUDE.md
 AGENTS.md
 config.txt
+# AI 工作手册的下沉层（2026-10-16 建）：从 CLAUDE.md 搬出的推导、边界与踩坑，
+# 按主题分文件存放，AI 按需读取。与 CLAUDE.md 同性质 —— 只在本地，不交付、不入库。
+ai-docs/
 *.bat
 ignore/
 devnotes/

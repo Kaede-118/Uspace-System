@@ -51,6 +51,7 @@ import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.entity.Closure;
 import com.kaede.uspace.space.entity.Store;
 import com.kaede.uspace.user.FakeSysUserMapper;
+import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -1913,6 +1914,27 @@ class OrderServiceTests {
         BizResult<OrderVo> result = service.getOrderForAdmin(order.getId());
 
         assertNotNull(result.getData().getBill(), "后台订单详情复用同一个 OrderVo");
+    }
+
+    @Test
+    @DisplayName("后台详情：带上调整人与调整时刻，用户端那条路不给名字")
+    void getOrderForAdmin_fillsAdjusterName() {
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, LocalDateTime.now().minusHours(5), null);
+        service.settleOrder(USER_ID, order.getId());
+
+        SysUser operator = userMapper.seed(new SysUser());
+        operator.setUsername("nightshift");
+        operator.setNickname("值班小王");
+
+        service.adjustOrder(order.getId(), adjustRequest(LocalDateTime.now().minusHours(1)), operator.getId());
+
+        OrderVo adminView = service.getOrderForAdmin(order.getId()).getData();
+        assertEquals(operator.getId(), adminView.getAdjustedBy(), "过程要能追到人");
+        assertEquals("值班小王", adminView.getAdjustedByName(), "后台要说得清「谁改的」");
+        assertNotNull(adminView.getAdjustedAt(), "调整时刻与处理人同来同去");
+
+        assertNull(service.getMyOrder(USER_ID, order.getId()).getData().getAdjustedByName(),
+                "顾客看自己的账单，不必知道是哪个管理员改的");
     }
 
     @Test

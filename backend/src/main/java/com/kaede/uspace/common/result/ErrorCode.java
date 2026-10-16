@@ -272,6 +272,15 @@ public enum ErrorCode {
     RECONCILE_DIFF_NOT_FOUND(HttpStatus.NOT_FOUND, 40417, "对账差异不存在"),
 
     /**
+     * 导出的文件已失效：超过有效期、被新的导出挤掉、或不属于当前管理员。
+     *
+     * <p>三种情形共用一个码，与 {@link #QQ_VERIFY_NOT_FOUND} 同一套理由 ——
+     * 对调用方的处置动作完全一样（重新点一次导出），而分开会泄露
+     * 「这个 token 曾经存在过」。
+     */
+    EXPORT_NOT_FOUND(HttpStatus.NOT_FOUND, 40420, "导出文件已失效，请重新导出"),
+
+    /**
      * 账单原文件已不存在。
      *
      * <p><b>对账本身是成功的，这只是留档那一步的失败</b> —— 落盘失败不阻断对账
