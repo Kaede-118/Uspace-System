@@ -70,6 +70,12 @@ export default [
         name: 'admin-products',
         component: () => import('@/views/admin/ProductManageView.vue'),
         meta: { title: '商品管理' }
+      },
+      {
+        path: 'access',
+        name: 'admin-access',
+        component: () => import('@/views/admin/AccessManageView.vue'),
+        meta: { title: '进出记录' }
       }
     ]
   }

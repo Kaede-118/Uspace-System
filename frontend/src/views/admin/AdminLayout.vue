@@ -19,7 +19,7 @@ import { clear } from '@/stores/user'
 
 const router = useRouter()
 
-/** 八个 tab。顺序即导航顺序，与论文里模块的排列无关，按运营的使用频率排。 */
+/** 九个 tab。顺序即导航顺序，与论文里模块的排列无关，按运营的使用频率排。 */
 const TABS = [
   { to: '/admin/users', icon: '👤', label: '用户' },
   { to: '/admin/notices', icon: '📢', label: '公告' },
@@ -28,7 +28,8 @@ const TABS = [
   { to: '/admin/store', icon: '🏠', label: '门店' },
   { to: '/admin/orders', icon: '🧾', label: '订单' },
   { to: '/admin/payments', icon: '💳', label: '收款' },
-  { to: '/admin/products', icon: '🛍', label: '商品' }
+  { to: '/admin/products', icon: '🛍', label: '商品' },
+  { to: '/admin/access', icon: '🚪', label: '进出' }
 ]
 
 /**

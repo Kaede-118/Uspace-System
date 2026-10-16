@@ -1,9 +1,16 @@
 package com.kaede.uspace.order;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.order.dto.InstoreSnapshotVo;
 import com.kaede.uspace.order.dto.InstoreUserVo;
+import com.kaede.uspace.order.dto.OrderTrafficEventVo;
+import com.kaede.uspace.order.dto.OrderTrafficVo;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.order.mapper.OrderEventRow;
 import com.kaede.uspace.order.mapper.OrderMapper;
 import com.kaede.uspace.promotion.MonthlyCardService;
 import com.kaede.uspace.promotion.MonthlyCardType;
@@ -19,9 +26,12 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * 在店用户服务（模块 8）。
@@ -99,6 +109,282 @@ public class InstoreService {
             list.add(toVo(order, users.get(order.getUserId()), now));
         }
         return BizResult.ok(list);
+    }
+
+    // ==================================================================
+    // 进出记录（后台，模块 6 的订单口径）
+    // ==================================================================
+
+    /**
+     * 分页查询进出记录，每条带「到店 / 离店」两端的名册快照。
+     *
+     * <p><b>口径</b>：到店 = 开始计时、离店 = 停止计时（2026-10-16 由用户定）。
+     *
+     * <p><b>名册是怎么算出来的</b>：先取本页所有时刻的最小 / 最大值当一个窗口，
+     * 再一次性查出与这个窗口<b>相交</b>的全部订单 —— 名册只能靠这一批算，
+     * 少查一条就会少一个人。然后把本页订单并进去：按离店排序时，
+     * 本页最早离店那条的 {@code end_time} 恰好等于窗口起点，会被
+     * 「离店即不在店」的半开语义排除在窗口查询之外，而它自己的昵称还得显示。
+     * 这不是缺陷，是口径的直接结果。
+     *
+     * @param page        页码
+     * @param size        每页条数
+     * @param userId      按用户筛选，可空
+     * @param from        时间下界（含），可空
+     * @param to          时间上界（不含），可空
+     * @param byLeaveTime true 按离店时刻排序与筛选，false 按到店时刻
+     * @return 分页的进出记录；门店不存在时返回 {@link ErrorCode#STORE_NOT_FOUND}
+     */
+    public BizResult<PageResult<OrderTrafficVo>> listTraffic(long page, long size, Long userId,
+                                                             LocalDateTime from, LocalDateTime to,
+                                                             boolean byLeaveTime) {
+        Store store = storeMapper.selectCurrent();
+        if (store == null) {
+            return BizResult.fail(ErrorCode.STORE_NOT_FOUND);
+        }
+
+        IPage<Order> result = byLeaveTime
+                ? orderMapper.selectTrafficPageByLeave(new Page<>(page, size), store.getId(), userId, from, to)
+                : orderMapper.selectTrafficPageByArrive(new Page<>(page, size), store.getId(), userId, from, to);
+
+        List<Order> rows = result.getRecords();
+        if (rows.isEmpty()) {
+            return BizResult.ok(PageResult.of(result, order -> toTraffic(order, List.of(), Map.of())));
+        }
+
+        LocalDateTime windowStart = rows.stream()
+                .map(Order::getStartTime)
+                .filter(Objects::nonNull)
+                .min(LocalDateTime::compareTo)
+                .orElseThrow();
+        LocalDateTime windowEnd = rows.stream()
+                .flatMap(order -> Stream.of(order.getStartTime(), order.getEndTime()))
+                .filter(Objects::nonNull)
+                .max(LocalDateTime::compareTo)
+                .orElseThrow();
+
+        List<Order> related = orderMapper.selectOverlappingWindow(store.getId(), windowStart, windowEnd);
+
+        // 本页订单与窗口订单并起来查一次用户，按 id 去重 —— 前者可能不在后者里（见方法注释）
+        Map<Long, Order> merged = new LinkedHashMap<>();
+        related.forEach(order -> merged.put(order.getId(), order));
+        rows.forEach(order -> merged.put(order.getId(), order));
+        Map<Long, SysUser> users = loadUsers(List.copyOf(merged.values()));
+
+        return BizResult.ok(PageResult.of(result, order -> toTraffic(order, related, users)));
+    }
+
+    /**
+     * 分页查询进出<b>事件</b>（到店 / 离店各一条），按时间排成一条线。
+     *
+     * <p>与 {@link #listTraffic} 的分工：那是<b>按订单看</b>（一行一单、两端并排），
+     * 这是<b>按事件看</b>（一行一件事）。后台页面用的是这一条 ——
+     * 一行一单的读法「既不是到店也不是离店」，扫一屏看不出刚才谁走了
+     * （2026-10-16 按使用者反馈改的）。
+     *
+     * <p>名册口径与 {@link #listTraffic} 完全一致，两处共用 {@link #snapshotOf}：
+     * 到店那条含本人，离店那条不含（半开区间），所以「他走后还剩谁」直接读得到。
+     *
+     * @param page   页码
+     * @param size   每页条数
+     * @param userId 按当事人筛选，可空
+     * @param from   事件时刻下界（含），可空
+     * @param to     事件时刻上界（不含），可空
+     * @return 分页的事件列表；门店不存在时返回 {@link ErrorCode#STORE_NOT_FOUND}
+     */
+    public BizResult<PageResult<OrderTrafficEventVo>> listTimeline(long page, long size, Long userId,
+                                                                   LocalDateTime from, LocalDateTime to) {
+        Store store = storeMapper.selectCurrent();
+        if (store == null) {
+            return BizResult.fail(ErrorCode.STORE_NOT_FOUND);
+        }
+
+        IPage<OrderEventRow> result = orderMapper.selectTimelinePage(
+                new Page<>(page, size), store.getId(), userId, from, to);
+
+        List<OrderEventRow> rows = result.getRecords();
+        if (rows.isEmpty()) {
+            return BizResult.ok(PageResult.of(result, row -> toEvent(row, List.of(), Map.of())));
+        }
+
+        // 名册窗口 = 本页事件的时刻跨度；只有与窗口相交的订单才参与算名册
+        LocalDateTime windowStart = rows.stream()
+                .map(OrderEventRow::getEventTime)
+                .filter(Objects::nonNull)
+                .min(LocalDateTime::compareTo)
+                .orElseThrow();
+        LocalDateTime windowEnd = rows.stream()
+                .map(OrderEventRow::getEventTime)
+                .filter(Objects::nonNull)
+                .max(LocalDateTime::compareTo)
+                .orElseThrow();
+        List<Order> related = orderMapper.selectOverlappingWindow(store.getId(), windowStart, windowEnd);
+
+        Map<Long, SysUser> users = new LinkedHashMap<>(loadUsers(related));
+        // 补上「不在窗口里、但事件本人要用昵称」的那些人：0 秒单（到店与离店同刻）
+        // 恰好落在窗口边界上，会被「离店即不在店」的半开语义挡在窗口查询之外
+        List<Long> missing = rows.stream()
+                .map(OrderEventRow::getUserId)
+                .filter(Objects::nonNull)
+                .filter(id -> !users.containsKey(id))
+                .distinct()
+                .toList();
+        if (!missing.isEmpty()) {
+            sysUserMapper.selectBatchIds(missing).forEach(user -> users.put(user.getId(), user));
+        }
+
+        return BizResult.ok(PageResult.of(result, row -> toEvent(row, related, users)));
+    }
+
+    /**
+     * 把一条事件行组装成时间线上的一张卡片。
+     *
+     * @param row     事件行
+     * @param related 算名册用的订单集合
+     * @param users   用户表
+     * @return 事件视图
+     */
+    private OrderTrafficEventVo toEvent(OrderEventRow row, List<Order> related, Map<Long, SysUser> users) {
+        OrderTrafficEventVo vo = new OrderTrafficEventVo();
+        vo.setEventType(row.getEventType());
+        vo.setEventLabel("LEAVE".equals(row.getEventType()) ? "离店" : "到店");
+        vo.setEventTime(row.getEventTime());
+        vo.setOrderId(row.getId());
+        vo.setOrderNo(row.getOrderNo());
+        vo.setUserId(row.getUserId());
+        vo.setNickname(displayNameOf(row.getUserId(), users));
+
+        SysUser user = row.getUserId() == null ? null : users.get(row.getUserId());
+        if (user != null) {
+            // 仅用于前端在昵称前挂 STAFF 徽章，不承载任何权限判断
+            vo.setRole(user.getRole());
+        }
+
+        vo.setStatus(row.getStatus());
+        vo.setStatusLabel(OrderStatus.labelOf(row.getStatus()));
+        if (row.getEventTime() != null) {
+            vo.setInstore(snapshotOf(row.getEventTime(), related, users));
+        }
+        return vo;
+    }
+
+    /**
+     * 还原任意时刻的在店名册（后台复盘用）。
+     *
+     * <p>把窗口收成一个点（{@code from = to = at}）交给同一条查询 ——
+     * 「与一个点相交」正是「此刻在店」：{@code start_time <= at} 且
+     * （{@code end_time IS NULL} 或 {@code end_time > at}）。刻意不另写一条 SQL：
+     * 两处口径共用一条语句，就不可能漂移。
+     *
+     * @param at 要还原的时刻
+     * @return 该时刻的在店名册；门店不存在时返回 {@link ErrorCode#STORE_NOT_FOUND}
+     */
+    public BizResult<InstoreSnapshotVo> snapshotAt(LocalDateTime at) {
+        Store store = storeMapper.selectCurrent();
+        if (store == null) {
+            return BizResult.fail(ErrorCode.STORE_NOT_FOUND);
+        }
+        List<Order> orders = orderMapper.selectOverlappingWindow(store.getId(), at, at);
+        return BizResult.ok(snapshotOf(at, orders, loadUsers(orders)));
+    }
+
+    /**
+     * 按某一时刻从一批订单里筛出在店的人，组装成快照。
+     *
+     * <p><b>半开语义是这里的要点</b>：判离店用 {@code end_time > at} 而不是
+     * {@code >=}，所以「离店之后还剩谁」不会把刚走的那位算进去 ——
+     * 这正是「谁离开了、店里还剩几人」要的答案，也是「剩余」两个字的技术含义。
+     *
+     * @param at     时刻
+     * @param orders 参与筛选的订单（通常是与某个窗口相交的那一批）
+     * @param users  用户表，用于把 ID 换成昵称
+     * @return 名册快照
+     */
+    private InstoreSnapshotVo snapshotOf(LocalDateTime at, List<Order> orders, Map<Long, SysUser> users) {
+        List<String> names = orders.stream()
+                .filter(order -> order.getStartTime() != null && !order.getStartTime().isAfter(at))
+                .filter(order -> order.getEndTime() == null || order.getEndTime().isAfter(at))
+                .map(order -> displayNameOf(order.getUserId(), users))
+                .distinct()
+                .toList();
+        return InstoreSnapshotVo.of(at, names);
+    }
+
+    /**
+     * 把一条订单组装成进出记录。
+     *
+     * @param order   订单
+     * @param related 算名册用的订单集合
+     * @param users   用户表
+     * @return 进出记录
+     */
+    private OrderTrafficVo toTraffic(Order order, List<Order> related, Map<Long, SysUser> users) {
+        OrderTrafficVo vo = new OrderTrafficVo();
+        vo.setOrderId(order.getId());
+        vo.setOrderNo(order.getOrderNo());
+        vo.setUserId(order.getUserId());
+        vo.setNickname(displayNameOf(order.getUserId(), users));
+
+        SysUser user = order.getUserId() == null ? null : users.get(order.getUserId());
+        if (user != null) {
+            // 仅用于前端在昵称前挂 STAFF 徽章，不承载任何权限判断
+            vo.setRole(user.getRole());
+        }
+
+        vo.setArriveTime(order.getStartTime());
+        vo.setLeaveTime(order.getEndTime());
+        vo.setStayMinutes(stayMinutesOf(order));
+        vo.setStatus(order.getStatus());
+        vo.setStatusLabel(OrderStatus.labelOf(order.getStatus()));
+
+        if (order.getStartTime() != null) {
+            vo.setInstoreOnArrive(snapshotOf(order.getStartTime(), related, users));
+        }
+        if (order.getEndTime() != null) {
+            vo.setInstoreAfterLeave(snapshotOf(order.getEndTime(), related, users));
+        }
+        return vo;
+    }
+
+    /**
+     * 在店时长：优先读结算时写下的列，没写就按两端时刻现算。
+     *
+     * <p>仍在店时为 null —— 那时没有离店时刻，算不出定值。页面上要显示
+     * 「已经待了多久」由前端按此刻实时算，与 {@code InstoreUserVo} 的分工一致：
+     * 那边给的是实时值，这里给的是事实。
+     *
+     * @param order 订单
+     * @return 分钟数；仍在店或时刻缺失时为 null
+     */
+    private Integer stayMinutesOf(Order order) {
+        if (order.getStayMinutes() != null) {
+            return order.getStayMinutes();
+        }
+        if (order.getStartTime() == null || order.getEndTime() == null) {
+            return null;
+        }
+        return (int) Duration.between(order.getStartTime(), order.getEndTime()).toMinutes();
+    }
+
+    /**
+     * 取一个人在名册上显示的名字。
+     *
+     * <p>查不到用户记录时不把他丢掉：被逻辑删除的账号，当时人确实在店里坐着，
+     * 所以用「用户{ID}」兜底，而不是让名册静默少一个人。
+     *
+     * @param userId 用户 ID，可为 null
+     * @param users  用户表
+     * @return 显示名
+     */
+    private String displayNameOf(Long userId, Map<Long, SysUser> users) {
+        if (userId == null) {
+            return "未知用户";
+        }
+        SysUser user = users.get(userId);
+        if (user == null || user.getNickname() == null || user.getNickname().isBlank()) {
+            return "用户" + userId;
+        }
+        return user.getNickname();
     }
 
     /**

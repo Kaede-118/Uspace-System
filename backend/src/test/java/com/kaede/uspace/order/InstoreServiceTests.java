@@ -3,7 +3,11 @@ package com.kaede.uspace.order;
 import com.kaede.uspace.billing.BillingProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
+import com.kaede.uspace.common.result.PageResult;
+import com.kaede.uspace.order.dto.InstoreSnapshotVo;
 import com.kaede.uspace.order.dto.InstoreUserVo;
+import com.kaede.uspace.order.dto.OrderTrafficEventVo;
+import com.kaede.uspace.order.dto.OrderTrafficVo;
 import com.kaede.uspace.order.entity.Order;
 import com.kaede.uspace.promotion.FakeMonthlyCardMapper;
 import com.kaede.uspace.promotion.FakeMonthlyCardOrderMapper;
@@ -48,6 +52,7 @@ class InstoreServiceTests {
 
     private static final Long USER_ID = 1001L;
     private static final Long OTHER_USER = 1002L;
+    private static final Long THIRD_USER = 1003L;
     private static final Long STORE_ID = 1L;
 
     private final FakeOrderMapper orderMapper = new FakeOrderMapper();
@@ -374,5 +379,235 @@ class InstoreServiceTests {
         card.setEndDate(endDate);
         card.setStatus(MonthlyCardStatus.ACTIVE.name());
         return cardMapper.seed(card);
+    }
+
+    // ==================================================================
+    // 进出记录与名册快照（2026-10-16 新增）
+    //
+    // 口径由用户定死：到店 = 开始计时，离店 = 停止计时。本组用例盯的是
+    // 「半开区间」与「名册要向窗口外取人」这两处 —— 它们写错了都不会报错，
+    // 只会让复盘时看到的名册少一个人或多一个人。
+    // ==================================================================
+
+    @Test
+    @DisplayName("进出记录：到店那一刻的名册含本人，离店之后的名册不含刚走的那位")
+    void listTraffic_reportsSnapshotsOnBothEnds() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedUser(OTHER_USER, "阿岚", null);
+        seedUser(THIRD_USER, "小满", null);
+
+        LocalDateTime base = minutesAgo(180);
+        // 甲：一直在店；乙：中途离店；丙：最后到
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, base);
+        seedOrder(OTHER_USER, STORE_ID, OrderStatus.PAID, base.plusMinutes(30), base.plusMinutes(120));
+        seedOrder(THIRD_USER, STORE_ID, OrderStatus.IN_USE, base.plusMinutes(60));
+
+        PageResult<OrderTrafficVo> page =
+                service.listTraffic(1, 10, OTHER_USER, null, null, false).getData();
+        OrderTrafficVo vo = page.getRecords().get(0);
+
+        assertEquals(base.plusMinutes(30), vo.getArriveTime());
+        assertEquals(base.plusMinutes(120), vo.getLeaveTime());
+
+        // 到店那一刻：甲 + 乙自己（丙还没来）
+        assertEquals(2, vo.getInstoreOnArrive().getCount());
+        assertEquals(List.of("小枫", "阿岚"), vo.getInstoreOnArrive().getNames());
+
+        // 离店之后：甲 + 丙；乙自己不算 —— 这就是「剩余」两个字的半开语义
+        assertEquals(2, vo.getInstoreAfterLeave().getCount());
+        assertEquals(List.of("小枫", "小满"), vo.getInstoreAfterLeave().getNames());
+    }
+
+    @Test
+    @DisplayName("仍在店的那条单子没有「离店后」快照，而不是给一份空名册")
+    void listTraffic_leaveSnapshotIsNullWhileStillInStore() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, minutesAgo(30));
+
+        OrderTrafficVo vo =
+                service.listTraffic(1, 10, null, null, null, false).getData().getRecords().get(0);
+
+        assertNull(vo.getLeaveTime());
+        assertNull(vo.getInstoreAfterLeave());
+        assertTrue(vo.getInstoreOnArrive() != null);
+        assertEquals(List.of("小枫"), vo.getInstoreOnArrive().getNames());
+    }
+
+    @Test
+    @DisplayName("名册要跨窗口取人：比本页任何时刻都早到店、且还没走的人必须在场")
+    void listTraffic_keepsCrossWindowVisitorInSnapshot() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedUser(OTHER_USER, "阿岚", null);
+
+        LocalDateTime base = minutesAgo(300);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, base);
+        seedOrder(OTHER_USER, STORE_ID, OrderStatus.PAID, base.plusMinutes(60), base.plusMinutes(90));
+
+        OrderTrafficVo vo =
+                service.listTraffic(1, 10, OTHER_USER, null, null, false).getData().getRecords().get(0);
+
+        // 只查「开始时刻落在窗口内」的实现会把甲漏掉，而它不报任何错
+        assertEquals(List.of("小枫", "阿岚"), vo.getInstoreOnArrive().getNames());
+    }
+
+    @Test
+    @DisplayName("还原任意时刻：报出当时的在店名册；恰好离店那一刻已不算在店")
+    void snapshotAt_restoresWhoWasInStore() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedUser(OTHER_USER, "阿岚", null);
+
+        LocalDateTime base = minutesAgo(240);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, base);
+        seedOrder(OTHER_USER, STORE_ID, OrderStatus.PAID, base.plusMinutes(30), base.plusMinutes(90));
+
+        InstoreSnapshotVo both = service.snapshotAt(base.plusMinutes(60)).getData();
+        assertEquals(2, both.getCount());
+        assertEquals(base.plusMinutes(60), both.getAt());
+
+        // 乙的离店时刻正好是这个点：半开区间把他排除在外，名册上只剩甲
+        InstoreSnapshotVo afterLeave = service.snapshotAt(base.plusMinutes(90)).getData();
+        assertEquals(List.of("小枫"), afterLeave.getNames());
+    }
+
+    @Test
+    @DisplayName("按离店视图：仍在店的单子不出现，筛选看的是离店时刻")
+    void listTraffic_byLeaveViewFiltersOnLeaveTime() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedUser(OTHER_USER, "阿岚", null);
+
+        LocalDateTime base = minutesAgo(240);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, base);
+        seedOrder(OTHER_USER, STORE_ID, OrderStatus.PAID, base, base.plusMinutes(60));
+
+        PageResult<OrderTrafficVo> page =
+                service.listTraffic(1, 10, null, null, null, true).getData();
+
+        assertEquals(1, page.getTotal());
+        assertEquals(OTHER_USER, page.getRecords().get(0).getUserId());
+    }
+
+    @Test
+    @DisplayName("门店不存在时返回 STORE_NOT_FOUND，而不是一页空记录")
+    void listTraffic_failsWhenStoreMissing() {
+        assertFalse(service.listTraffic(1, 10, null, null, null, false).isSuccess());
+        assertFalse(service.snapshotAt(minutesAgo(10)).isSuccess());
+    }
+
+    /**
+     * 预置一条<b>已经离店</b>的订单。
+     *
+     * <p>先按 {@link #seedOrder(Long, Long, OrderStatus, LocalDateTime)} 落库再补
+     * {@code endTime} —— 假 Mapper 的 {@code seed} 存的是对象引用，补写对后续查询可见。
+     *
+     * @param userId  下单用户
+     * @param storeId 所属门店
+     * @param status  订单状态
+     * @param start   到店时刻
+     * @param end     离店时刻
+     * @return 订单
+     */
+    private Order seedOrder(Long userId, Long storeId, OrderStatus status,
+                            LocalDateTime start, LocalDateTime end) {
+        Order order = seedOrder(userId, storeId, status, start);
+        order.setEndTime(end);
+        return order;
+    }
+
+    // ==================================================================
+    // 进出事件时间线（2026-10-16 按使用者反馈加：事件粒度，不是订单粒度）
+    //
+    // 「一行一单、两端并排」的读法被使用者判为意义不明 —— 一屏扫过去看不出
+    // 刚才谁走了。改成一行一件事之后，下面这几条是它的守门用例。
+    // ==================================================================
+
+    @Test
+    @DisplayName("时间线：一条订单出两条事件（到店、离店各一条），按时刻倒序")
+    void listTimeline_splitsAnOrderIntoTwoEvents() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        LocalDateTime base = minutesAgo(120);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.PAID, base, base.plusMinutes(60));
+
+        List<OrderTrafficEventVo> events =
+                service.listTimeline(1, 10, null, null, null).getData().getRecords();
+
+        assertEquals(2, events.size());
+        // 倒序：离店更晚，所以排在上面
+        assertEquals("LEAVE", events.get(0).getEventType());
+        assertEquals("离店", events.get(0).getEventLabel());
+        assertEquals(base.plusMinutes(60), events.get(0).getEventTime());
+        assertEquals("ARRIVE", events.get(1).getEventType());
+        assertEquals("到店", events.get(1).getEventLabel());
+        assertEquals(base, events.get(1).getEventTime());
+    }
+
+    @Test
+    @DisplayName("时间线：离店那张卡片报的是「他走后还剩谁」，不含他自己")
+    void listTimeline_leaveEventReportsRemaining() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        seedUser(OTHER_USER, "阿岚", null);
+        LocalDateTime base = minutesAgo(150);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, base);
+        seedOrder(OTHER_USER, STORE_ID, OrderStatus.PAID, base.plusMinutes(30), base.plusMinutes(90));
+
+        List<OrderTrafficEventVo> events =
+                service.listTimeline(1, 10, null, null, null).getData().getRecords();
+
+        // 最新那条是阿岚离店：名册里只剩小枫
+        OrderTrafficEventVo leave = events.get(0);
+        assertEquals("LEAVE", leave.getEventType());
+        assertEquals("阿岚", leave.getNickname());
+        assertEquals(List.of("小枫"), leave.getInstore().getNames());
+
+        // 他到店那条则含他自己（同一份推算逻辑，两个方向都要对）
+        OrderTrafficEventVo arrive = events.stream()
+                .filter(event -> "ARRIVE".equals(event.getEventType())
+                        && OTHER_USER.equals(event.getUserId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(List.of("小枫", "阿岚"), arrive.getInstore().getNames());
+    }
+
+    @Test
+    @DisplayName("时间线：0 秒单的两条事件都在，且昵称没丢")
+    void listTimeline_keepsZeroSecondOrderNickname() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        LocalDateTime base = minutesAgo(60);
+        // 到店与离店同刻：end_time > 窗口起点 不成立，它不在窗口相交的结果里 ——
+        // 昵称因此得靠「事件行本人」那条补查路径拿到，否则会回落成「用户{ID}」
+        seedOrder(USER_ID, STORE_ID, OrderStatus.PAID, base, base);
+
+        List<OrderTrafficEventVo> events =
+                service.listTimeline(1, 10, null, null, null).getData().getRecords();
+
+        assertEquals(2, events.size());
+        assertTrue(events.stream().allMatch(event -> "小枫".equals(event.getNickname())));
+    }
+
+    @Test
+    @DisplayName("时间线：筛的是事件时刻 —— 选「今天」能看到今天发生的到店与离店")
+    void listTimeline_filtersByEventTime() {
+        seedStore();
+        seedUser(USER_ID, "小枫", null);
+        LocalDateTime old = minutesAgo(600);
+        LocalDateTime recent = minutesAgo(30);
+        seedOrder(USER_ID, STORE_ID, OrderStatus.PAID, old, old.plusMinutes(30));
+        seedOrder(USER_ID, STORE_ID, OrderStatus.IN_USE, recent);
+
+        // 下界取 recent 之前一分钟：老那一单的到店与离店都比它早，被筛掉
+        List<OrderTrafficEventVo> events = service
+                .listTimeline(1, 10, null, recent.minusMinutes(1), null)
+                .getData().getRecords();
+
+        assertEquals(1, events.size());
+        assertEquals("ARRIVE", events.get(0).getEventType());
+        assertEquals(recent, events.get(0).getEventTime());
     }
 }

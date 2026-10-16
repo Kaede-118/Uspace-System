@@ -208,6 +208,172 @@ public interface OrderMapper extends BaseMapper<Order> {
     List<Order> selectActiveByStore(@Param("storeId") Long storeId);
 
     /**
+     * 查与一个时间窗相交的订单 —— 后台「进出记录」还原当时名册用。
+     *
+     * <p><b>口径</b>（2026-10-16 由用户定）：到店 = 开始计时，离店 = 停止计时，
+     * 因此「某时刻在店」= {@code start_time <= t AND (end_time IS NULL OR end_time > t)}。
+     * 两边都是<b>半开</b>：恰好离店那一刻的人<b>已经不在店里</b>，
+     * 这正是「谁离开了、店里还剩谁」那句话要的语义（离店者不把自己算进剩余名单）。
+     *
+     * <p><b>要「相交」不要「包含」</b>：跨窗口边界的订单必须算进来 ——
+     * 19:00 到店、次日 02:00 离店的人，在 23:00 那份名册上必须在场。
+     * 只查「开始时刻落在窗口内」会静默漏人，而那是最难发现的一类错。
+     *
+     * <p><b>不筛状态、不筛金额</b>：进出记录是事实的回放，已支付、待支付、
+     * 凭证被驳回的订单，当时人确实在店里待过。按状态筛会让「他明明来过」
+     * 在复盘时消失。
+     *
+     * <p>传 {@code from = to = 某一时刻} 即得该时刻的在店名册。
+     *
+     * @param storeId 门店 ID
+     * @param from    窗口起点（含）
+     * @param to      窗口终点（含）
+     * @return 相交的订单，按开始时刻升序；没有则返回空列表
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND store_id   = #{storeId}
+               AND start_time <= #{to}
+               AND (end_time IS NULL OR end_time > #{from})
+             ORDER BY start_time
+            """)
+    List<Order> selectOverlappingWindow(@Param("storeId") Long storeId,
+                                        @Param("from") LocalDateTime from,
+                                        @Param("to") LocalDateTime to);
+
+    /**
+     * 后台分页查进出记录 —— <b>按到店时刻</b>排序（默认视图）。
+     *
+     * <p>可选条件用 {@code (#{x} IS NULL OR ...)} 而不是动态 SQL，理由同
+     * {@link #selectPageByUser}：假 Mapper 只需实现一个确定的方法名。
+     *
+     * <p>{@code start_time IS NOT NULL} 是兜底：业务上它必非空（点一次「开门」
+     * 同时完成建单与开始计时），但列在库上可空，漏掉这个条件会让一行
+     * NULL 时刻的记录把排序搅乱且不报错。
+     *
+     * @param page    分页参数
+     * @param storeId 门店 ID
+     * @param userId  按用户筛选，可空
+     * @param from    到店时刻下界（含），可空
+     * @param to      到店时刻上界（不含），可空
+     * @return 分页结果，新到店的在前
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND store_id   = #{storeId}
+               AND start_time IS NOT NULL
+               AND (#{userId} IS NULL OR user_id = #{userId})
+               AND (#{from}   IS NULL OR start_time >= #{from})
+               AND (#{to}     IS NULL OR start_time <  #{to})
+             ORDER BY start_time DESC, id DESC
+            """)
+    IPage<Order> selectTrafficPageByArrive(IPage<Order> page,
+                                           @Param("storeId") Long storeId,
+                                           @Param("userId") Long userId,
+                                           @Param("from") LocalDateTime from,
+                                           @Param("to") LocalDateTime to);
+
+    /**
+     * 后台分页查进出记录 —— <b>按离店时刻</b>排序（「谁刚走」视图）。
+     *
+     * <p>与 {@link #selectTrafficPageByArrive} 是同一份数据的两种切法，
+     * 刻意写成两条 SQL 而不是给 {@code ORDER BY} 传参：排序字段一旦可以
+     * 从外部传进来，就等于把注入面开在了最不起眼的地方。
+     *
+     * <p>{@code end_time IS NOT NULL} 同时承担两件事：排除仍在店的订单
+     * （没有离店时刻），也让筛选区间的作用对象是确定的。
+     *
+     * @param page    分页参数
+     * @param storeId 门店 ID
+     * @param userId  按用户筛选，可空
+     * @param from    离店时刻下界（含），可空
+     * @param to      离店时刻上界（不含），可空
+     * @return 分页结果，刚离店的在前
+     */
+    @Select("""
+            SELECT *
+              FROM biz_order
+             WHERE deleted = 0
+               AND store_id = #{storeId}
+               AND end_time IS NOT NULL
+               AND (#{userId} IS NULL OR user_id = #{userId})
+               AND (#{from}   IS NULL OR end_time >= #{from})
+               AND (#{to}     IS NULL OR end_time <  #{to})
+             ORDER BY end_time DESC, id DESC
+            """)
+    IPage<Order> selectTrafficPageByLeave(IPage<Order> page,
+                                          @Param("storeId") Long storeId,
+                                          @Param("userId") Long userId,
+                                          @Param("from") LocalDateTime from,
+                                          @Param("to") LocalDateTime to);
+
+    /**
+     * 后台分页查<b>进出事件</b> —— 到店与离店各算一条，合并成一条时间线。
+     *
+     * <p><b>为什么用 {@code UNION ALL}、而不是查两次再在 Java 里合并</b>：
+     * 合并必须发生在分页<b>之前</b>。先各查一页再拼，页边界上的事件会重复或被挤掉，
+     * 总条数也算不准（两个列表的「第 21 条」不是同一个位置）。
+     * 交给数据库排一次序，分页就还是普通分页。
+     *
+     * <p>两类事件被拍成同一个形状：{@code eventType} 是字面量，
+     * {@code eventTime} 到店取 {@code start_time}、离店取 {@code end_time}，
+     * 于是「按时间排一条线」只靠一句 {@code ORDER BY}。
+     * 列别名写成 camelCase 是刻意的 —— 不依赖驼峰映射配置也能对上。
+     *
+     * <p>筛选看的是<b>事件时刻</b>（不是订单的开始时刻）：选了「今天」，
+     * 今天发生的到店与离店两类事件都该看到。
+     *
+     * <p>⚠️ {@code ORDER BY} 里第二个键不是装饰：一个 0 秒单的到店与离店同刻，
+     * 少了它两条的先后不确定，翻页时可能看到同一条重复出现。
+     *
+     * @param page    分页参数
+     * @param storeId 门店 ID
+     * @param userId  按当事人筛选，可空
+     * @param from    事件时刻下界（含），可空
+     * @param to      事件时刻上界（不含），可空
+     * @return 分页的事件行，新发生的在前
+     */
+    @Select("""
+            SELECT *
+              FROM (
+                    SELECT id         AS id,
+                           order_no   AS orderNo,
+                           user_id    AS userId,
+                           status     AS status,
+                           'ARRIVE'   AS eventType,
+                           start_time AS eventTime
+                      FROM biz_order
+                     WHERE deleted = 0
+                       AND store_id = #{storeId}
+                       AND start_time IS NOT NULL
+                    UNION ALL
+                    SELECT id,
+                           order_no,
+                           user_id,
+                           status,
+                           'LEAVE',
+                           end_time
+                      FROM biz_order
+                     WHERE deleted = 0
+                       AND store_id = #{storeId}
+                       AND end_time IS NOT NULL
+                   ) t
+             WHERE (#{userId} IS NULL OR userId    = #{userId})
+               AND (#{from}   IS NULL OR eventTime >= #{from})
+               AND (#{to}     IS NULL OR eventTime <  #{to})
+             ORDER BY eventTime DESC, eventType DESC, id DESC
+            """)
+    IPage<OrderEventRow> selectTimelinePage(IPage<OrderEventRow> page,
+                                            @Param("storeId") Long storeId,
+                                            @Param("userId") Long userId,
+                                            @Param("from") LocalDateTime from,
+                                            @Param("to") LocalDateTime to);
+
+    /**
      * 统计某人某月「已支付订单」的实付额之和。
      *
      * <p>这是月度累计消费优惠的判定依据，口径有几条硬要求，逐条都容易踩坑：

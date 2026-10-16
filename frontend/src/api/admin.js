@@ -771,6 +771,49 @@ export function mockOpen(data) {
   return http.post('/api/admin/access-records/mock-open', data)
 }
 
+/* ==================== 进出记录（订单口径，含名册快照） ==================== */
+
+/**
+ * 分页查**进出事件**时间线 —— 口径由业务定死：到店 = 开始计时，离店 = 停止计时。
+ *
+ * <p>⚠️ <b>与上面那组「开门记录」是两个不同的东西</b>：那边是门锁的开门事件
+ * （只证明有人在门口输对了密码 —— 封闭空间的出门是机械推杠，不产生门锁记录），
+ * 这边是订单上的进出事实。复盘「谁什么时候来、什么时候走、当时店里还有谁」
+ * 用这一个；查「门一共开过几次」用上面那组。
+ *
+ * <p><b>一行一件事</b>（2026-10-16 按使用者反馈改的）：一条订单出两条 ——
+ * 到店一条、离店一条，按事件时刻倒序。原先「一行一单、两端并排」的读法
+ * 既不是到店也不是离店，扫一屏看不出刚才谁走了。
+ *
+ * <p>每条事件带<b>该事件之后</b>的在店名册 {@code instore}：到店那条含本人、
+ * 离店那条不含（半开区间），于是「某人离店、店里还剩谁」就是卡片上的一个字段。
+ *
+ * @param {object} [params]
+ * @param {number} [params.page] 页码
+ * @param {number} [params.size] 每页条数（≤100）
+ * @param {number|string} [params.userId] 按当事人筛
+ * @param {string} [params.from] 事件时刻下界 yyyy-MM-dd HH:mm:ss
+ * @param {string} [params.to]   事件时刻上界（不含）
+ * @returns {Promise<{data:{total,current,size,records}}>}
+ */
+export function listOrderTimeline(params = {}) {
+  return http.get('/api/admin/instore/timeline', { params })
+}
+
+/**
+ * 还原任意时刻的在店名册（复盘用）。
+ *
+ * <p>它是<b>推算</b>的：按订单的开始 / 结束时刻反推，所以历史任意时刻都能还原，
+ * 不必当时有人在页面上盯着。代价是人工调整过离店时刻的单子，
+ * 受影响的那几份快照会跟着变 —— 它不是不可变的现场录像。
+ *
+ * @param {string} at 时刻 yyyy-MM-dd HH:mm:ss
+ * @returns {Promise<{data:{at,count,names}}>}
+ */
+export function getInstoreSnapshot(at) {
+  return http.get('/api/admin/instore/snapshot', { params: { at } })
+}
+
 /* ==================== 收款码 ==================== */
 
 /**

@@ -2,6 +2,7 @@ package com.kaede.uspace.order;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.kaede.uspace.order.entity.Order;
+import com.kaede.uspace.order.mapper.OrderEventRow;
 import com.kaede.uspace.order.mapper.OrderMapper;
 
 import java.lang.reflect.InvocationHandler;
@@ -124,6 +125,10 @@ public class FakeOrderMapper implements InvocationHandler {
             case "selectUnsettledByUser" -> selectUnsettledByUser((Long) args[0]);
             case "selectPaidOverlapping" -> selectPaidOverlapping(args);
             case "selectActiveByStore" -> selectActiveByStore((Long) args[0]);
+            case "selectOverlappingWindow" -> selectOverlappingWindow(args);
+            case "selectTrafficPageByArrive" -> selectTrafficPageByArrive(args);
+            case "selectTrafficPageByLeave" -> selectTrafficPageByLeave(args);
+            case "selectTimelinePage" -> selectTimelinePage(args);
             case "selectMonthPaidAmount" -> selectMonthPaidAmount(args);
             case "selectTotalStayMinutes" -> selectTotalStayMinutes(args);
             case "selectMonthStayMinutes" -> selectMonthStayMinutes(args);
@@ -295,6 +300,170 @@ public class FakeOrderMapper implements InvocationHandler {
                 .filter(o -> OrderStatus.IN_USE.name().equals(o.getStatus()))
                 .sorted(Comparator.comparing(Order::getStartTime))
                 .toList();
+    }
+
+    /**
+     * 与一个时间窗相交的订单 —— 逐条复刻真实 SQL 的半开口径。
+     *
+     * <p>⚠️ <b>必须是「相交」而不是「包含」</b>：19:00 到店、次日 02:00 离店的人，
+     * 在窗口中间那份名册上必须在场。写成「开始时刻落在窗口内」会静默漏人，
+     * 而单测正是逮住它的地方。
+     *
+     * @param args 依次为 storeId、from、to
+     * @return 相交的订单，按开始时刻升序
+     */
+    private List<Order> selectOverlappingWindow(Object[] args) {
+        Long storeId = (Long) args[0];
+        LocalDateTime from = (LocalDateTime) args[1];
+        LocalDateTime to = (LocalDateTime) args[2];
+
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getStoreId(), storeId))
+                .filter(o -> o.getStartTime() != null && !o.getStartTime().isAfter(to))
+                .filter(o -> o.getEndTime() == null || o.getEndTime().isAfter(from))
+                .sorted(Comparator.comparing(Order::getStartTime))
+                .toList();
+    }
+
+    /**
+     * 进出记录 —— 按<b>到店时刻</b>分页（复刻真实 SQL：排除开始时刻为空的行）。
+     *
+     * @param args 依次为 IPage、storeId、userId、from、to
+     * @return 分页结果
+     */
+    @SuppressWarnings("unchecked")
+    private IPage<Order> selectTrafficPageByArrive(Object[] args) {
+        IPage<Order> page = (IPage<Order>) args[0];
+        List<Order> matched = trafficRows((Long) args[1], (Long) args[2],
+                (LocalDateTime) args[3], (LocalDateTime) args[4], false).stream()
+                .sorted(Comparator.comparing(Order::getStartTime).reversed())
+                .toList();
+        return fillPage(page, matched);
+    }
+
+    /**
+     * 进出记录 —— 按<b>离店时刻</b>分页（复刻真实 SQL：排除仍在店的行）。
+     *
+     * @param args 依次为 IPage、storeId、userId、from、to
+     * @return 分页结果
+     */
+    @SuppressWarnings("unchecked")
+    private IPage<Order> selectTrafficPageByLeave(Object[] args) {
+        IPage<Order> page = (IPage<Order>) args[0];
+        List<Order> matched = trafficRows((Long) args[1], (Long) args[2],
+                (LocalDateTime) args[3], (LocalDateTime) args[4], true).stream()
+                .sorted(Comparator.comparing(Order::getEndTime).reversed())
+                .toList();
+        return fillPage(page, matched);
+    }
+
+    /**
+     * 进出记录两条分页 SQL 的公共筛选，避免两处各写一份而慢慢漂移。
+     *
+     * @param storeId 门店 ID
+     * @param userId  用户筛选，可空
+     * @param from    下界（含），可空
+     * @param to      上界（不含），可空
+     * @param byLeave true 按离店时刻（并排除仍在店的），false 按到店时刻
+     * @return 命中的订单
+     */
+    private List<Order> trafficRows(Long storeId, Long userId, LocalDateTime from, LocalDateTime to,
+                                    boolean byLeave) {
+        return rows.values().stream()
+                .filter(FakeOrderMapper::isAlive)
+                .filter(o -> Objects.equals(o.getStoreId(), storeId))
+                .filter(o -> userId == null || Objects.equals(o.getUserId(), userId))
+                .filter(o -> (byLeave ? o.getEndTime() : o.getStartTime()) != null)
+                .filter(o -> {
+                    LocalDateTime at = byLeave ? o.getEndTime() : o.getStartTime();
+                    return (from == null || !at.isBefore(from)) && (to == null || at.isBefore(to));
+                })
+                .toList();
+    }
+
+    /**
+     * 进出事件时间线 —— 复刻真实 SQL 的 {@code UNION ALL}：同一订单出两条
+     *（到店一条、离店一条），按事件时刻倒序。
+     *
+     * <p>⚠️ 排序的第二个键（事件类型）不能省：0 秒单的到店与离店同刻，
+     * 少了它两条的先后就不确定，而真实 SQL 里写的正是
+     * {@code event_time DESC, event_type DESC}。
+     *
+     * @param args 依次为 IPage、storeId、userId、from、to
+     * @return 分页结果
+     */
+    @SuppressWarnings("unchecked")
+    private IPage<OrderEventRow> selectTimelinePage(Object[] args) {
+        IPage<OrderEventRow> page = (IPage<OrderEventRow>) args[0];
+        Long storeId = (Long) args[1];
+        Long userId = (Long) args[2];
+        LocalDateTime from = (LocalDateTime) args[3];
+        LocalDateTime to = (LocalDateTime) args[4];
+
+        List<OrderEventRow> all = new ArrayList<>();
+        for (Order order : rows.values()) {
+            if (!isAlive(order)
+                    || !Objects.equals(order.getStoreId(), storeId)
+                    || (userId != null && !Objects.equals(order.getUserId(), userId))) {
+                continue;
+            }
+            if (order.getStartTime() != null) {
+                all.add(eventRow(order, "ARRIVE", order.getStartTime()));
+            }
+            if (order.getEndTime() != null) {
+                all.add(eventRow(order, "LEAVE", order.getEndTime()));
+            }
+        }
+
+        List<OrderEventRow> matched = all.stream()
+                .filter(row -> from == null || !row.getEventTime().isBefore(from))
+                .filter(row -> to == null || row.getEventTime().isBefore(to))
+                .sorted(Comparator.comparing(OrderEventRow::getEventTime).reversed()
+                        .thenComparing(OrderEventRow::getEventType, Comparator.reverseOrder())
+                        .thenComparing(OrderEventRow::getId, Comparator.reverseOrder()))
+                .toList();
+        return fillEventPage(page, matched);
+    }
+
+    /**
+     * 造一条事件行。
+     *
+     * @param order     订单
+     * @param eventType ARRIVE / LEAVE
+     * @param eventTime 事件时刻
+     * @return 事件行
+     */
+    private static OrderEventRow eventRow(Order order, String eventType, LocalDateTime eventTime) {
+        OrderEventRow row = new OrderEventRow();
+        row.setId(order.getId());
+        row.setOrderNo(order.getOrderNo());
+        row.setUserId(order.getUserId());
+        row.setStatus(order.getStatus());
+        row.setEventType(eventType);
+        row.setEventTime(eventTime);
+        return row;
+    }
+
+    /**
+     * 事件流的分页。与 {@link #fillPage} 同一套逻辑，只是记录类型不同
+     *（那个是订单流的专用版本）。
+     *
+     * @param page 分页参数
+     * @param all  排序后的全部记录
+     * @param <T>  记录类型
+     * @return 填入本页记录的分页结果
+     */
+    private static <T> IPage<T> fillEventPage(IPage<T> page, List<T> all) {
+        page.setTotal(all.size());
+        long from = Math.max(0, (page.getCurrent() - 1) * page.getSize());
+        if (from >= all.size()) {
+            page.setRecords(List.of());
+            return page;
+        }
+        long to = Math.min(all.size(), from + page.getSize());
+        page.setRecords(all.subList((int) from, (int) to));
+        return page;
     }
 
     /**
