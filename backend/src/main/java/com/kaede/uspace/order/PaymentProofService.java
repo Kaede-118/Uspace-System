@@ -9,6 +9,7 @@ import com.kaede.uspace.common.result.PageResult;
 import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.AdminProofVo;
 import com.kaede.uspace.order.dto.PaymentTarget;
+import com.kaede.uspace.order.dto.ProofStatusVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
 import com.kaede.uspace.order.dto.RejectedProofVo;
@@ -519,6 +520,45 @@ public class PaymentProofService {
                 .map(RejectedProofVo::from)
                 .toList();
         return BizResult.ok(rejected);
+    }
+
+    /**
+     * 查某一笔收款的凭证状态（用户端）。
+     *
+     * <p><b>给「延后交付」那两类用</b>：包场与月卡提交凭证后目标仍停在待支付
+     *（交付发生在复核通过那一刻），页面若照旧显示「待支付 + 去支付」，
+     * 用户很可能再去转一次账。前端拿这个查询把那一笔显示成「待复核」。
+     *
+     * <p>⚠️ <b>状态从凭证表读，不在目标上另存一份</b>：见
+     * {@link com.kaede.uspace.order.dto.ProofStatusVo} 的类注释 ——
+     * 两份状态漂移时不报任何错，只会让用户白等一场。
+     *
+     * <p><b>归属靠 {@link PaymentTargetHandler#loadForProof} 校验</b>
+     *（四类收款各一份，与提交凭证那条路同一个方法），不在这里另写一遍；
+     * 不存在与「不是他的」<b>一律按「没有凭证」处理</b> ——
+     * 与取消那条路同一口径：区分开来等于承认「这个单子存在，只是不归你」，
+     * 可以被用来枚举单号。
+     *
+     * @param userId     当前登录用户 ID
+     * @param targetType 收款类型名（ORDER / BOOKING / MONTHLY_CARD / PRODUCT）
+     * @param targetId   目标主键
+     * @return 该笔的凭证状态；没有凭证时三个字段都是 null（不是失败）
+     */
+    public BizResult<ProofStatusVo> findStatus(Long userId, String targetType, Long targetId) {
+        if (!PaymentTargetType.isValid(targetType) || targetId == null) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "收款类型或目标不正确");
+        }
+        PaymentTargetHandler handler = handlerOfName(targetType);
+        if (handler == null) {
+            // 类型名合法却没有处理器：加了枚举值忘加处理器才会这样，必须让人看见
+            log.error("[凭证] 找不到收款处理器，凭证状态查询按「没有凭证」返回 targetType={}", targetType);
+            return BizResult.ok(new ProofStatusVo());
+        }
+        BizResult<PaymentTarget> loaded = handler.loadForProof(targetId, userId);
+        if (!loaded.isSuccess() || loaded.getData() == null) {
+            return BizResult.ok(new ProofStatusVo());
+        }
+        return BizResult.ok(ProofStatusVo.from(proofMapper.selectByTarget(targetType, targetId)));
     }
 
     // ==================================================================

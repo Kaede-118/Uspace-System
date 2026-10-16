@@ -108,6 +108,14 @@ public class QqCommandService {
 
     private final OneBotClient client;
 
+    /**
+     * 回复的发送队列：限速（默认 10±3 秒一条）并 @ 发指令的人。
+     *
+     * <p>⚠️ 它替代了原先直接 {@code client.sendGroupMessage} 的写法 ——
+     * 回复「算完即发」连着刷屏正是 QQ 风控盯的特征。见 {@link QqReplyQueue}。
+     */
+    private final QqReplyQueue replyQueue;
+
     private final InstoreService instoreService;
 
     private final QqVerifyService qqVerifyService;
@@ -149,6 +157,7 @@ public class QqCommandService {
     public QqCommandService(QqbotProperties properties,
                             MessageDedup dedup,
                             OneBotClient client,
+                            QqReplyQueue replyQueue,
                             InstoreService instoreService,
                             QqVerifyService qqVerifyService,
                             DeviceService deviceService,
@@ -168,6 +177,7 @@ public class QqCommandService {
         this.properties = properties;
         this.dedup = dedup;
         this.client = client;
+        this.replyQueue = replyQueue;
         this.instoreService = instoreService;
         this.qqVerifyService = qqVerifyService;
         this.deviceService = deviceService;
@@ -203,6 +213,8 @@ public class QqCommandService {
             return;
         }
         Long groupId = event.getGroupId();
+        // 发指令的人。回复统一 @ 他、并经发送队列限速发出（见 QqReplyQueue）
+        Long qq = event.getUserId();
         if (!properties.isGroupAllowed(groupId)) {
             log.warn("[QQ机器人] 收到未授权群的消息，已忽略 groupId={} sender={}",
                     groupId, event.getUserId());
@@ -238,21 +250,21 @@ public class QqCommandService {
             return;
         }
         switch (command.kind()) {
-            case PING -> client.sendGroupMessage(groupId, "pong");
-            case INSTORE -> replyInstore(groupId);
+            case PING -> replyQueue.submit(groupId, qq, "pong");
+            case INSTORE -> replyInstore(groupId, event.getUserId());
             case HELP -> replyHelp(groupId, event.getUserId());
             case VERIFY_CODE -> replyVerifyCode(groupId, event, command.argument());
-            case BOOKING_SCHEDULE -> replyBookingSchedule(groupId);
-            case NOTICE_LIST -> replyNotices(groupId);
+            case BOOKING_SCHEDULE -> replyBookingSchedule(groupId, event.getUserId());
+            case NOTICE_LIST -> replyNotices(groupId, event.getUserId());
             case ME -> replyMe(groupId, event.getUserId());
             case CURRENT_ORDER -> replyNow(groupId, event.getUserId());
             case UNPAID_BILLS -> replyUnpaid(groupId, event.getUserId());
-            case STORE_STATUS -> replyStoreStatus(groupId);
-            case PRICE -> replyPrice(groupId);
-            case CARD_TYPES -> replyCardTypes(groupId);
-            case WEB -> replyWeb(groupId);
-            case PRODUCT_MENU -> replyMenu(groupId);
-            case DEVICE_LIST -> replyDeviceList(groupId);
+            case STORE_STATUS -> replyStoreStatus(groupId, event.getUserId());
+            case PRICE -> replyPrice(groupId, event.getUserId());
+            case CARD_TYPES -> replyCardTypes(groupId, event.getUserId());
+            case WEB -> replyWeb(groupId, event.getUserId());
+            case PRODUCT_MENU -> replyMenu(groupId, event.getUserId());
+            case DEVICE_LIST -> replyDeviceList(groupId, event.getUserId());
             case PRODUCT_ORDER -> writeCommandService.orderProduct(
                     groupId, event.getUserId(), command.argument(), command.quantity());
             // 调整库存：解析层不认人，是不是管理员由 writeCommandService 查库判
@@ -263,13 +275,16 @@ public class QqCommandService {
                     groupId, event.getUserId(), command.argument(), command.status());
             case OPEN_DOOR -> writeCommandService.openDoor(groupId, event.getUserId());
             case SETTLE -> writeCommandService.settle(groupId, event.getUserId());
+            case PAY -> writeCommandService.pay(groupId, event.getUserId());
             // 取消未付款单：解析层只做了单号的形状校验，
             // 按前缀路由、归属校验与状态守卫都在 writeCommandService 里
             case CANCEL_ORDER -> writeCommandService.cancelOrder(
                     groupId, event.getUserId(), command.argument());
+            // 无参版取消：只认商品单，目标由商品模块按「最近一笔」定
+            case CONFIRM_CANCEL -> writeCommandService.confirmCancel(groupId, event.getUserId());
             // ⚠️ 文案与「商品名没匹配上、又没写数量」共用一份，见 QqReplyText.unknownCommand
             case UNKNOWN_COMMAND ->
-                    client.sendGroupMessage(groupId, QqReplyText.unknownCommand());
+                    replyQueue.submit(groupId, qq, QqReplyText.unknownCommand());
             case IGNORE -> {
                 // 闲聊，按设计静默 —— 这是「确实没调用」
             }
@@ -289,12 +304,12 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyInstore(Long groupId) {
+    private void replyInstore(Long groupId, Long qq) {
         BizResult<List<InstoreUserVo>> result = instoreService.listInstoreUsers();
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查在店名册失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到在店信息，稍后再试");
+            replyQueue.submit(groupId, qq, "查不到在店信息，稍后再试");
             return;
         }
         List<InstoreUserVo> users = result.getData();
@@ -306,7 +321,7 @@ public class QqCommandService {
         if (properties.isInstoreImageEnabled() && sendInstoreImages(groupId, users, labels)) {
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.instore(
+        replyQueue.submit(groupId, qq, QqReplyText.instore(
                 users, labels, QqReplyText.DEFAULT_MAX_LISTED));
     }
 
@@ -324,7 +339,7 @@ public class QqCommandService {
      * @param qq      发送者 QQ（用于判定要不要列出管理员指令）
      */
     private void replyHelp(Long groupId, Long qq) {
-        client.sendGroupMessage(groupId,
+        replyQueue.submit(groupId, qq,
                 QqReplyText.help(writeUsable(), writeCommandService.isAdmin(qq), baseUrl()));
     }
 
@@ -364,7 +379,7 @@ public class QqCommandService {
         QqVerifyService.ConfirmResult result =
                 qqVerifyService.confirm(String.valueOf(event.getUserId()), code);
         if (!result.reply().isEmpty()) {
-            client.sendGroupMessage(groupId, result.reply());
+            replyQueue.submit(groupId, event.getUserId(), result.reply());
         }
     }
 
@@ -376,15 +391,15 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyBookingSchedule(Long groupId) {
+    private void replyBookingSchedule(Long groupId, Long qq) {
         BizResult<List<BookingScheduleVo>> result = bookingService.listSchedule(null);
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查包场时间表失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到包场安排，稍后再试");
+            replyQueue.submit(groupId, qq, "查不到包场安排，稍后再试");
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.bookingSchedule(
+        replyQueue.submit(groupId, qq, QqReplyText.bookingSchedule(
                 result.getData(), orderProperties.getBookingLeadDuration(), LocalDate.now()));
     }
 
@@ -397,17 +412,17 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyNotices(Long groupId) {
+    private void replyNotices(Long groupId, Long qq) {
         BizResult<PageResult<NoticeVo>> result =
                 noticeService.listForUser(1, QqReplyText.NOTICE_LIST_MAX);
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查公告失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到公告，稍后再试。");
+            replyQueue.submit(groupId, qq, "查不到公告，稍后再试。");
             return;
         }
         PageResult<NoticeVo> page = result.getData();
-        client.sendGroupMessage(groupId, QqReplyText.notices(
+        replyQueue.submit(groupId, qq, QqReplyText.notices(
                 page.getRecords(), page.getTotal(), baseUrl() + "/#/notices"));
     }
 
@@ -424,7 +439,7 @@ public class QqCommandService {
     private void replyMe(Long groupId, Long qq) {
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
@@ -434,7 +449,7 @@ public class QqCommandService {
         BizResult<OrderStatsVo> stats = orderService.stats(userId);
         BizResult<OrderVo> unsettled = orderService.findUnsettledOrder(userId);
 
-        client.sendGroupMessage(groupId, QqReplyText.me(user, card,
+        replyQueue.submit(groupId, qq, QqReplyText.me(user, card,
                 month.isSuccess() ? month.getData() : null,
                 stats.isSuccess() ? stats.getData() : null,
                 unsettled.isSuccess() ? unsettled.getData() : null,
@@ -458,17 +473,17 @@ public class QqCommandService {
     private void replyNow(Long groupId, Long qq) {
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
 
         OrderPreviewVo preview = currentPreview(userId);
         if (preview == null) {
-            replyPendingPayment(groupId, userId);
+            replyPendingPayment(groupId, userId, qq);
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.currentOrder(
+        replyQueue.submit(groupId, qq, QqReplyText.currentOrder(
                 preview, properties.isSelfAmountVisible()));
     }
 
@@ -498,15 +513,15 @@ public class QqCommandService {
      * @param groupId 目标群号
      * @param userId  用户 ID
      */
-    private void replyPendingPayment(Long groupId, Long userId) {
+    private void replyPendingPayment(Long groupId, Long userId, Long qq) {
         BizResult<OrderVo> result = orderService.findUnsettledOrder(userId);
         OrderVo pending = result.isSuccess() ? result.getData() : null;
         if (pending != null && OrderStatus.PENDING_PAYMENT.name().equals(pending.getStatus())) {
-            client.sendGroupMessage(groupId, QqReplyText.noActiveOrder(pending.getOrderNo(),
+            replyQueue.submit(groupId, qq, QqReplyText.noActiveOrder(pending.getOrderNo(),
                     pending.getPayableAmount(), properties.isSelfAmountVisible(), ordersUrl()));
             return;
         }
-        client.sendGroupMessage(groupId, "你当前没有正在计时的订单。发送 fw开门 可开始计时。");
+        replyQueue.submit(groupId, qq, "你当前没有正在计时的订单。发送 fw开门 可开始计时。");
     }
 
     /**
@@ -521,16 +536,16 @@ public class QqCommandService {
     private void replyUnpaid(Long groupId, Long qq) {
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         List<UnpaidBill> bills = collectUnpaidBills(user.getId());
         if (bills == null) {
             log.error("[QQ机器人] 查未付款清单失败：四类里至少一类查询未成功 qq={}", qq);
-            client.sendGroupMessage(groupId, "查不到未付款信息，稍后再试。");
+            replyQueue.submit(groupId, qq, "查不到未付款信息，稍后再试。");
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.unpaidBills(
+        replyQueue.submit(groupId, qq, QqReplyText.unpaidBills(
                 bills, properties.isSelfAmountVisible(), ordersUrl()));
     }
 
@@ -555,9 +570,11 @@ public class QqCommandService {
             return null;
         }
         for (OrderVo order : orders.getData()) {
-            // 计时订单不可取消（欠费不能自消）—— 见 QqCommand.Kind#CANCEL_ORDER
-            bills.add(new UnpaidBill("计时", order.getOrderNo(), order.getPayableAmount(),
-                    unpaidStatusText(order.getStatus(), order.getStatusText()), false));
+            // 计时订单不可取消（欠费不能自消）—— 见 QqCommand.Kind#CANCEL_ORDER。
+            // 名称留空：那笔账的「是什么」就是它本身，写不出比单号更短的说法
+            bills.add(new UnpaidBill("计时", null, order.getOrderNo(), order.getPayableAmount(),
+                    QqReplyText.unpaidStatusText(order.getStatus(), order.getStatusText()),
+                    false, true));
         }
 
         BizResult<List<BookingVo>> bookings = bookingService.listUnpaidBookings(userId);
@@ -565,9 +582,11 @@ public class QqCommandService {
             return null;
         }
         for (BookingVo booking : bookings.getData()) {
-            // 查询只取 PENDING_PAYMENT，所以状态文案是固定的
-            bills.add(new UnpaidBill("包场", booking.getBookingNo(), booking.getPrice(),
-                    "待付款", true));
+            // 查询只取 PENDING_PAYMENT，所以状态文案是固定的。
+            // 名称同样留空：包场的身份是「哪一段时段」，那要另做日期排版，
+            // 而它本来就能在网页端一眼看到（见 QqReplyText#bookingSchedule）
+            bills.add(new UnpaidBill("包场", null, booking.getBookingNo(), booking.getPrice(),
+                    "待付款", true, false));
         }
 
         BizResult<CardPurchaseVo> card = monthlyCardService.findPendingPurchase(userId);
@@ -575,8 +594,10 @@ public class QqCommandService {
             return null;
         }
         if (card.getData() != null) {
-            bills.add(new UnpaidBill("月卡", card.getData().getOrderNo(),
-                    card.getData().getPrice(), card.getData().getStatusLabel(), true));
+            // 卡种必须报：全天 600 与夜间 320 差着一倍，只报单号他认不出买的是哪张
+            bills.add(new UnpaidBill("月卡", card.getData().getCardTypeLabel(),
+                    card.getData().getOrderNo(), card.getData().getPrice(),
+                    card.getData().getStatusLabel(), true, false));
         }
 
         BizResult<List<ProductOrderVo>> products = productService.listUnpaidOrders(userId);
@@ -584,31 +605,15 @@ public class QqCommandService {
             return null;
         }
         for (ProductOrderVo order : products.getData()) {
-            bills.add(new UnpaidBill("商品", order.getOrderNo(), order.getAmount(),
-                    unpaidStatusText(order.getStatus(), order.getStatusLabel()), true));
+            // ⚠️ 商品名与数量必须带上（2026-10-10 由用户要求）：同时挂着两笔商品单时
+            //（历史数据可以，见商品模块 closePending 的说明），两行只差单号——
+            // 一串数字认不出哪行是哪瓶水，而「要取消哪一笔」正是这张表要答的问题
+            bills.add(new UnpaidBill("商品", QqReplyText.productTitle(order), order.getOrderNo(),
+                    order.getAmount(),
+                    QqReplyText.unpaidStatusText(order.getStatus(), order.getStatusLabel()),
+                    true, true));
         }
         return bills;
-    }
-
-    /**
-     * 未付款单的状态文案。
-     *
-     * <p>{@code REJECTED}（凭证未通过）多补一句「请重新上传付款截图」——
-     * 只报「凭证未通过」的话，用户知道出了事但不知道下一步做什么，
-     * 而下一步恰恰只有一件事可做。
-     *
-     * <p>判据用的是 {@link OrderStatus#REJECTED} 的名字，但它同时覆盖商品的
-     * {@code ProductOrderStatus.REJECTED} —— 两个枚举的常量名一样，
-     * 且这是唯一一个需要特殊说明的状态。将来若有一方改名，这里要跟着改
-     *（编译期发现不了，只有该状态的单子在群里显示会变回原样）。
-     *
-     * @param statusName 状态枚举名（{@code OrderVo.status} / 商品单同名字段）
-     * @param label      模块给出的中文名
-     * @return 展示用状态文案
-     */
-    private static String unpaidStatusText(String statusName, String label) {
-        return OrderStatus.REJECTED.name().equals(statusName)
-                ? label + "，请重新上传付款截图" : label;
     }
 
     /**
@@ -676,12 +681,12 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyStoreStatus(Long groupId) {
+    private void replyStoreStatus(Long groupId, Long qq) {
         BizResult<StoreStatusVo> result = storeService.getStoreStatus();
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查门店状态失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到门店状态，稍后再试");
+            replyQueue.submit(groupId, qq, "查不到门店状态，稍后再试");
             return;
         }
         Integer instoreCount = null;
@@ -689,7 +694,7 @@ public class QqCommandService {
         if (instore.isSuccess() && instore.getData() != null) {
             instoreCount = instore.getData().size();
         }
-        client.sendGroupMessage(groupId, QqReplyText.storeStatus(result.getData(), instoreCount));
+        replyQueue.submit(groupId, qq, QqReplyText.storeStatus(result.getData(), instoreCount));
     }
 
     /**
@@ -700,8 +705,8 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyPrice(Long groupId) {
-        client.sendGroupMessage(groupId, QqReplyText.price(
+    private void replyPrice(Long groupId, Long qq) {
+        replyQueue.submit(groupId, qq, QqReplyText.price(
                 BillingRulesVo.from(billingProperties)));
     }
 
@@ -716,15 +721,15 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyCardTypes(Long groupId) {
+    private void replyCardTypes(Long groupId, Long qq) {
         BizResult<List<CardTypeVo>> result = monthlyCardService.cardTypes();
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查月卡卡种失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到月卡信息，稍后再试");
+            replyQueue.submit(groupId, qq, "查不到月卡信息，稍后再试");
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.cardTypes(
+        replyQueue.submit(groupId, qq, QqReplyText.cardTypes(
                 result.getData(), baseUrl() + "/#/cards"));
     }
 
@@ -739,15 +744,15 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyMenu(Long groupId) {
+    private void replyMenu(Long groupId, Long qq) {
         BizResult<List<ProductVo>> result = productService.listOnSale();
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查商城商品失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到商品，稍后再试");
+            replyQueue.submit(groupId, qq, "查不到商品，稍后再试");
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.menu(
+        replyQueue.submit(groupId, qq, QqReplyText.menu(
                 result.getData(), baseUrl() + "/#/mall", writeUsable()));
     }
 
@@ -763,15 +768,15 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyDeviceList(Long groupId) {
+    private void replyDeviceList(Long groupId, Long qq) {
         BizResult<List<DeviceGroupVo>> result = deviceService.listForDisplay();
         if (!result.isSuccess() || result.getData() == null) {
             log.error("[QQ机器人] 查店内设施失败：{}",
                     result.resolveMessage() == null ? "未知原因" : result.resolveMessage());
-            client.sendGroupMessage(groupId, "查不到店内设施，稍后再试。");
+            replyQueue.submit(groupId, qq, "查不到店内设施，稍后再试。");
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.deviceList(
+        replyQueue.submit(groupId, qq, QqReplyText.deviceList(
                 result.getData(), baseUrl() + "/#/devices"));
     }
 
@@ -791,10 +796,10 @@ public class QqCommandService {
      *
      * @param groupId 目标群号
      */
-    private void replyWeb(Long groupId) {
+    private void replyWeb(Long groupId, Long qq) {
         // 两条：一条讲解、一条纯网址（网址单独一条才好长按复制，见 QqReplyText#web）
         for (String message : QqReplyText.web(baseUrl())) {
-            client.sendGroupMessage(groupId, message);
+            replyQueue.submit(groupId, qq, message);
         }
     }
 

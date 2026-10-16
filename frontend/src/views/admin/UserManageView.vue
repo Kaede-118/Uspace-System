@@ -19,12 +19,20 @@
  * 这一页是那个「联系管理员」的落点。
  */
 import { ref, computed, onMounted } from 'vue'
-import { listUsers, updateUser, updateUserStatus, updateUserRole } from '@/api/admin'
+import {
+  listUsers,
+  updateUser,
+  updateUserStatus,
+  updateUserRole,
+  listAdminCards,
+  issueCard,
+  revokeCard
+} from '@/api/admin'
 import { userState } from '@/stores/user'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatDateTime } from '@/utils/format'
-import { cardTypeLabel } from '@/utils/labels'
+import { cardTypeLabel, cardStatusCls, MONTHLY_CARD_TYPES } from '@/utils/labels'
 import AdminPager from '@/components/AdminPager.vue'
 import AdminSheet from '@/components/AdminSheet.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -248,6 +256,139 @@ const roleSaving = ref(false)
  */
 const myId = computed(() => userState.user?.id)
 
+/* ---------------- 月卡弹层（面对面开卡 / 停卡） ---------------- */
+
+/**
+ * 弹层对着的那个人。null 表示关着。
+ *
+ * <p>这里同时承担「开卡」与「停卡」两件事：面对面收款后补录一张，
+ * 以及把发错的卡或离职的 STAFF 卡收回。两件事都对着同一个人、
+ * 都要先看清他手上已有什么，所以合成一个弹层而不是两个入口。
+ */
+const cardUser = ref(null)
+
+/** 该用户名下的卡（开卡前先看清他手上有什么，含历史卡） */
+const cards = ref([])
+const cardsLoading = ref(false)
+
+/** 弹层内的错误文案。⚠️ 不能靠 toast —— 它的层级比弹层低（见 AdminSheet 的说明） */
+const cardError = ref('')
+const cardSaving = ref(false)
+
+/** 开卡表单：卡种与实收金额（留空＝按配置价；STAFF 卡忽略它） */
+const newCardType = ref('ALL_DAY')
+const newCardPrice = ref('')
+
+/** 正在二次确认停用的那张卡 ID。停卡是「对顾客生效」的动作，点错了要能收回 */
+const revokingId = ref(null)
+
+/**
+ * 打开月卡弹层并拉取该用户的卡。
+ *
+ * @param {object} user 列表里的一行
+ */
+async function openCardSheet(user) {
+  cardUser.value = user
+  cardError.value = ''
+  newCardType.value = 'ALL_DAY'
+  newCardPrice.value = ''
+  revokingId.value = null
+  cards.value = []
+  await loadCards()
+}
+
+/** 拉该用户的卡（最新的在前）。分页参数是 pageNum —— 月卡接口与其他页不同 */
+async function loadCards() {
+  if (!cardUser.value) return
+  cardsLoading.value = true
+  try {
+    const resp = await listAdminCards({
+      userId: cardUser.value.id,
+      pageNum: 1,
+      pageSize: 20
+    })
+    cards.value = resp.data?.records || []
+  } catch (err) {
+    cardError.value = errorMessage(err, '加载月卡失败')
+  } finally {
+    cardsLoading.value = false
+  }
+}
+
+/**
+ * 提交开卡。
+ *
+ * <p>金额留空则不传，后端按配置价 —— 当面交易大多照价收；
+ * 填 0 是「不收钱」（赠送、测试），那种不会记进累计消费。
+ * STAFF 卡不传金额（它本来就无价）。
+ */
+async function submitIssueCard() {
+  if (!cardUser.value) return
+  cardSaving.value = true
+  cardError.value = ''
+  try {
+    const data = { userId: cardUser.value.id, cardType: newCardType.value }
+    if (newCardType.value !== 'STAFF' && newCardPrice.value !== '') {
+      const price = Number(newCardPrice.value)
+      if (!Number.isFinite(price) || price < 0) {
+        cardError.value = '实收金额不能为负数；不收钱请填 0，按配置价请留空'
+        return
+      }
+      data.price = price
+    }
+    await issueCard(data)
+    toastSuccess('已开卡')
+    newCardPrice.value = ''
+    await loadCards()
+    // 用户列表上的「月卡」那一列要跟着刷新，免得开完还显示「无」
+    load()
+  } catch (err) {
+    cardError.value = errorMessage(err, '开卡失败')
+  } finally {
+    cardSaving.value = false
+  }
+}
+
+/**
+ * 执行停卡。
+ *
+ * <p>只停权益、不动钱 —— 弹层里的说明文字与后端口径一致
+ * （已结算的订单一分不动，退款走线下）。
+ *
+ * @param {object} card 列表里的一张卡
+ */
+async function submitRevoke(card) {
+  cardSaving.value = true
+  cardError.value = ''
+  try {
+    await revokeCard(card.id)
+    toastSuccess('已停用')
+    revokingId.value = null
+    await loadCards()
+    load()
+  } catch (err) {
+    cardError.value = errorMessage(err, '停用失败')
+  } finally {
+    cardSaving.value = false
+  }
+}
+
+/**
+ * 一张卡的有效期展示。
+ *
+ * <p>⚠️ <b>STAFF 卡按卡种显示「长期有效」，不要摆出 2099-12-31</b> ——
+ * 那是后端「无到期日」的实现方式（远期日期），对管理员来说是个实现细节；
+ * 而按日期大小去判（如「大于 2090 年就是长期」）会在 2099 年之后静默失效。
+ *
+ * @param {object} card 卡视图
+ * @returns {string} 形如 "2026-10-10 ~ 2026-11-08" / "长期有效"
+ */
+function cardPeriodText(card) {
+  if (card.cardType === 'STAFF') return '长期有效'
+  if (!card.startDate || !card.endDate) return '—'
+  return `${card.startDate} ~ ${card.endDate}`
+}
+
 function askRole(user) {
   roleEditing.value = user
   roleError.value = ''
@@ -312,6 +453,7 @@ onMounted(load)
         <option value="">全部月卡</option>
         <option value="ALL_DAY">全天月卡</option>
         <option value="NIGHT">夜间月卡</option>
+        <option value="STAFF">STAFF 卡</option>
         <option value="NONE">没有月卡</option>
       </select>
       <button class="btn btn-ghost users__btn" @click="applyFilters">查询</button>
@@ -363,6 +505,7 @@ onMounted(load)
           </div>
 
           <div class="urow__ops">
+            <button class="btn btn-ghost urow__op" @click="openCardSheet(u)">月卡</button>
             <button class="btn btn-ghost urow__op" @click="openEdit(u)">编辑资料</button>
             <!-- ⚠️ 自己那一行禁掉 —— 后端禁止改自己的角色（降级后就进不去后台了），
                  前端提前拦一道，让他在点之前就知道，而不是点了才吃一句报错 -->
@@ -497,6 +640,93 @@ onMounted(load)
           {{ roleSaving ? '处理中…' : '降为普通用户' }}
         </button>
       </div>
+    </AdminSheet>
+
+    <!-- ---------------- 月卡：面对面开卡 / 停卡 ---------------- -->
+    <AdminSheet
+      :visible="!!cardUser"
+      :error="cardError"
+      :title="`月卡 · ${cardUser?.nickname || cardUser?.username || ''}`"
+      @update:visible="cardUser = null"
+    >
+      <LoadingMask :loading="cardsLoading" />
+
+      <!-- 名下已有的卡（含历史）。开卡前先看清他手上有什么 -->
+      <div v-if="cards.length" class="cardsheet__list">
+        <div v-for="c in cards" :key="c.id" class="cardsheet__card">
+          <div class="cardsheet__head">
+            <span class="cardsheet__type">{{ c.cardTypeLabel }}</span>
+            <span :class="cardStatusCls(c.status)">{{ c.statusLabel }}</span>
+            <!-- ⚠️ 两张同时生效是正常的（STAFF 卡不挡已有月卡），所以这里是「生效中」徽章而不是单选 -->
+            <span v-if="c.effective" class="tag tag-success">生效中</span>
+          </div>
+          <p class="cardsheet__meta">
+            {{ c.cardNo }} · {{ cardPeriodText(c) }}
+            <template v-if="c.remainingDays != null"> · 还剩 {{ c.remainingDays }} 天</template>
+          </p>
+
+          <!-- 停卡只对生效中的卡给出；二次确认在卡片内展开（理由见 revokingId 的说明） -->
+          <template v-if="c.effective">
+            <div v-if="revokingId === c.id" class="cardsheet__confirm">
+              <p class="cardsheet__warn">
+                停用后<b>立刻不再免单</b>；已结算的订单不受影响，已收的卡费退不退走线下。
+              </p>
+              <div class="cardsheet__confirm-ops">
+                <button class="btn btn-ghost" @click="revokingId = null">取消</button>
+                <button class="btn btn-danger" :disabled="cardSaving" @click="submitRevoke(c)">
+                  {{ cardSaving ? '停用中…' : '确定停用' }}
+                </button>
+              </div>
+            </div>
+            <button v-else class="btn btn-ghost cardsheet__stop" @click="revokingId = c.id">
+              停用这张卡
+            </button>
+          </template>
+        </div>
+      </div>
+      <p v-else-if="!cardsLoading" class="cardsheet__empty">名下暂无月卡。</p>
+
+      <!-- 开卡 -->
+      <div class="cardsheet__form">
+        <div class="field">
+          <label class="field-label" for="cs-type">开卡</label>
+          <select id="cs-type" v-model="newCardType" class="field-input">
+            <option v-for="t in MONTHLY_CARD_TYPES" :key="t.value" :value="t.value">
+              {{ t.label }}
+            </option>
+          </select>
+        </div>
+
+        <div v-if="newCardType !== 'STAFF'" class="field">
+          <label class="field-label" for="cs-price">实收金额（元，选填）</label>
+          <input
+            id="cs-price"
+            v-model="newCardPrice"
+            class="field-input"
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="留空按配置价"
+          />
+        </div>
+
+        <p class="form__hint">
+          <template v-if="newCardType === 'STAFF'">
+            STAFF 卡无价格、长期有效，只在后台发放；可与月卡并存（计费按 STAFF 卡全免）。
+          </template>
+          <template v-else>
+            面对面收款后在这里补录。填 0 表示不收钱（赠送、测试），那笔不记入累计消费；
+            该用户已有生效卡时会被拒绝。
+          </template>
+        </p>
+      </div>
+
+      <template #footer>
+        <button class="btn btn-ghost" @click="cardUser = null">关闭</button>
+        <button class="btn btn-primary" :disabled="cardSaving" @click="submitIssueCard">
+          {{ cardSaving ? '处理中…' : '开卡' }}
+        </button>
+      </template>
     </AdminSheet>
   </div>
 </template>
@@ -673,5 +903,73 @@ onMounted(load)
   display: flex;
   gap: var(--sp-3);
   margin-top: var(--sp-5);
+}
+
+/* ---------- 月卡弹层（开卡 / 停卡） ---------- */
+.cardsheet__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.cardsheet__card {
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-btn);
+  /* 白底而不是主题色：弹层本身已经在 --c-bg 上，再套一层同色系就看不出边界了 */
+  background: #fff;
+}
+
+.cardsheet__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.cardsheet__type {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+.cardsheet__meta {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--c-text-muted);
+  /* 「卡号 + 有效期」串较长，窄屏上别把卡片撑破 */
+  word-break: break-all;
+}
+
+.cardsheet__stop {
+  width: auto;
+  height: 30px;
+  margin-top: var(--sp-2);
+  padding: 0 var(--sp-3);
+  font-size: 12px;
+}
+
+.cardsheet__confirm {
+  margin-top: var(--sp-2);
+}
+
+.cardsheet__warn {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-warning);
+}
+
+.cardsheet__confirm-ops {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.cardsheet__empty {
+  margin-bottom: var(--sp-4);
+  font-size: 13px;
+  color: var(--c-text-muted);
 }
 </style>

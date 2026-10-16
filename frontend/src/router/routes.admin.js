@@ -1,7 +1,7 @@
 /**
  * 运营后台路由。
  *
- * <p>七个页面（用户 / 公告 / 机台 / 包场 / 门店 / 收款 / 商品）挂在一个带顶部导航的
+ * <p>八个页面（用户 / 公告 / 机台 / 包场 / 门店 / 订单 / 收款 / 商品）挂在一个带顶部导航的
  * 父路由下，父组件是 {@code AdminLayout}。父路由自己不渲染页面，直接重定向到第一个 tab。
  *
  * <p>{@code meta.admin = true} <b>只写在父路由上</b>：vue-router 4 的
@@ -52,6 +52,12 @@ export default [
         name: 'admin-store',
         component: () => import('@/views/admin/StoreManageView.vue'),
         meta: { title: '门店管理' }
+      },
+      {
+        path: 'orders',
+        name: 'admin-orders',
+        component: () => import('@/views/admin/OrderManageView.vue'),
+        meta: { title: '订单流水' }
       },
       {
         path: 'payments',

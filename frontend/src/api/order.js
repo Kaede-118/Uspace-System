@@ -79,12 +79,15 @@ export function getPasscode(id) {
  * 账单组件拿它来解释「为什么便宜了」。
  *
  * @param {number|string} id 订单 ID
+ * @param {object} [config] 额外的 axios 配置。轮询调用传 {@code { silent: true }}
+ *                          跳过全局加载遮罩 —— 它每 10~30 秒就发一次，
+ *                          弹遮罩会把用户正在看的页面反复盖住
  * @returns {Promise<{data:{bill:{segments, totalMinutes, totalAmount, discountAmount,
  *          cardFreeAmount, activityFreeAmount}, stayMinutes, freeByBooking, cappedNow,
  *          nextChangeInSeconds, nextChangeText, previewAt}}>}
  */
-export function getPreview(id) {
-  return http.get(`/api/orders/${id}/preview`)
+export function getPreview(id, config = {}) {
+  return http.get(`/api/orders/${id}/preview`, config)
 }
 
 /**

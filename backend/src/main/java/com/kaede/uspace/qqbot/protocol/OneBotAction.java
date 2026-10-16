@@ -86,17 +86,22 @@ public class OneBotAction {
      *
      * @param groupId 群号
      * @param atQq    要 @ 的 QQ 号；为 null 或空串时退化成只发文本
-     *                （用于「这个人没绑 QQ」的情形）
+     *                （用于「这个人没绑 QQ」的情形），也就不加换行
      * @param text    @ 之后的文本，按纯文本段发送
      * @param echo    回显串，供日志追踪
      * @return 可直接序列化发送的动作对象
      */
     public static OneBotAction sendGroupMessageWithAt(Long groupId, String atQq, String text, String echo) {
         List<OneBotMessageSegment> segments = new ArrayList<>(2);
-        if (atQq != null && !atQq.isBlank()) {
+        boolean at = atQq != null && !atQq.isBlank();
+        if (at) {
             segments.add(OneBotMessageSegment.at(atQq));
         }
-        segments.add(OneBotMessageSegment.text(text));
+        // ⚠️ @ 之后换行（2026-10-10 由用户要求，全站所有 @ 都走这里）：
+        // @ 与正文挤在同一行时，群消息窗口里名字与内容连成一片，
+        // 长文案尤其读不清哪句是回谁的 —— 换行后是「先 @，下面一段正文」。
+        // 退化情形（没 QQ 可 @）不加换行，免得正文平白多一个空行
+        segments.add(OneBotMessageSegment.text(at ? "\n" + text : text));
 
         Map<String, Object> params = new HashMap<>(4);
         params.put("group_id", groupId);

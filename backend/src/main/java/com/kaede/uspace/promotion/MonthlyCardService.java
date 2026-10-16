@@ -18,11 +18,14 @@ import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
 import com.kaede.uspace.promotion.event.CardPurchaseCancelledEvent;
 import com.kaede.uspace.promotion.mapper.MonthlyCardMapper;
 import com.kaede.uspace.promotion.mapper.MonthlyCardOrderMapper;
+import com.kaede.uspace.user.entity.SysUser;
+import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -61,16 +64,24 @@ public class MonthlyCardService {
     /** 事件发布器：未付款的购买单被取消时发一条，由 {@code order} 包记进交易流水 */
     private final ApplicationEventPublisher events;
 
+    /**
+     * 用户表。后台开卡要用它办两件事：确认这个人存在、把这笔卡费累加进
+     * {@code card_paid}（与线上购买的累加点同一个方法，口径不会分叉）。
+     */
+    private final SysUserMapper sysUserMapper;
+
     public MonthlyCardService(MonthlyCardMapper cardMapper,
                               MonthlyCardOrderMapper orderMapper,
                               PromotionProperties properties,
                               BillingProperties billingProperties,
-                              ApplicationEventPublisher events) {
+                              ApplicationEventPublisher events,
+                              SysUserMapper sysUserMapper) {
         this.cardMapper = cardMapper;
         this.orderMapper = orderMapper;
         this.properties = properties;
         this.billingProperties = billingProperties;
         this.events = events;
+        this.sysUserMapper = sysUserMapper;
     }
 
     // ==================================================================
@@ -105,6 +116,12 @@ public class MonthlyCardService {
     public BizResult<CardPurchaseVo> purchase(Long userId, MonthlyCardType cardType) {
         if (cardType == null) {
             throw new IllegalArgumentException("月卡类型不能为空");
+        }
+        // ⚠️ 非在售卡种（STAFF 卡）一律拒绝：它只在后台发放，
+        // 允许走购买接口的话，任何登录用户填个卡种名就能给自己发一张永久免费卡
+        if (!cardType.isOnSale()) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID,
+                    "该卡种不支持购买，请联系管理员办理");
         }
         if (!properties.getMonthlyCard().isEnabled()) {
             return BizResult.fail(ErrorCode.BUSINESS_REJECTED, "月卡购买暂未开放，请稍后再试");
@@ -226,11 +243,159 @@ public class MonthlyCardService {
     }
 
     // ==================================================================
+    // 后台发放与收回（面对面收款场景）
+    // ==================================================================
+
+    /**
+     * 后台给指定用户开一张卡 —— 面对面收款（现金 / 当面转账）之后的补录。
+     *
+     * <p><b>它补的是「用户自己线上购买」之外的那条路</b>：顾客在店里当面付了钱，
+     * 却让他掏出手机在商城再下一次单、再传一张截图给管理员复核，
+     * 是把一个已经完成的交易重新演一遍。管理员在这里一次点完即可。
+     * 测试时也走它 —— 不必真的走一遍收银台。
+     *
+     * <h3>三条按卡种分岔的规则</h3>
+     *
+     * <ul>
+     *   <li><b>STAFF 卡（{@link MonthlyCardType#STAFF}）</b>：无价格（强制 0）、
+     *       到期日填远期日期（{@link MonthlyCardType#STAFF_END_DATE}），
+     *       <b>不校验「已有生效卡」</b> —— 给一个自己买过月卡的店员
+     *       发STAFF 卡是正常操作，挡住他只会让管理员束手无策（月卡不能退，
+     *       STAFF 卡也就永远发不出来）。两者并存时计费取STAFF 卡，
+     *       见 {@code MonthlyCardMapper#selectActiveAt} 的排序</li>
+     *   <li><b>普通卡</b>：校验该用户没有生效中的卡 —— 与线上购买同一口径
+     *       （{@code CARD_ALREADY_ACTIVE}），不给人开第二张重叠的卡；
+     *       有效期从今天起算，与线上购买一致</li>
+     *   <li><b>金额</b>：普通卡可在入参里覆盖（当面交易可能打折或抹零），
+     *       不传则按配置价；<b>大于 0 才累加 {@code card_paid}</b>，
+     *       与线上支付记的是同一个方法（{@link SysUserMapper#addCardPaidAmount}），
+     *       两个口径不会分叉</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>这笔钱不进对账系统</b>：对账勾稽的是「扫码转账 + 用户传截图」
+     * 那条路上的付款凭证，而面对面收款发生在店内，本来就没有凭证。
+     * 若管理员收的是扫店内收款码转来的钱，那笔流水会出现在微信账单里、
+     * 对账时作为「账单里有、系统无凭证」列出来 —— 那是预期行为，
+     * 核对时知道「这条是开卡收的」即可（本条日志里有单号与金额）。
+     *
+     * @param userId   持卡人
+     * @param cardType 卡种
+     * @param price    实收金额（元），可为 null（按配置价）；STAFF 卡忽略此参数
+     * @return 成功时返回新卡视图；用户不存在或已有生效卡时返回对应错误码
+     */
+    @Transactional
+    public BizResult<MonthlyCardVo> issueCard(Long userId, MonthlyCardType cardType,
+                                              BigDecimal price) {
+        if (cardType == null) {
+            throw new IllegalArgumentException("卡种不能为空");
+        }
+        SysUser user = sysUserMapper.selectById(userId);
+        if (user == null) {
+            return BizResult.fail(ErrorCode.USER_NOT_FOUND);
+        }
+        if (price != null && price.signum() < 0) {
+            return BizResult.fail(ErrorCode.PARAM_INVALID, "实收金额不能为负数");
+        }
+
+        LocalDate today = LocalDate.now();
+        // 含首尾：30 天 → end = start + 29
+        LocalDate endDate = today.plusDays(properties.getMonthlyCard().getValidDays() - 1L);
+
+        MonthlyCard card = new MonthlyCard();
+        card.setCardNo(MonthlyCardNo.generate());
+        card.setUserId(userId);
+        card.setCardType(cardType.name());
+        card.setStatus(MonthlyCardStatus.ACTIVE.name());
+        // 线下交易没有线上通道；payOrderNo 留空即「这张卡不是任何一张购买单开出来的」
+        card.setPaymentMethod(null);
+        card.setPayOrderNo(null);
+        card.setPaidAt(LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS));
+
+        BigDecimal amount;
+        if (cardType == MonthlyCardType.STAFF) {
+            // STAFF 卡：无价格、起止日都是远期/远古日期（合起来表达「一直有效」，
+            // 各自为什么这么填见那两个常量的注释 —— 起始日填开卡当日会让
+            // 「先开门后开卡」的人在在店列表里看不到卡，2026-10-10 踩过）。
+            // 金额强制 0，累加那一步自然跳过
+            amount = BigDecimal.ZERO;
+            card.setStartDate(MonthlyCardType.STAFF_START_DATE);
+            card.setEndDate(MonthlyCardType.STAFF_END_DATE);
+        } else {
+            if (cardMapper.selectActiveAt(userId, today) != null) {
+                return BizResult.fail(ErrorCode.CARD_ALREADY_ACTIVE,
+                        "该用户已有生效中的卡，到期后再办；如需更换请先在下方停用");
+            }
+            amount = price == null ? properties.getMonthlyCard().priceOf(cardType) : price;
+            card.setStartDate(today);
+            card.setEndDate(endDate);
+        }
+        card.setPrice(amount);
+        cardMapper.insert(card);
+
+        // 收得到钱才记账：0 元开卡（测试、赠送）不该往累计消费里加一笔假数
+        if (amount.signum() > 0) {
+            sysUserMapper.addCardPaidAmount(userId, amount);
+        }
+
+        log.info("[优惠] 后台开卡 卡号={} 用户={} 卡种={} 有效期 {} ~ {} 实收={} 元",
+                card.getCardNo(), userId, cardType,
+                card.getStartDate(), card.getEndDate(), amount);
+        return BizResult.ok(MonthlyCardVo.from(card, today));
+    }
+
+    /**
+     * 后台停用一张卡（收回权益）—— <b>只停卡，不动钱</b>。
+     *
+     * <p>两个真实场景：STAFF 卡随人离职要收回；发错了对象（选错用户、选错卡种）
+     * 要立刻止住 —— 而它在系统里的效果是「下一笔结算起不再免单」，
+     * 已经结算过的订单一分不动（金额在结算时就落了库）。
+     *
+     * <p>⚠️ <b>状态守卫取 {@code ATOMIC} 的写法</b>（SQL 里带
+     * {@code status = 'ACTIVE'}）：重复点两下不会二次生效，同时天然挡住
+     * 对已过期 / 已退款 / 已停用卡的重复操作 —— 返回 0 就说明状态不对。
+     *
+     * <p><b>钱的事不在这里</b>：已收的卡费要不要退、退多少，是线下的事，
+     * 系统不替它做决定（退款政策仍未拍板，见 {@code docs/月卡设计草案.md}）。
+     * 这也是 {@code REVOKED} 与 {@code REFUNDED} 分开的原因 ——
+     * 「卡停了」与「钱退了」是两个可以各自成立的结论。
+     *
+     * @param cardId 卡 ID
+     * @return 成功时返回停用后的卡视图；卡不存在或不是生效中状态时返回对应错误码
+     */
+    @Transactional
+    public BizResult<MonthlyCardVo> revokeCard(Long cardId) {
+        MonthlyCard card = cardMapper.selectById(cardId);
+        if (card == null) {
+            return BizResult.fail(ErrorCode.CARD_NOT_FOUND);
+        }
+        if (cardMapper.revokeActive(cardId) == 0) {
+            return BizResult.fail(ErrorCode.CARD_STATUS_INVALID,
+                    "该卡不是生效中状态，无法停用");
+        }
+        // 内存里的实体同步改一下状态，让返回的视图直接是停用后的样子
+        card.setStatus(MonthlyCardStatus.REVOKED.name());
+
+        log.info("[优惠] 后台停用月卡 卡号={} 用户={} 卡种={}",
+                card.getCardNo(), card.getUserId(), card.getCardType());
+        return BizResult.ok(MonthlyCardVo.from(card, LocalDate.now()));
+    }
+
+    // ==================================================================
     // 查询
     // ==================================================================
 
     /**
      * 查我的卡包：生效中的卡、待支付的购买单、历史卡。
+     *
+     * <p>⚠️ <b>「哪张是生效中的那张」与计费同一个查询</b>（{@code selectActiveAt}）——
+     * 一个人可以同时有两张生效的卡（STAFF 卡不挡已有月卡，见 {@link #issueCard}），
+     * 而计费取的是最宽的那张（{@code end_date DESC}）。
+     * 卡包若另有一套「遍历取最后一张」的口径，就会出现
+     * 「卡包说他是夜间月卡、账单却全免」这种对不上的情形。
+     *
+     * <p>并存时 Active 位只放最宽的那张（UI 只有一个位置），其余生效卡进历史列表 ——
+     * 它们的 {@code statusLabel} 仍是「生效中」，看得出「这张卡还在、只是当前按另一张免」。
+     * 并存是罕见场景（店主给已有月卡的店员发 STAFF 卡），不值得为它改契约成多张。
      *
      * @param userId 当前登录用户
      * @return 卡包视图
@@ -242,10 +407,13 @@ public class MonthlyCardService {
         vo.setPending(CardPurchaseVo.from(orderMapper.selectPendingByUser(userId),
                 properties.getMonthlyCard().getPendingTimeout()));
 
+        MonthlyCard active = cardMapper.selectActiveAt(userId, today);
+        Long activeId = active == null ? null : active.getId();
+
         List<MonthlyCardVo> history = new ArrayList<>();
         for (MonthlyCard card : cardMapper.selectByUser(userId)) {
             MonthlyCardVo cardVo = MonthlyCardVo.from(card, today);
-            if (isEffectiveNow(card, today)) {
+            if (card.getId().equals(activeId)) {
                 vo.setActive(cardVo);
             } else {
                 history.add(cardVo);
@@ -266,6 +434,12 @@ public class MonthlyCardService {
     public BizResult<List<CardTypeVo>> cardTypes() {
         List<CardTypeVo> result = new ArrayList<>();
         for (MonthlyCardType type : MonthlyCardType.values()) {
+            // 非在售卡种（STAFF 卡）不列出来：这个接口是购买页的数据源，
+            // 列出它等于在商城上架一张不该卖的卡 —— 而且 priceOf 对它直接抛，
+            // 走进下面那行会 500（这也是一道「别把STAFF 卡当商品」的保险）
+            if (!type.isOnSale()) {
+                continue;
+            }
             CardTypeVo vo = new CardTypeVo();
             vo.setCardType(type.name());
             vo.setLabel(type.getLabel());
@@ -338,9 +512,13 @@ public class MonthlyCardService {
         }
         if (card.getStartDate() == null || card.getEndDate() == null) {
             // 两列都是 NOT NULL，理论上到不了这里。真出现说明表结构被人改过，
-            // 同样按无卡处理 —— 理由同上，且绝不能让计费侧拿到一个空区间
+            // 同样按无卡处理 —— 理由同上，且绝不能让计费侧拿到一个空区间。
+            // 留一行日志：静默按无卡处理的话，顾客会在「明明有卡」的情况下被照常收费
+            log.warn("[优惠] 卡 {} 缺少起止日期，按无卡处理（表数据异常？）", card.getCardNo());
             return null;
         }
+        // STAFF 卡走的就是这条路：它的到期日在 2099，日期区间天然覆盖所有订单，
+        // 计费侧一行特判都不需要（见 MonthlyCardType#STAFF_END_DATE）
         return CardCoverage.of(MonthlyCardType.valueOf(card.getCardType()).getScope(),
                 card.getStartDate(), card.getEndDate());
     }
@@ -375,24 +553,6 @@ public class MonthlyCardService {
     // ==================================================================
     // 内部工具
     // ==================================================================
-
-    /**
-     * 判断一张卡此刻是否真正生效。
-     *
-     * <p>与 {@code MonthlyCardMapper#selectActiveAt} 的口径一致：状态为生效中，
-     * 且今天落在生效与失效日期之间（两端都含）。两处判定同源，
-     * 否则会出现「列表说生效、结算说不生效」这种自相矛盾。
-     *
-     * @param card  月卡
-     * @param today 今天的日期
-     * @return 生效返回 true
-     */
-    private static boolean isEffectiveNow(MonthlyCard card, LocalDate today) {
-        return MonthlyCardStatus.ACTIVE.name().equals(card.getStatus())
-                && card.getStartDate() != null && card.getEndDate() != null
-                && !card.getStartDate().isAfter(today)
-                && !card.getEndDate().isBefore(today);
-    }
 
     /**
      * 判断一张待支付单是否已超过存活时长。

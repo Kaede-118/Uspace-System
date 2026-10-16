@@ -112,10 +112,13 @@ export function createPayment({ targetType, targetId, channel }) {
  *                            但不同通道的查单实现不同，不传会查不准。
  *                            建议后端把接口文档里这个参数从「可选」改成「必填」，
  *                            让契约与实现一致
+ * @param {object} [config]   额外的 axios 配置。轮询查单传 {@code { silent: true }}
+ *                            跳过全局加载遮罩 —— 它每 2 秒发一次，
+ *                            弹遮罩会把收银台反复盖住
  * @returns {Promise<{data:{outTradeNo, status, paid}}>} status 为 SUCCESS 表示已支付
  */
-export function getPaymentStatus(outTradeNo, channel) {
-  return http.get(`/api/payments/${outTradeNo}`, { params: { channel } })
+export function getPaymentStatus(outTradeNo, channel, config = {}) {
+  return http.get(`/api/payments/${outTradeNo}`, { params: { channel }, ...config })
 }
 
 /**
@@ -205,6 +208,29 @@ export function submitProof({ targetType, targetId, proofUrl, paymentNo, payQrId
  */
 export function listRejectedProofs() {
   return http.get('/api/payment-proofs/rejected')
+}
+
+/**
+ * 查某一笔收款的凭证状态（我交过图没有、管理员看过没有）。
+ *
+ * <p><b>给「延后交付」那两类用</b>（包场 / 月卡）：提交凭证之后目标仍停在待支付
+ *（那两类的交付发生在复核通过那一刻），页面要靠它把那一笔显示成「待复核」——
+ * 否则用户看到「待支付 + 去支付」，很可能再去转一次账。
+ *
+ * <p>⚠️ <b>没有凭证时返回的是三个字段全 null 的正常结果，不是 404</b>：
+ * 「还没交图」是最常见的情形，不该在控制台留下一片红。
+ *
+ * <p>⚠️ <b>状态从凭证表读，不在订单上另存一份</b> —— 两份状态漂移时不报任何错，
+ * 只会让用户白等一场（见后端 `ProofStatusVo` 的类注释）。
+ *
+ * @param {object} params
+ * @param {string} params.targetType ORDER / BOOKING / MONTHLY_CARD / PRODUCT
+ * @param {number|string} params.targetId 目标主键
+ * @returns {Promise<{data:{verifyStatus:?string, verifyStatusLabel:?string,
+ *          rejectReason:?string}}>} `verifyStatus` 为 null 表示这一笔还没有凭证
+ */
+export function getProofStatus({ targetType, targetId }) {
+  return http.get('/api/payment-proofs/status', { params: { targetType, targetId } })
 }
 
 /**

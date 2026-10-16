@@ -1,6 +1,7 @@
 package com.kaede.uspace.qqbot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kaede.uspace.common.config.UploadProperties;
 import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.order.PaidCategory;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -24,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -78,7 +81,14 @@ class QqPaymentProofServiceTests {
         client = new RecordingClient();
         orderHandler = new StubTargetHandler(PaymentTargetType.ORDER);
         productHandler = new StubTargetHandler(PaymentTargetType.PRODUCT);
-        service = new QqPaymentProofService(client, null, null, null,
+        // 回复队列的限流关掉（上限 0 = 直发）：默认 3~10 秒一条，
+        // 留着的话每个用例都要真等；队列本身的节奏由 QqReplyQueueTests 管
+        QqbotProperties properties = new QqbotProperties();
+        properties.setReplyMaxInterval(Duration.ZERO);
+        // 取图也用桩：多数用例在「载入目标」那一步就停了，走到取图的用例要的
+        // 只是「闸放行了」这个事实 —— 真去请求那张图会把用例挂到网络上
+        service = new QqPaymentProofService(client, new QqReplyQueue(client, properties),
+                new StubImageFetcher(), null, null,
                 List.of(orderHandler, productHandler), CLOCK);
 
         user = new SysUser();
@@ -181,6 +191,24 @@ class QqPaymentProofServiceTests {
         assertEquals(1, client.groupMessages.size(), "他自己发仍然要认");
     }
 
+    @Test
+    @DisplayName("⚠️ 目标处于「凭证未通过」时要放行 —— 那正是等重传的状态（2026-10-10 加）")
+    void handleImages_allowsRejectedTarget() {
+        service.expect(user, PaymentTargetType.ORDER, ORDER_ID);
+        orderHandler.answer = BizResult.ok(target(PaymentTarget.STATUS_REJECTED));
+
+        service.handleImages(imageEvent(QQ));
+
+        assertEquals(1, client.groupMessages.size());
+        assertFalse(client.groupMessages.get(0).contains("不是待支付状态"),
+                "⚠️ 闸拒了的话，fw付款 撑起了闸、用户发了图，得到的却是"
+                        + "「可能已在网页端完成付款」—— 说反了，他正是没被认账的那一个："
+                        + client.groupMessages.get(0));
+        assertTrue(client.groupMessages.get(0).contains("截图获取失败"),
+                "走到了取图那一步 = 闸确实放行了（取图失败是下一步的事）："
+                        + client.groupMessages.get(0));
+    }
+
     // ==================================================================
     // 只受理一张
     // ==================================================================
@@ -203,6 +231,24 @@ class QqPaymentProofServiceTests {
     // ==================================================================
 
     /**
+     * 取图桩：一律「取不到」。
+     *
+     * <p>它让流程停在闸之后、提交之前 —— 用例要证的恰恰是「闸放行了」，
+     * 而真去请求事件里那个地址会把用例挂到网络上（那个端口没人监听）。
+     */
+    private static class StubImageFetcher extends OneBotImageFetcher {
+
+        StubImageFetcher() {
+            super(new UploadProperties());
+        }
+
+        @Override
+        public byte[] fetch(String url) {
+            return null;
+        }
+    }
+
+    /**
      * 只记下发出的群消息、不碰连接的出站桩。
      */
     private static class RecordingClient extends OneBotClient {
@@ -216,6 +262,14 @@ class QqPaymentProofServiceTests {
 
         @Override
         public boolean sendGroupMessage(Long groupId, String text) {
+            groupMessages.add(text);
+            return true;
+        }
+
+        @Override
+        public boolean sendGroupMessageAt(Long groupId, String atQq, String text) {
+            // 截图受理的回复现在统一带 @（走段数组那条），不覆写的话
+            // 会落到父类的真实实现（没有连接、静默失败），断言全看不到
             groupMessages.add(text);
             return true;
         }

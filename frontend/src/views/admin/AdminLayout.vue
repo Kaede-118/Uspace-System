@@ -1,10 +1,10 @@
 <script setup>
 /**
- * 运营后台的外壳：顶栏 + 七个 tab 的导航 + 子页面出口。
+ * 运营后台的外壳：顶栏 + 八个 tab 的导航 + 子页面出口。
  *
  * <p>与用户端不同，后台<b>没有底部 TabBar</b>（那三个图标是给顾客用的）。
- * 导航放在顶部，七个入口都是 {@code <router-link>}，分两行排
- * （一行四个 —— 单个一行装不下，而横向拉动的入口最难找，见下方样式里的说明）。
+ * 导航放在顶部，八个入口都是 {@code <router-link>}，分两行排
+ * （一行四个，八个正好排满两行 —— 横向拉动的入口最难找，见下方样式里的说明）。
  *
  * <p>⚠️ <b>高亮交给 {@code router-link-active}</b>，不要自己监听路由算当前项 ——
  * 将来加了 {@code /admin/bookings/:id} 这类子路径，手工判断必然会漏，
@@ -19,13 +19,14 @@ import { clear } from '@/stores/user'
 
 const router = useRouter()
 
-/** 七个 tab。顺序即导航顺序，与论文里模块的排列无关，按运营的使用频率排。 */
+/** 八个 tab。顺序即导航顺序，与论文里模块的排列无关，按运营的使用频率排。 */
 const TABS = [
   { to: '/admin/users', icon: '👤', label: '用户' },
   { to: '/admin/notices', icon: '📢', label: '公告' },
   { to: '/admin/devices', icon: '🕹', label: '机台' },
   { to: '/admin/bookings', icon: '📅', label: '包场' },
   { to: '/admin/store', icon: '🏠', label: '门店' },
+  { to: '/admin/orders', icon: '🧾', label: '订单' },
   { to: '/admin/payments', icon: '💳', label: '收款' },
   { to: '/admin/products', icon: '🛍', label: '商品' }
 ]

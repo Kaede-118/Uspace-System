@@ -312,6 +312,42 @@ public final class QqCommandParser {
     private static final Set<String> CANCEL_KEYWORDS = Set.of("取消", "cancel");
 
     /**
+     * 取消那笔待付款商品单（{@code fw取消订单}）。
+     *
+     * <p>它替掉的是 {@link #CANCEL_KEYWORDS} 那道「抄单号」的手续：
+     * 挡着下单的那笔商品单在系统里就是<b>最近的一笔</b>，用户手里那串 20 位数字是多余的。
+     *
+     * <p>⚠️ <b>它与 {@code fw取消 <单号>} 是两条指令，不是同一条的简写</b>：
+     * 这一条只认商品单（没有单号可路由，也就不可能取消到别的类型上去），
+     * 那一条三类都认。多出来的这一条之所以值得，是因为「抄单号」这个动作
+     * 恰恰是用户最不会做对的一步。
+     *
+     * <p>⚠️ <b>名字比行为宽，这是知道的</b>（2026-10-10 由用户定名）：
+     * 「订单」听着像什么都能取消，而它只认商品单 —— 计时订单不许自消、
+     * 月卡与包场走带单号那条。回复里那句「你名下没有待付款的商品单」
+     * 与末尾的 {@code fw未付款} 指路就是补这个落差的。
+     *
+     * <p>⚠️ 它<b>不是</b> {@code fw取消} 的续写：{@code extractCancelOrderNo}
+     * 按前缀匹配「取消」之后要求后面是一串像单号的东西，而「订单」不是
+     *（中文过不了那道形状校验），于是整条落到别名匹配这里。
+     */
+    private static final Set<String> CONFIRM_CANCEL_ALIASES = Set.of("取消订单", "cancelorder");
+
+    /**
+     * 付款（{@code fw付款}）：把「等付款截图」那道闸重新撑起来。
+     *
+     * <p>它补的是一个具体的缺口：撑闸原本只有两条路 —— {@code fw结账} 与群里下单商品，
+     * 都发生在「刚刚」那一刻；一笔出账半天、后来才想起来付的单子在群里没有入口，
+     * 发图出去毫无反应（唯一允许的静默是「根本没在等」）。
+     *
+     * <p>⚠️ <b>英文别名刻意不给</b>：{@code pay} 已经是 {@code fw结账} 的别名
+     *（2026-10-10 由用户定），而英文里「结账」与「付款」本来就是同一个词 ——
+     * 再添一个近义英文词，只会让两条指令更难分。中文这边「结账」是停表、
+     * 「付款」是交钱，界限是清楚的。
+     */
+    private static final Set<String> PAY_ALIASES = Set.of("付款");
+
+    /**
      * 不能当商品名的「保留字」：所有指令的别名与关键词。
      *
      * <p>它是 {@code fw可乐5}（调整库存）识别时的第二道守卫 —— 名字命中这里就
@@ -353,6 +389,8 @@ public final class QqCommandParser {
         names.addAll(WEB_ALIASES);
         names.addAll(VERIFY_KEYWORDS);
         names.addAll(CANCEL_KEYWORDS);
+        names.addAll(CONFIRM_CANCEL_ALIASES);
+        names.addAll(PAY_ALIASES);
         return Set.copyOf(names);
     }
 
@@ -441,6 +479,23 @@ public final class QqCommandParser {
         }
         if (SETTLE_ALIASES.contains(lower)) {
             return QqCommand.settle();
+        }
+        if (PAY_ALIASES.contains(lower)) {
+            return QqCommand.pay();
+        }
+        if (CONFIRM_CANCEL_ALIASES.contains(lower)) {
+            return QqCommand.confirmCancel();
+        }
+        // ⚠️ 以这两条的关键词开头、却多出一截的（fw付款PD2026…、fw确认取消PD2026…），
+        // 落到「没认出这条指令」。放它过去的话，下面商品那条路会把它当成一个
+        // 带数字的<b>商品名</b>去查库存指令，用户收到的是一句
+        // 「未找到名为『确认取消PD2026…』的商品」—— 答非所问，且看不出该发什么
+        //（「打错的指令不该被错怪成商品」那条守卫只比整条，挡不住多出来的这一截）
+        //
+        // ⚠️ 也【刻意不】容忍后面跟单号：容忍了，用户就会以为撤的是他指定的那一笔，
+        // 而 fw确认取消 撤的永远是最近一笔 —— 他名下挂着两笔时，取消的很可能不是他想的那笔
+        if (startsWithAny(lower, PAY_ALIASES) || startsWithAny(lower, CONFIRM_CANCEL_ALIASES)) {
+            return QqCommand.unknownCommand();
         }
         if (BOOKING_ALIASES.contains(lower)) {
             return QqCommand.bookingSchedule();
@@ -851,6 +906,26 @@ public final class QqCommandParser {
             }
         }
         return null;
+    }
+
+    /**
+     * 正文是不是「以某条指令的关键词开头」。
+     *
+     * <p>只服务于「多跟了一截的写法要落回『没认出这条指令』」那一处 ——
+     * 判据刻意比 {@code Set#contains} 松一档：那里要的是整条相等，
+     * 这里要的恰恰是「不相等但看着像」。
+     *
+     * @param body     剥掉前缀、转小写后的正文
+     * @param keywords 关键词集合（别名表）
+     * @return 命中任一关键词的前缀返回 true
+     */
+    private static boolean startsWithAny(String body, Set<String> keywords) {
+        for (String keyword : keywords) {
+            if (body.startsWith(keyword)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

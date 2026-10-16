@@ -18,7 +18,7 @@
  *       与「计费时长」不是一回事</li>
  * </ul>
  */
-import { ref, onMounted, computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getProfile } from '@/api/user'
 import { logout } from '@/api/auth'
@@ -29,9 +29,16 @@ import { getBillingRules } from '@/api/billing'
 import { preferenceLabels } from '@/utils/labels'
 import { userState, setUser, clear, isAdmin } from '@/stores/user'
 import { toastError, toastInfo } from '@/composables/useToast'
+import { useKeepAliveRefresh } from '@/composables/useKeepAliveRefresh'
 import { errorMessage } from '@/utils/error'
 import { formatMoney, formatDuration } from '@/utils/format'
 import UserCard from '@/components/UserCard.vue'
+
+/**
+ * 组件名，供 `App.vue` 的 keep-alive include 列表匹配。
+ * ⚠️ 必须与文件名一致 —— 写错不会报任何错，只是缓存静默失效、返回时仍要重新加载。
+ */
+defineOptions({ name: 'MineView' })
 
 const router = useRouter()
 
@@ -199,7 +206,14 @@ async function onLogout() {
   router.replace('/login')
 }
 
-onMounted(async () => {
+/*
+ * 首次加载 + 从别的页面切回来时的过期刷新，都交给 keep-alive 那个 composable：
+ * 数据还新鲜就【不重新加载】（秒开），过期了才静默补一次。
+ *
+ * ⚠️ 静默刷新失败时同样会弹这句错误提示，这是刻意的 ——
+ * 数据停在旧值却不告诉用户，比弹一句提示更糟（他会以为看到的就是最新的）。
+ */
+useKeepAliveRefresh(async () => {
   try {
     await loadAll()
   } catch (err) {
@@ -207,7 +221,7 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-})
+}, 60000)
 </script>
 
 <template>

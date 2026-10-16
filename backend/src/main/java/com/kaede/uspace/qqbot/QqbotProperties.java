@@ -165,6 +165,31 @@ public class QqbotProperties {
      */
     private Duration writeCommandCooldown = Duration.ofSeconds(5);
 
+    /**
+     * 指令回复的发送间隔下限（如 {@code 3s}）。
+     *
+     * <p>回复不再「算完即发」，而是进 {@link QqReplyQueue} 按节奏一条条发 ——
+     * 连着刷屏正是 QQ 风控盯的特征（2026-10-10 由用户要求）。
+     * <b>连第一条回复也要等</b>（不秒回）—— 秒回同样是特征。
+     *
+     * <p>{@code 0} 表示关闭限流（直发），留给测试与排障，生产别这么配。
+     *
+     * <p>⚠️ <b>{@code fw开门} 与 {@code fw结账} 不受它管</b>：
+     * 人站在门口等密码，压十秒不可接受 —— 那两条直接发，见
+     * {@link QqWriteCommandService}。
+     */
+    private Duration replyMinInterval = Duration.ofSeconds(3);
+
+    /**
+     * 指令回复的发送间隔上限（如 {@code 10s}）。
+     *
+     * <p>每条回复发出前等一段随机时长，均匀落在
+     * {@code [replyMinInterval, replyMaxInterval]} 之间（2026-10-10 由用户定：3~10 秒）——
+     * <b>固定间隔本身也是一种可识别的特征</b>，随机化之后更像人在打字。
+     * 上限配得比下限还小时按下限执行，见 {@link QqReplyQueue#nextDelayMs}。
+     */
+    private Duration replyMaxInterval = Duration.ofSeconds(10);
+
     /** 播报配置 */
     private Broadcast broadcast = new Broadcast();
 

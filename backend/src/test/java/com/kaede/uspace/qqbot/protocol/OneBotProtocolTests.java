@@ -172,10 +172,10 @@ class OneBotProtocolTests {
     }
 
     @Test
-    @DisplayName("协议：带 @ 的群消息以段数组发送，且不传 auto_escape")
+    @DisplayName("协议：带 @ 的群消息以段数组发送、@ 后换行，且不传 auto_escape")
     void action_sendGroupMessageWithAtUsesSegments() throws Exception {
         OneBotAction action = OneBotAction.sendGroupMessageWithAt(
-                1062204057L, "2198047522", " 你的付款凭证没通过复核", "uspace-7");
+                1062204057L, "2198047522", "你的付款凭证没通过复核", "uspace-7");
 
         String json = objectMapper.writeValueAsString(action);
         assertTrue(json.contains("\"action\":\"send_group_msg\""), "动作名与纯文本那条相同");
@@ -184,6 +184,9 @@ class OneBotProtocolTests {
         assertTrue(json.contains("\"qq\":\"2198047522\""),
                 "qq 按规范的 string 类型发（写成数字多数实现也认，但不必去赌）");
         assertTrue(json.contains("\"type\":\"text\""), "正文是一段 text");
+        assertTrue(json.contains("\\n你的付款凭证"),
+                "@ 与正文之间要换行（2026-10-10 由用户要求，全站所有 @ 都走这里）："
+                        + "挤在同一行时，群消息窗口里名字与内容连成一片，读不清哪句是回谁的");
         assertFalse(json.contains("auto_escape"),
                 "段数组形态下刻意不带它：它只对字符串形式的 message 有效，"
                         + "带上会让人误以为这里也在转义");
@@ -193,15 +196,17 @@ class OneBotProtocolTests {
     }
 
     @Test
-    @DisplayName("协议：没绑 QQ 时退化成纯文本段，但消息照发")
+    @DisplayName("协议：没绑 QQ 时退化成纯文本段（也不加换行），但消息照发")
     void action_sendGroupMessageWithAtDegradesWithoutQq() throws Exception {
         OneBotAction action = OneBotAction.sendGroupMessageWithAt(
-                1062204057L, null, " 你的付款凭证没通过复核", "uspace-8");
+                1062204057L, null, "你的付款凭证没通过复核", "uspace-8");
 
         String json = objectMapper.writeValueAsString(action);
         assertFalse(json.contains("\"type\":\"at\""), "没有 QQ 号就不该有 @ 段");
         assertTrue(json.contains("\"type\":\"text\""),
                 "但正文照发 —— 提醒本身比 @ 到人重要，群里的人多半能认出说的是谁");
+        assertFalse(json.contains("\\n"),
+                "没得 @ 时不加换行：正文不该平白多一个开头的空行");
     }
 
     @Test

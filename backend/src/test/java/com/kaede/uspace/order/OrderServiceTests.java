@@ -110,9 +110,14 @@ class OrderServiceTests {
     /** 月卡的两张表。默认没有任何卡，即绝大多数既有用例的场景 */
     private final FakeMonthlyCardMapper cardMapper = new FakeMonthlyCardMapper();
     private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
+    /**
+     * 月卡服务。末位参数是用户表（后台开卡要用），本模块用不到 ——
+     * {@code userMapper} 声明在上面，字段按声明顺序初始化，这里读得到
+     */
     private final MonthlyCardService monthlyCardService = new MonthlyCardService(
             cardMapper.asMapper(), cardOrderMapper.asMapper(),
-            new PromotionProperties(), new BillingProperties(), event -> { });
+            new PromotionProperties(), new BillingProperties(), event -> { },
+            userMapper.asMapper());
 
     /** 免费活动。默认一场都没有 —— 即绝大多数既有用例的场景 */
     private final FakeFreePeriodMapper freePeriodMapper = new FakeFreePeriodMapper();
@@ -537,7 +542,8 @@ class OrderServiceTests {
                 bookingService,
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,
-                orderProperties, lockProperties, eventPublisher, objectMapper);
+                orderProperties, lockProperties, eventPublisher, objectMapper,
+                userMapper.asMapper());
 
         BizResult<OrderOpenVo> result = empty.createOrder(USER_ID, new CreateOrderRequest());
 
@@ -554,7 +560,8 @@ class OrderServiceTests {
                 bookingService,
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,
-                orderProperties, lockProperties, eventPublisher, objectMapper);
+                orderProperties, lockProperties, eventPublisher, objectMapper,
+                userMapper.asMapper());
 
         BizResult<OrderOpenVo> result = noLock.createOrder(USER_ID, new CreateOrderRequest());
 
@@ -1028,20 +1035,31 @@ class OrderServiceTests {
     }
 
     @Test
-    @DisplayName("清场：包场开始后才开的单不按包场开始时刻倒着结算")
-    void settleNonParticipants_skipsOrdersStartedAfterBooking() {
-        LocalDateTime bookingStart = LocalDateTime.now().minusMinutes(5);
+    @DisplayName("清场：晚于包场开始的订单（追溯包场）按当前时刻结算")
+    void settleNonParticipants_settlesLateStartedOrderAtNow() {
+        // 包场 25 分钟前开始，订单在包场开始 10 分钟后才开 —— 这正是追溯包场的样子：
+        // 包场在本时段已经开始之后才创建/付款，下单那一刻准入还拦不住人，
+        // 所以这类订单不但存在、而且合法，同样要清出去
+        LocalDateTime bookingStart = LocalDateTime.now().minusMinutes(25);
         Booking booking = seedPaidBookingAt(USER_ID + 99, bookingStart,
                 LocalDateTime.now().plusHours(2));
-        // 理论上不该存在 —— 包场开始后非参与者已经下不了单。
-        // 真出现（比如人工补录）也不能把结算时刻倒着填到离场之前
-        Order order = seedOrder(USER_ID, OrderStatus.IN_USE, LocalDateTime.now(), null);
+        Order order = seedOrder(USER_ID, OrderStatus.IN_USE,
+                bookingStart.plusMinutes(10), null);
+        order.setPasscode("123456");
 
+        LocalDateTime before = LocalDateTime.now().minusSeconds(2);
         int settled = service.settleNonParticipants(booking);
+        LocalDateTime after = LocalDateTime.now().plusSeconds(2);
 
-        assertEquals(0, settled, "开门时刻晚于包场开始的订单要被跳过");
-        assertEquals(OrderStatus.IN_USE.name(), orderMapper.get(order.getId()).getStatus(),
-                "订单应当原样留在使用中");
+        assertEquals(1, settled, "追溯包场下，晚于包场开始的散客单同样要被清出去");
+        Order saved = orderMapper.get(order.getId());
+        assertEquals(OrderStatus.PENDING_PAYMENT.name(), saved.getStatus(),
+                "订单应被结算（玩了 15 分钟，有金额，转待支付）");
+        assertFalse(saved.getEndTime().isBefore(before),
+                "结算时刻不能在开门之前 —— 按包场开始时刻倒着结算会算出负时长");
+        assertFalse(saved.getEndTime().isAfter(after),
+                "结算时刻应当就是当前时刻");
+        assertEquals(1, lockService.deleteCalls(), "清场要撤销密码");
     }
 
     @Test
@@ -1937,7 +1955,7 @@ class OrderServiceTests {
                 billingService, freePeriodService, monthlyCardService, lockService,
                 inviteTokenService,
                 orderProperties, lockProperties, eventPublisher,
-                objectMapper);
+                objectMapper, userMapper.asMapper());
     }
 
     /**

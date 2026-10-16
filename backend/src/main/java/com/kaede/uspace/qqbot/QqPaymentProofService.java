@@ -99,6 +99,14 @@ public class QqPaymentProofService {
 
     private final OneBotClient client;
 
+    /**
+     * 回复的发送队列：限速（默认 10±3 秒一条）并 @ 传图的人。
+     *
+     * <p>截图受理的几条回复（受理成功 / 超时 / 取图失败）同样走它 ——
+     * 它们与指令回复是同一条链路的延续，没有理由走两种节奏。
+     */
+    private final QqReplyQueue replyQueue;
+
     private final OneBotImageFetcher imageFetcher;
 
     private final PaymentProofImageService proofImageService;
@@ -129,12 +137,14 @@ public class QqPaymentProofService {
     private final Map<String, Waiting> waiting = new ConcurrentHashMap<>();
 
     public QqPaymentProofService(OneBotClient client,
+                                QqReplyQueue replyQueue,
                                 OneBotImageFetcher imageFetcher,
                                 PaymentProofImageService proofImageService,
                                 PaymentProofService paymentProofService,
                                 List<PaymentTargetHandler> handlers,
                                 Clock clock) {
         this.client = client;
+        this.replyQueue = replyQueue;
         this.imageFetcher = imageFetcher;
         this.proofImageService = proofImageService;
         this.paymentProofService = paymentProofService;
@@ -192,8 +202,7 @@ public class QqPaymentProofService {
 
         if (pending.at().plus(WAIT_WINDOW).isBefore(LocalDateTime.now(clock))) {
             waiting.remove(qq);
-            client.sendGroupMessage(groupId,
-                    "该截图超过 5 分钟的受理时限，已不再受理。如需补交付款截图，请重新发送 fw结账 指令。");
+            replyQueue.submit(groupId, event.getUserId(), QqReplyText.screenshotExpired());
             return;
         }
 
@@ -203,15 +212,21 @@ public class QqPaymentProofService {
         PaymentTarget target = loaded != null && loaded.isSuccess() ? loaded.getData() : null;
         if (target == null) {
             waiting.remove(qq);
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, event.getUserId(),
                     "未找到待付订单，付款截图未提交。请前往网页端查看订单列表。");
             return;
         }
-        if (!target.isPendingPayment()) {
+        // ⚠️ REJECTED 要放行（2026-10-10 加）：那正是「请重新上传一张」的状态，
+        // 而这条路上「重传」与「首次付款」是同一个动作。不放行的话，
+        // fw付款 对那些单子撑起了闸、用户发了图，得到的却是一句
+        //「可能已在网页端完成付款」—— 说反了，他正是没被认账的那个。
+        // 网页端那条路本来就允许重传（见 PaymentProofService#submit 的五个分支），
+        // 这里只是把群内这条对齐过去，没有多开一条路。
+        if (!target.isPendingPayment() && !target.isRejected()) {
             // ⚠️ 这就是「走了网页途径就取消接受群内图片」：不做通知，只在这里回查一次状态。
             // 用户在网页端付过之后，这张图不该再提交一遍（会撞 uk_target，也没有意义）
             waiting.remove(qq);
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, event.getUserId(),
                     "该订单已不是待支付状态（可能已在网页端完成付款），本次截图未重复提交。");
             return;
         }
@@ -219,15 +234,14 @@ public class QqPaymentProofService {
         List<OneBotImage> images = event.images();
         byte[] bytes = imageFetcher.fetch(images.get(0).url());
         if (bytes == null) {
-            // 与「图太大」「地址取不到」等情形同一句：反正就是没收到，让他重发或走网页
-            client.sendGroupMessage(groupId,
-                    "截图获取失败（可能超出大小上限），请重新发送，或前往网页端上传。");
+            // 与「图太大」「地址取不到」等情形同一句：反正就是没收到，让他重发
+            replyQueue.submit(groupId, event.getUserId(), QqReplyText.screenshotFetchFailed());
             return;
         }
 
         BizResult<ProofImageVo> stored = proofImageService.upload(bytes, pending.userId());
         if (!stored.isSuccess()) {
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, event.getUserId(),
                     "截图受理失败：" + stored.resolveMessage() + "。请前往网页端上传一张清晰的截图。");
             return;
         }
@@ -240,14 +254,14 @@ public class QqPaymentProofService {
         waiting.remove(qq);
 
         if (!submitted.isSuccess()) {
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, event.getUserId(),
                     "付款截图提交失败：" + submitted.resolveMessage() + "。请前往网页端重新上传。");
             return;
         }
 
         // isDelivered 一并报给用户：识别到有效单号的那两类当场就结清了，
         // 没识别到的还挂在待复核上 —— 两句话必须分开说，否则他会以为钱已经算数了
-        client.sendGroupMessage(groupId, QqReplyText.proofAccepted(
+        replyQueue.submit(groupId, event.getUserId(), QqReplyText.proofAccepted(
                 target.getOutTradeNo(), stored.getData().getOcrAmount(),
                 stored.getData().getOcrPaymentNo(), submitted.getData().isDelivered()));
         log.info("[QQ机器人] 群内付款截图已受理 target={}#{} 单号={}",

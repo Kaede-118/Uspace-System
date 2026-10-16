@@ -604,18 +604,65 @@ export function listAdminProductOrders(params = {}) {
 /* ==================== 月卡 ==================== */
 
 /**
- * 分页查月卡（本期只读，无退款接口）。
+ * 分页查月卡。
+ *
+ * <p>用户页的「月卡」弹层用它查某个人名下的卡（固定传 `userId`）——
+ * 开卡 / 停卡之前要先看清他手上有什么。
  *
  * @param {object} [params]
  * @param {number} [params.pageNum]  页码（⚠️ 这里用 pageNum，不是 page）
  * @param {number} [params.pageSize] 每页条数
  * @param {number|string} [params.userId] 按用户筛
- * @param {string} [params.status] ACTIVE / EXPIRED
- * @param {string} [params.cardType] ALL_DAY / NIGHT
+ * @param {string} [params.status] ACTIVE / EXPIRED / REFUNDED / REVOKED
+ * @param {string} [params.cardType] ALL_DAY / NIGHT / STAFF
  * @returns {Promise<{data:{total, current, size, records}}>}
+ *          `records` 每项含 `effective`（此刻是否真正生效，后端算好的）、
+ *          `remainingDays`（不生效与 STAFF 卡为 null）
  */
 export function listAdminCards(params = {}) {
   return http.get('/api/admin/cards', { params })
+}
+
+/**
+ * 给指定用户开一张卡（面对面收款场景）。
+ *
+ * <p><b>它补的是「用户自己线上购买」之外的那条路</b>：顾客在店里当面付了钱，
+ * 管理员在这里一次点完，不必让他在商城再下单、再传截图走复核。测试也走它。
+ *
+ * <p>⚠️ **STAFF 卡只能从这里发** —— 它不在商城的在售列表里，
+ * 用户端购买接口对它一律拒绝（`paramInvalid`）。
+ *
+ * <p>规则按卡种分岔（后端 `MonthlyCardService#issueCard`）：
+ * STAFF 卡无价、到期日填远期日期、**不校验已有卡**（可与月卡并存）；
+ * 普通卡校验「已有生效卡」会被拒绝（`CARD_ALREADY_ACTIVE` 40924）。
+ *
+ * @param {object} data
+ * @param {number|string} data.userId 持卡人用户 ID
+ * @param {string} data.cardType ALL_DAY / NIGHT / STAFF
+ * @param {number|string} [data.price] 实收金额（元），选填：不传按配置价。
+ *   填 0 表示不收钱（赠送、测试），那笔不记进累计消费；STAFF 卡忽略此字段
+ * @returns {Promise<{data:{id, cardNo, cardType, startDate, endDate, ...}}>}
+ * @throws 40401 用户不存在；40924 该用户已有生效卡（仅普通卡）
+ */
+export function issueCard(data) {
+  return http.post('/api/admin/cards', data)
+}
+
+/**
+ * 停用一张卡（收回权益）—— **只停卡，不动钱**。
+ *
+ * <p>两个真实场景：STAFF 卡随人离职要收回；发错了对象（选错用户、选错卡种）
+ * 要立刻止住。效果是「下一笔结算起不再免单」（判定只认生效中），
+ * 已经结算过的订单一分不动；已收的卡费退不退是线下的事，与卡的状态无关。
+ *
+ * <p>⚠️ 只受理生效中的卡：重复点两下第二次返回 40926
+ * （`CARD_STATUS_INVALID`），而不是静默成功；已退款的卡也不会被它覆盖成「已停用」。
+ *
+ * @param {number|string} id 卡 ID
+ * @returns {Promise<{data:object}>} 停用后的卡（status 为 REVOKED）
+ */
+export function revokeCard(id) {
+  return http.post(`/api/admin/cards/${id}/revoke`)
 }
 
 /* ==================== 门锁（应急） ==================== */

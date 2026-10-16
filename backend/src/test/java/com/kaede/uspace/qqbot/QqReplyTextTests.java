@@ -47,21 +47,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class QqReplyTextTests {
 
+    /**
+     * 群内传截图的统一措辞（2026-10-10 由用户定）。
+     *
+     * <p>⚠️ <b>本类不引用 {@code QqReplyText} 里那个私有常量</b>：
+     * 测试的意义正在于「照着需求把这句话独立写一遍」，两边同时被改才叫改对了 ——
+     * 引用同一个常量的话，把措辞改坏时测试会跟着一起变绿。
+     */
+    private static final String SCREENSHOT_SENTENCE =
+            "在五分钟内发送带交易单号的付款凭证截图到群内";
+
     // ==================================================================
     // 凭证被驳回的提醒
     // ==================================================================
 
     @Test
-    @DisplayName("凭证驳回提醒：带上原因与入口，且开头留一个空格给 @ 段")
+    @DisplayName("凭证驳回提醒：带上原因与入口，正文不以空格开头（@ 后由段数组统一换行）")
     void proofRejected_carriesReasonAndLink() {
         String text = QqReplyText.proofRejected("截图看不清金额", "http://host/#/orders");
 
         assertTrue(text.contains("截图看不清金额"),
                 "原因是管理员写给顾客看的那句话，必须原样出现 —— 少了它用户不知道该改什么");
         assertTrue(text.contains("http://host/#/orders"), "要给一个点得进去的入口");
-        assertTrue(text.startsWith(" "),
-                "开头那个空格是给 @ 段留的：不留的话群里会显示成"
-                        + "「@张三你的付款凭证……」两截挤在一起");
+        assertFalse(text.startsWith(" "),
+                "正文不该以空格开头（2026-10-10 起）：@ 与正文之间的换行"
+                        + "已由 OneBotAction#sendGroupMessageWithAt 统一加，"
+                        + "再留空格就成了新行开头的多余缩进");
     }
 
     @Test
@@ -451,6 +462,8 @@ class QqReplyTextTests {
         assertTrue(text.contains("薯片 --- ¥5.00 -- 余（0）"),
                 "卖完就是余（0），不另起一个「售罄」的说法：" + text);
         assertTrue(text.contains("共 2 种"), text);
+        assertTrue(text.contains("fw买个xx 或 fw买n个xx 或 fwxx-数量"),
+                "三种下单写法要与 fw帮助 里那张表一致（2026-10-10 由用户要求）：" + text);
         assertTrue(text.contains("http://x/#/mall"), "要给下单入口：" + text);
     }
 
@@ -693,8 +706,8 @@ class QqReplyTextTests {
         assertTrue(text.contains("可乐 500ml ×2"), text);
         assertTrue(text.contains("¥7.00"), "金额保留两位小数：" + text);
         assertTrue(text.contains("PD202610040127111234"), text);
-        assertTrue(text.contains("http://x/#/product-orders"), "付款入口不能少：" + text);
-        assertTrue(text.contains("付款截图直接发送到群里"), "群内传图那条路的入口要说明：" + text);
+        assertTrue(text.contains("网页付款：http://x/#/product-orders"), "付款入口不能少：" + text);
+        assertTrue(text.contains("也可以" + SCREENSHOT_SENTENCE), "群内传图那条路的入口要说明：" + text);
         assertTrue(text.contains("付款后请自行取货"),
                 "无人值守店里没有店员，不写这一句他会站在店里等店员递给他：" + text);
     }
@@ -738,6 +751,30 @@ class QqReplyTextTests {
                 .contains("99"), "范围提示要原样带出来");
         assertTrue(QqReplyText.productOrderFailure(null, "服务端炸了", "u").contains("服务端炸了"),
                 "未知错误码时要把服务端给的话带出来");
+    }
+
+    @Test
+    @DisplayName("商品下单被旧单挡下：两个出口都写成群指令，不必回网页端")
+    void productOrderFailure_unpaidPointsToGroupCommands() {
+        String text = QqReplyText.productOrderFailure(ErrorCode.PRODUCT_UNPAID_EXISTS,
+                "你有一笔未付款的商品单（PD202610081130074395），请先完成支付或取消该单",
+                "http://x/#/product-orders");
+
+        assertTrue(text.contains("fw取消订单"),
+                "⚠️ 取消这一笔在群里就能办（那是用户读到这条消息时最想做的事）：" + text);
+        assertTrue(text.contains("fw付款"),
+                "付款截图入口也要一并给出来，否则他只能自己猜：「那怎么付」：" + text);
+    }
+
+    @Test
+    @DisplayName("商品下单失败：凭证被驳回时指路 fw付款 重传，并提醒别重复付款")
+    void productOrderFailure_rejectedPointsToPayCommand() {
+        String text = QqReplyText.productOrderFailure(
+                ErrorCode.PRODUCT_PROOF_REJECTED, null, "http://x/#/product-orders");
+
+        assertTrue(text.contains("fw付款"), "重传这件事在群里就能做：" + text);
+        assertTrue(text.contains("请勿重复支付"),
+                "⚠️ 驳回把单子退回了待支付，不提醒的话他会真的付第二遍：" + text);
     }
 
     // ==================================================================
@@ -846,8 +883,34 @@ class QqReplyTextTests {
         assertFalse(QqReplyText.settleDone(new BigDecimal("12"), false, "http://x/settle")
                         .contains("12"),
                 "⚠️ 金额开关关掉时不能报数 —— 回复是群消息，全群可见");
-        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "u").contains("付款截图直接发送到群里"),
+        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "u")
+                        .contains("也可以" + SCREENSHOT_SENTENCE),
                 "「群内传图」那条路的入口只在这里说明，少了它没人会想到可以发图");
+        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "u").contains("网页付款：u"),
+                "付款入口那行的标签统一叫「网页付款」（2026-10-10 由用户定）");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：0 元结算的判据与「无需支付」文案同源 —— 少判一步闸就会撑错")
+    void isFreeOfCharge_alignsWithSettleDone() {
+        // 判据本身：null 与 0 都算无需支付（"0.00" 是 DECIMAL 求和后的常见标度，别用 equals 比）
+        assertTrue(QqReplyText.isFreeOfCharge(null), "账单缺失按无需支付处理，与文案一致");
+        assertTrue(QqReplyText.isFreeOfCharge(BigDecimal.ZERO));
+        assertTrue(QqReplyText.isFreeOfCharge(new BigDecimal("0.00")));
+        assertFalse(QqReplyText.isFreeOfCharge(new BigDecimal("0.01")), "一分钱也是钱");
+        assertFalse(QqReplyText.isFreeOfCharge(new BigDecimal("8")));
+
+        // 与文案的对应关系：说「无需支付」的那些金额，等图闸也不该撑
+        // （QqWriteCommandService#settle 用它的取反决定要不要登记等图）；
+        // 反过来，报了金额的那些必须有闸 —— 否则用户发图石沉大海。
+        // 2026-10-10 的现场 bug 正是这里错开：0 元结账后发了个表情，
+        // 机器人回「可能已在网页端完成付款」，而他那笔本来就无需付
+        for (BigDecimal amount : List.of(BigDecimal.ZERO, new BigDecimal("0.00"),
+                new BigDecimal("8"), new BigDecimal("332.50"))) {
+            boolean saysFree = QqReplyText.settleDone(amount, true, "u").contains("无需支付");
+            assertEquals(saysFree, QqReplyText.isFreeOfCharge(amount),
+                    "文案与闸判据必须同源，金额=" + amount);
+        }
     }
 
     @Test
@@ -860,7 +923,7 @@ class QqReplyTextTests {
         assertTrue(text.contains("OD202610040116074492"), text);
         assertTrue(text.contains("http://x/#/orders/2516"),
                 "这是「截图等超时了」之后唯一的回头路，没有入口这条回复就白说了：" + text);
-        assertTrue(text.contains("付款截图直接发送到群里"), "回头路上要再说明一次可以发图：" + text);
+        assertTrue(text.contains("也可以" + SCREENSHOT_SENTENCE), "回头路上要再说明一次可以发图：" + text);
     }
 
     @Test
@@ -1042,9 +1105,76 @@ class QqReplyTextTests {
         assertTrue(text.contains("没有正在计时的订单"), text);
         assertTrue(text.contains("¥3.00"), text);
         assertTrue(text.contains("http://x/#/orders"), text);
+        assertTrue(text.contains("fw付款 或 fw结账"),
+                "要指路那两条指令（2026-10-10 由用户要求）—— 它们才是重新拿到入口的路：" + text);
         assertFalse(text.contains("截图"),
                 "⚠️「截图发群里」是发过 fw结账 才有的待遇（那道闸要撑起来）——"
                         + "这里说了，用户会发一张石沉大海的图：" + text);
+    }
+
+    // ==================================================================
+    // 群内传截图：统一措辞（2026-10-10 由用户定）
+    // ==================================================================
+
+    @Test
+    @DisplayName("传截图那句：凡是受理它的回复都用同一句，且一律带「交易单号」")
+    void screenshotSentence_isUnified() {
+        // 有网页付款入口的几条 —— 都该是「网页付款：<url>」+「也可以…」
+        assertTrue(QqReplyText.settleDone(new BigDecimal("12"), true, "http://x/1")
+                .contains("也可以" + SCREENSHOT_SENTENCE), "fw结账");
+        assertTrue(QqReplyText.settleAlreadyStopped(
+                        "OD1", new BigDecimal("12"), true, "http://x/2")
+                .contains("也可以" + SCREENSHOT_SENTENCE), "fw结账 的回头路");
+        assertTrue(QqReplyText.payArmed("商品单", "PD1", new BigDecimal("3.5"), true,
+                        "http://x/3", false)
+                .contains("也可以" + SCREENSHOT_SENTENCE), "fw付款（还没付的那一类）");
+        assertTrue(QqReplyText.payMultiple(List.of(
+                        new UnpaidBill("计时", null, "OD1", new BigDecimal("8.00"),
+                                "待支付", false, true),
+                        new UnpaidBill("商品", "可乐 ×1", "PD1", new BigDecimal("3.50"),
+                                "待支付", true, true)),
+                        true, "http://x/4")
+                .contains("也可以" + SCREENSHOT_SENTENCE), "fw付款（多笔）");
+
+        // 闸没撑起来的几条 —— 那句之前必须先让人发 fw付款，否则发图石沉大海
+        assertTrue(QqReplyText.unpaidBills(List.of(
+                        new UnpaidBill("计时", null, "OD1", new BigDecimal("8.00"),
+                                "待支付", false, true)),
+                        true, "http://x/5")
+                .contains("fw付款，之后" + SCREENSHOT_SENTENCE), "fw未付款 的清单");
+
+        // 等重传 / 等超时 / 图没取到 —— 闸已经在等图，用光秃秃那一句
+        assertTrue(QqReplyText.payArmed("商品单", "PD1", new BigDecimal("3.5"), true,
+                        "http://x/6", true)
+                .contains(SCREENSHOT_SENTENCE), "fw付款（被驳回的那一类）");
+        assertTrue(QqReplyText.screenshotExpired().contains(SCREENSHOT_SENTENCE), "等图超时");
+        assertTrue(QqReplyText.screenshotFetchFailed().contains(SCREENSHOT_SENTENCE), "图没取到");
+    }
+
+    @Test
+    @DisplayName("截图受理：没结清时只说「等人工复核」，一个字都不许诺怎么换一张")
+    void proofAccepted_doesNotPromiseAnotherImage() {
+        String text = QqReplyText.proofAccepted("OD202610101108047059", null, null, false);
+
+        assertTrue(text.contains("尚未结清"), text);
+        assertFalse(text.contains("重新发送"),
+                "⚠️ 这张图一提交，这次等待就结束了（服务里把它从等待表里移除了）—— "
+                        + "让他「再发一张更清晰的」是一句做不到的话，那张图只会石沉大海：" + text);
+        assertFalse(text.contains("网页端") || text.contains("重新上传"),
+                "⚠️ 网页端此刻也没有重传入口：那张面板只在「待支付 / 凭证未通过 / 已驳回」"
+                        + "三种情形出现（OrderDetailView 的 v-if），待复核时不出现 —— "
+                        + "指过去等于让他白找一圈（2026-10-10 由用户两轮指出）：" + text);
+    }
+
+    @Test
+    @DisplayName("等图超时：指路 fw付款（不是 fw结账 —— 商品单不听它的）")
+    void screenshotExpired_pointsToPayCommand() {
+        String text = QqReplyText.screenshotExpired();
+
+        assertTrue(text.contains("fw付款"), text);
+        assertFalse(text.contains("fw结账"),
+                "⚠️ 等图的可能是商品单，而 fw结账 只管房间订单 —— "
+                        + "对着一笔商品单让他「重新发送 fw结账」，他发完什么也不会发生：" + text);
     }
 
     // ==================================================================
@@ -1055,10 +1185,12 @@ class QqReplyTextTests {
     @DisplayName("未付款清单：四类都列出来，状态里带下一步动作")
     void unpaidBills_listsAllTypes() {
         List<UnpaidBill> bills = List.of(
-                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false),
-                new UnpaidBill("包场", "BK202610101200005678", new BigDecimal("60.00"), "待付款", true),
-                new UnpaidBill("商品", "PD202610101200009012", new BigDecimal("3.50"),
-                        "凭证未通过，请重新上传付款截图", true));
+                new UnpaidBill("计时", null, "OD202610101200001234", new BigDecimal("8.00"),
+                        "待支付", false, true),
+                new UnpaidBill("包场", null, "BK202610101200005678", new BigDecimal("60.00"),
+                        "待付款", true, false),
+                new UnpaidBill("商品", "可乐 ×2", "PD202610101200009012", new BigDecimal("3.50"),
+                        "凭证未通过，请重新上传付款截图", true, true));
 
         String text = QqReplyText.unpaidBills(bills, true, "http://localhost:5173/#/orders");
 
@@ -1066,22 +1198,31 @@ class QqReplyTextTests {
         assertTrue(text.contains("OD202610101200001234"), text);
         assertTrue(text.contains("BK202610101200005678"), text);
         assertTrue(text.contains("PD202610101200009012"), text);
+        assertTrue(text.contains("可乐 ×2"),
+                "⚠️ 商品名称要印出来（2026-10-10 由用户要求）：同时挂着两笔商品单时，"
+                        + "只差单号的两行谁也认不出哪行是哪一笔：" + text);
         assertTrue(text.contains("¥60.00"), text);
         assertTrue(text.contains("凭证未通过，请重新上传付款截图"),
                 "状态要带下一步动作，否则用户知道出了事但不知道做什么：" + text);
         assertTrue(text.contains("fw取消"), "有可取消的单子时要给出取消入口：" + text);
+        assertTrue(text.contains("fw付款"),
+                "有能在群里付的单子时，要把「发截图」那条路也写出来（2026-10-10 由用户要求）——"
+                        + "只指路网页端的话，人就在群里、钱也刚转出去，却要多开一次浏览器：" + text);
     }
 
     @Test
     @DisplayName("未付款清单：全是计时订单时不提取消（欠费不能自消，那条提示是空话）")
     void unpaidBills_omitsCancelHintWhenNothingCancelable() {
         List<UnpaidBill> bills = List.of(
-                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false));
+                new UnpaidBill("计时", null, "OD202610101200001234", new BigDecimal("8.00"),
+                        "待支付", false, true));
 
         String text = QqReplyText.unpaidBills(bills, true, "http://localhost:5173/#/orders");
 
         assertFalse(text.contains("fw取消"),
                 "⚠️ 提示了却没一条能取消 —— 用户照做只会被拒，那比不提更糟：" + text);
+        assertTrue(text.contains("fw付款"),
+                "计时订单虽然不能自消，但它是能在群里付款的那一类：" + text);
     }
 
     @Test
@@ -1093,10 +1234,28 @@ class QqReplyTextTests {
     }
 
     @Test
+    @DisplayName("未付款清单：只有包场与月卡时不提 fw付款（那两类不在群内撑闸的范围里）")
+    void unpaidBills_omitsPayHintWhenNothingGroupPayable() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("包场", null, "BK202610101200005678", new BigDecimal("60.00"),
+                        "待付款", true, false),
+                new UnpaidBill("月卡", "全天月卡", "MC202610101200003456", new BigDecimal("600.00"),
+                        "待付款", true, false));
+
+        String text = QqReplyText.unpaidBills(bills, true, "http://localhost:5173/#/orders");
+
+        assertFalse(text.contains("fw付款"),
+                "⚠️ 对着一笔包场说「可发 fw付款」，用户照做只会得到"
+                        + "「你没有待付款的计时订单或商品单」—— 那比不提更糟：" + text);
+        assertTrue(text.contains("全天月卡"), "卡种要印出来（600 与 320 差着一倍）：" + text);
+    }
+
+    @Test
     @DisplayName("未付款清单：金额开关关掉时不报数，单号照给")
     void unpaidBills_hidesAmountsWhenDisabled() {
         List<UnpaidBill> bills = List.of(
-                new UnpaidBill("计时", "OD202610101200001234", new BigDecimal("8.00"), "待支付", false));
+                new UnpaidBill("计时", null, "OD202610101200001234", new BigDecimal("8.00"),
+                        "待支付", false, true));
 
         String text = QqReplyText.unpaidBills(bills, false, "http://localhost:5173/#/orders");
 
@@ -1107,7 +1266,7 @@ class QqReplyTextTests {
     @Test
     @DisplayName("取消：成功文案报出释放了什么；计时订单的拒绝文案指路 fw结账")
     void cancelDoneAndRefused() {
-        String done = QqReplyText.cancelDone("商品", "PD202610101200009012", "占用的库存已释放");
+        String done = QqReplyText.cancelDone("商品", null, "PD202610101200009012", "占用的库存已释放");
         assertTrue(done.contains("已取消"), done);
         assertTrue(done.contains("PD202610101200009012"), done);
         assertTrue(done.contains("库存已释放"), done);
@@ -1116,6 +1275,104 @@ class QqReplyTextTests {
         assertTrue(refused.contains("不支持"), refused);
         assertTrue(refused.contains("fw结账"),
                 "「不行」之外必须指路，否则用户下一步无从下手：" + refused);
+    }
+
+    @Test
+    @DisplayName("取消：有名称时把名称也报出来（两笔同类单只差单号时，他才知道关掉的是哪一笔）")
+    void cancelDone_reportsTitleWhenPresent() {
+        String done = QqReplyText.cancelDone(
+                "商品", "可乐 ×2", "PD202610101200009012", "占用的库存已释放");
+
+        assertTrue(done.contains("「可乐 ×2」"), done);
+        assertTrue(done.contains("PD202610101200009012"), done);
+    }
+
+    @Test
+    @DisplayName("fw取消订单：没有商品单时只说商品单，并指路 fw未付款")
+    void cancelNothingPending_scopesToProduct() {
+        String text = QqReplyText.cancelNothingPending();
+
+        assertTrue(text.contains("没有待付款的商品单"),
+                "⚠️ 口径只能说到商品单 —— 说成「你没有未付款的单」是个错误结论，"
+                        + "他可能正欠着一笔房间费：" + text);
+        assertTrue(text.contains("fw未付款"), "要接住「那我还有什么没付」这一问：" + text);
+    }
+
+    @Test
+    @DisplayName("fw取消订单：撞上被驳回的单时不能取消，给两条真能走的路")
+    void cancelRejected_pointsToPayAndAdmin() {
+        String text = QqReplyText.cancelRejected("PD202610101200009012");
+
+        assertTrue(text.contains("不能取消"), text);
+        assertTrue(text.contains("fw付款"), "重传是最近的一条路：" + text);
+        assertTrue(text.contains("请勿重复支付"),
+                "⚠️ 他可能真的付过，不提醒就会付第二遍：" + text);
+    }
+
+    @Test
+    @DisplayName("fw付款：还没付的报金额与入口；被驳回的说重传、不再报金额")
+    void payArmed_splitsRejectedFromUnpaid() {
+        String unpaid = QqReplyText.payArmed("商品单", "PD202610101200009012",
+                new BigDecimal("3.50"), true, "http://x/#/product-orders", false);
+        assertTrue(unpaid.contains("PD202610101200009012"), unpaid);
+        assertTrue(unpaid.contains("¥3.50"), unpaid);
+        assertTrue(unpaid.contains("http://x/#/product-orders"), unpaid);
+        assertTrue(unpaid.contains("截图"), "撑闸这件事要让用户知道（那句提示是唯一入口）：" + unpaid);
+
+        String rejected = QqReplyText.payArmed("商品单", "PD202610101200009012",
+                new BigDecimal("3.50"), true, "http://x/#/product-orders", true);
+        assertTrue(rejected.contains("重新上传"), rejected);
+        assertFalse(rejected.contains("3.50"),
+                "⚠️ 他付过一遍了，再报一次金额只会让他以为要付第二次：" + rejected);
+        assertTrue(rejected.contains("请勿重复支付"), rejected);
+    }
+
+    @Test
+    @DisplayName("fw付款：名下多笔时先受理第 1 笔，并说清这次等的是哪一笔的截图")
+    void payMultiple_armsFirstAndSaysSo() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("计时", null, "OD202610101200001234", new BigDecimal("8.00"),
+                        "待支付", false, true),
+                new UnpaidBill("商品", "可乐 ×2", "PD202610101200009012", new BigDecimal("7.00"),
+                        "待支付", true, true));
+
+        String text = QqReplyText.payMultiple(bills, true, "http://x/#/orders/9");
+
+        assertTrue(text.contains("2 笔"), text);
+        assertTrue(text.contains("OD202610101200001234"), text);
+        assertTrue(text.contains("可乐 ×2"), "哪一笔是哪一笔要说清：" + text);
+        assertTrue(text.contains("http://x/#/orders/9"), "付款入口要给本次受理那一笔的：" + text);
+        assertTrue(text.contains("第 1 笔"),
+                "⚠️ 必须写清这次等的是哪一笔的截图 —— 截图认不出自己属于哪一笔，"
+                        + "落到哪笔完全取决于撑闸时对着谁，不写他只能事后去猜：" + text);
+        assertTrue(text.contains("fw付款"),
+                "要告诉他剩下那笔怎么办（再发一次）—— 否则这条路到此为止：" + text);
+    }
+
+    @Test
+    @DisplayName("fw付款：金额开关关掉时清单不报数，单号照给")
+    void payMultiple_hidesAmountsWhenDisabled() {
+        List<UnpaidBill> bills = List.of(
+                new UnpaidBill("计时", null, "OD202610101200001234", new BigDecimal("8.00"),
+                        "待支付", false, true),
+                new UnpaidBill("商品", "可乐 ×2", "PD202610101200009012", new BigDecimal("7.00"),
+                        "待支付", true, true));
+
+        String text = QqReplyText.payMultiple(bills, false, "http://x/#/orders/9");
+
+        assertFalse(text.contains("8.00"), text);
+        assertFalse(text.contains("7.00"), text);
+        assertTrue(text.contains("PD202610101200009012"), text);
+    }
+
+    @Test
+    @DisplayName("商品名称：名字 + 数量，两笔同类单才分得清")
+    void productTitle_showsNameAndQuantity() {
+        ProductOrderVo order = new ProductOrderVo();
+        order.setProductName("可乐 500ml");
+        order.setQuantity(2);
+
+        assertEquals("可乐 500ml ×2", QqReplyText.productTitle(order));
     }
 
     @Test

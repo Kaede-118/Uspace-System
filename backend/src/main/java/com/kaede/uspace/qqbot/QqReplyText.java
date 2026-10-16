@@ -87,14 +87,38 @@ public final class QqReplyText {
     private static final DateTimeFormatter DATE_TIME = DateTimeFormatter.ofPattern("M月d日 HH:mm");
 
     /**
-     * 「付完可以发群里」那句 —— 群内传截图那条路的<b>唯一入口说明</b>。
+     * 付款截图那条路的受理窗口，<b>以文字形式</b>。
      *
-     * <p>两条结账回复共用它：不写出来没人会想到可以直接发图，而各写一份的话，
-     * 改了时限（{@code QqPaymentProofService.WAIT_WINDOW}）必然漏掉一处，
-     * 表现为群里说的时限与系统实际受理的时限不一致。
+     * <p>单独一个常量：这条时限在多处文案里出现，各写一份的话，
+     * 改了 {@code QqPaymentProofService.WAIT_WINDOW} 必然漏掉一处 ——
+     * 表现为群里说的时限与系统实际受理的对不上，而用户没有任何办法看出来。
      */
-    private static final String PAY_BY_GROUP_HINT =
-            "\n付款后也可将付款截图直接发送到群里（5 分钟内有效）。";
+    private static final String PAY_WINDOW = "五分钟内";
+
+    /**
+     * 群内传付款截图的统一说法（2026-10-10 由用户定）。
+     *
+     * <p><b>凡是受理付款截图的地方都用这一句</b>，三个信息一个都不能少：
+     * 时限（{@link #PAY_WINDOW}）、<b>要带交易单号</b>（单号是 OCR 勾稽的抓手 ——
+     * 认得出单号的那两类当场结清，认不出的只能挂人工复核，而用户并不知道这一层）、
+     * 以及发到哪里（群内）。
+     *
+     * <p>三种前缀各对应一种上下文，别混用：
+     * <ul>
+     *   <li>{@link #PAY_SCREENSHOT_ALSO} —— 前面刚给过「网页付款：&lt;url&gt;」</li>
+     *   <li>{@link #PAY_SCREENSHOT_AFTER_ARM} —— 闸还没撑起来，得先发
+     *       {@code fw付款}（{@code fw未付款} 的清单就是这种）</li>
+     *   <li>光秃秃这一句 —— 闸已经在等图，或没有网页入口可给</li>
+     * </ul>
+     */
+    private static final String PAY_SCREENSHOT_TEXT =
+            "在" + PAY_WINDOW + "发送带交易单号的付款凭证截图到群内。";
+
+    /** 前面已有「网页付款：{@code <url>}」时的那一版 */
+    private static final String PAY_SCREENSHOT_ALSO = "也可以" + PAY_SCREENSHOT_TEXT;
+
+    /** 闸还没撑起来、要先发一条指令时的那一版 */
+    private static final String PAY_SCREENSHOT_AFTER_ARM = "也可发送 fw付款，之后" + PAY_SCREENSHOT_TEXT;
 
     /**
      * 认不出指令时的提示。
@@ -230,8 +254,14 @@ public final class QqReplyText {
         StringBuilder text = new StringBuilder(displayName(user.getNickname(), user.getId()));
 
         if (card != null) {
-            text.append("\n月卡：").append(MonthlyCardType.labelOf(card.getCardType()))
-                    .append("（有效至 ").append(DATE.format(card.getEndDate())).append("）");
+            text.append("\n月卡：").append(MonthlyCardType.labelOf(card.getCardType()));
+            // STAFF 卡按卡种显示「长期有效」：它的到期日是 2099-12-31 这个实现细节，
+            // 摆给顾客看没有意义（见 MonthlyCardType#STAFF_END_DATE）
+            if (MonthlyCardType.STAFF.name().equals(card.getCardType())) {
+                text.append("（长期有效）");
+            } else {
+                text.append("（有效至 ").append(DATE.format(card.getEndDate())).append("）");
+            }
         }
 
         if (amountVisible && month != null) {
@@ -261,7 +291,10 @@ public final class QqReplyText {
                 text.append(yuan(pending.getPayableAmount())).append('，');
             }
             text.append("单号 ").append(pending.getOrderNo());
-            text.append("\n（重新获取付款入口请发送 fw结账）");
+            // 两条都给：那笔可能不是「刚停表」的，也可能是凭证被驳回的 ——
+            // fw付款 两种都认，fw结账 只认前一种（对驳回的会答「你没有未结清的订单」），
+            // 但它是用户更熟的那条，所以并列给出
+            text.append("\n（付款请发送 fw付款 或 fw结账）");
         }
 
         if (current != null) {
@@ -347,7 +380,11 @@ public final class QqReplyText {
             text.append(yuan(amount)).append('，');
         }
         text.append("单号 ").append(orderNo);
-        text.append("\n付款入口：").append(ordersUrl);
+        text.append("\n网页付款：").append(ordersUrl);
+        // 指路那两条指令（2026-10-10 由用户要求）：它们是「重新拿到付款入口 / 撑起
+        // 截图受理」的入口。⚠️ 仍然【不】写「可以把截图发群里」——
+        // 闸没撑起来就发图只会石沉大海，那句话要由这两条指令的回复去说
+        text.append("\n（付款请发送 fw付款 或 fw结账）");
         return text.toString();
     }
 
@@ -372,13 +409,26 @@ public final class QqReplyText {
         }
         StringBuilder text = new StringBuilder("你有 ").append(bills.size()).append(" 笔未付款的单子：\n");
         for (UnpaidBill bill : bills) {
-            text.append("· [").append(bill.typeLabel()).append("] ").append(bill.orderNo());
+            text.append("· [").append(bill.typeLabel()).append("] ");
+            // 名称紧跟在类型后面：它是「这是哪一笔」最快的一眼
+            if (bill.title() != null && !bill.title().isBlank()) {
+                text.append(bill.title()).append(" · ");
+            }
+            text.append(bill.orderNo());
             if (amountVisible && bill.amount() != null) {
                 text.append(" · ").append(yuan(bill.amount()));
             }
             text.append(" · ").append(bill.statusText()).append('\n');
         }
-        text.append("付款请前往网页端：").append(webUrl);
+        text.append("网页付款：").append(webUrl);
+        // ⚠️ 这两句都只在「清单里真有能这么办的单子」时才出现（2026-10-10）——
+        // 对着一笔包场说「可发 fw付款」、对着一笔计时订单说「可发 fw取消」，
+        // 用户照做得到的都是一句拒绝，那比不提更糟。
+        // ⚠️ 这里必须用带 fw付款 的那一版：清单是纯查询，它不撑闸 ——
+        // 说成「也可以发送截图到群内」，用户当场发一张只会石沉大海
+        if (bills.stream().anyMatch(UnpaidBill::payable)) {
+            text.append("\n").append(PAY_SCREENSHOT_AFTER_ARM);
+        }
         // 计时订单不可取消（欠费不能自消），所以可取消提示只在真的存在
         // 可取消单子时出现 —— 全部都是计时订单时给这条提示就是句空话
         if (bills.stream().anyMatch(UnpaidBill::cancelable)) {
@@ -473,8 +523,10 @@ public final class QqReplyText {
         }
         // 两种写法各占一行、并与上面的商品列表隔一个空行（2026-10-09 由用户要求）——
         // 挤在商品行末尾的话，那两种语法要读到一半才发现是「怎么下单」
+        // 三种写法都与 fw帮助 里那张表一致（2026-10-10 由用户要求补上 fw买n个xx）——
+        // 两处各写一份的话，菜单上少一种写法，用户就少一条路
         text.append(writeEnabled
-                        ? "\n下单请发送 fw买个xx 或 fwxx-数量\n或前往网页端商城："
+                        ? "\n下单请发送 fw买个xx 或 fw买n个xx 或 fwxx-数量\n或前往网页端商城："
                         : "\n下单请前往网页端商城：")
                 .append(mallUrl);
         return text.toString();
@@ -658,7 +710,7 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String botConnected() {
-        return "🤖 机器人已连接，指令可正常使用。发送 fw帮助 查看可用指令。";
+        return "🤖 机器人已连接，指令可正常使用。\n发送 fw帮助 查看可用指令。";
     }
 
     /**
@@ -677,21 +729,24 @@ public final class QqReplyText {
      * 「已支付 + 已驳回」明确拒绝重交 —— 喊了做不到的话不如不喊。
      * 状态回退做出来之后那条限制没有了，文案随之翻回来。）
      *
-     * <p>开头那个空格是给 @ 段留的：少了它，群里会显示成
-     * {@code @张三你的付款凭证……}，两截挤在一起。
-     *
      * <p>⚠️ <b>「不要重复付款」这半句不能省</b>：驳回会把订单退回待支付
      *（见 {@code PaymentProofService#reject}），于是用户端看到的是「待支付 ¥8.00」——
      * 而他明明付过。不说这一句，他很可能再扫一次码，<b>真的付第二遍</b>。
      * 那笔多余的款子退起来比提醒一句麻烦得多。
+     *
+     * <p>⚠️ 正文<b>不以空格开头</b>（2026-10-10 起）：这条文案是 @ 人的，
+     * 而 @ 段与正文之间现在由 {@code OneBotAction#sendGroupMessageWithAt}
+     * 统一加换行 —— 再留空格就成了新行开头的多余缩进。
+     * （旧写法是一个前导空格，防「@张三你的付款凭证…」挤在一起。）
      *
      * @param reason    管理员填写的驳回原因（必填），原样出现在文案里
      * @param ordersUrl 订单列表页地址（被驳回的那几笔都在那儿）
      * @return 提示文本
      */
     public static String proofRejected(String reason, String ordersUrl) {
-        return " 你的付款凭证未通过复核：" + reason
-                + "。请重新上传一张付款截图（如已完成付款，请勿重复支付） → " + ordersUrl;
+        return "你的付款凭证未通过复核：" + reason + "\n"
+                + "请重新上传一张付款截图（如已完成付款，请勿重复支付）\n"
+                + "也可在网页端重新上传：" + ordersUrl;
     }
 
     /**
@@ -715,7 +770,7 @@ public final class QqReplyText {
                                           LocalDate today) {
         return "📅 包场已安排：" + dayLabel(startAt.toLocalDate(), today)
                 + " " + TIME.format(startAt) + " – " + TIME.format(endAt)
-                + "，该时段仅限包场人与被邀请者入场。";
+                + "\n该时段仅限包场人与被邀请者入场。";
     }
 
     /**
@@ -767,9 +822,9 @@ public final class QqReplyText {
                                         LocalDateTime endAt, String reason, LocalDate today) {
         String range = rangeText(startAt, endAt, today);
         if (action == ClosureChangeAction.DELETED) {
-            return "🚧 停业安排已撤销：" + range + "，该时段恢复正常接待。";
+            return "🚧 停业安排已撤销：" + range + "\n该时段恢复正常接待。";
         }
-        return "🚧 门店停业安排：" + range + parenthesized(reason) + "，该时段不接待新顾客。";
+        return "🚧 门店停业安排：" + range + parenthesized(reason) + "\n该时段不接待新顾客。";
     }
 
     /**
@@ -790,9 +845,9 @@ public final class QqReplyText {
                                            LocalDateTime endAt, String reason, LocalDate today) {
         String range = rangeText(startAt, endAt, today);
         if (action == FreePeriodChangeAction.DELETED) {
-            return "🎉 免费活动已撤销：" + range + "，该时段恢复按时长计费。";
+            return "🎉 免费活动已撤销：" + range + "\n该时段恢复按时长计费。";
         }
-        return "🎉 免费活动：" + range + parenthesized(reason) + "，该时段内消费全免。";
+        return "🎉 免费活动：" + range + parenthesized(reason) + "\n该时段内消费全免。";
     }
 
     /**
@@ -809,7 +864,7 @@ public final class QqReplyText {
      */
     public static String bookingRevoked(LocalDateTime startAt, LocalDateTime endAt,
                                         LocalDate today) {
-        return "📅 包场已撤销：" + rangeText(startAt, endAt, today) + "，该时段恢复开放。";
+        return "📅 包场已撤销：" + rangeText(startAt, endAt, today) + "\n该时段恢复开放。";
     }
 
     /**
@@ -898,7 +953,7 @@ public final class QqReplyText {
     public static String proofPending(String targetType, String orderNo,
                                       BigDecimal amount, String reason, String adminUrl) {
         return "🧾 有一笔付款凭证待复核：" + PaymentTargetType.labelOf(targetType)
-                + " " + orderNo + "，金额 " + yuan(amount) + "（" + reason + "）。"
+                + " " + orderNo + "，金额 " + yuan(amount) + "（" + reason + "）\n"
                 + "请前往运营后台处理：" + adminUrl;
     }
 
@@ -948,7 +1003,9 @@ public final class QqReplyText {
             text.append("\n【常用】\n");
             text.append("fw开门 或 fwopen —— 开始计时并获取门锁密码\n");
             text.append("fw结账 或 fwpay —— 停止计时并前往付款\n");
+            text.append("fw付款 —— 把待付款单的付款入口重新发一遍（可直接发付款截图）\n");
             text.append("fw买个可乐 或 fw买n个可乐 或 fw可乐-2 —— 下单购买商品\n");
+            text.append("fw取消订单 —— 取消名下那笔待付款的商品单\n");
             text.append("fw取消 <单号> —— 取消未付款的商品单、月卡购买单或包场\n");
         }
         if (writeEnabled && admin) {
@@ -1002,7 +1059,7 @@ public final class QqReplyText {
             text.append("你已在计时中（").append(duration(stayMinutes)).append("）。\n");
         }
         text.append("门锁密码：").append(passcode).append("\n");
-        text.append("该密码仅可使用一次，请勿转发。");
+        text.append("该密码仅可使用一次，请勿转发。\n");
         text.append(privatePasscodeSent
                 ? "固定密码已通过私聊发送，如未收到请前往网页端查看："
                 : "如需可重复使用的密码，请前往网页端查看：");
@@ -1047,11 +1104,32 @@ public final class QqReplyText {
             case STORE_CLOSED -> "门店当前暂停营业，暂时无法开门。";
             case BOOKING_ACCESS_DENIED -> "该时段已被包场，仅限包场人与被邀请者入场。";
             case BOOKING_PREPARING -> "该时段即将开始包场，暂时无法入场。";
-            case ORDER_UNPAID_EXISTS -> "你有一笔未付款订单，请先完成付款后再开门：" + ordersUrl;
+            case ORDER_UNPAID_EXISTS -> "你有一笔未付款订单，请先完成付款后再开门\n"
+                    + "网页付款：" + ordersUrl + "\n" + PAY_SCREENSHOT_AFTER_ARM;
             case LOCK_NOT_CONFIGURED, STORE_NOT_FOUND -> "门店尚未配置完成，请联系管理员。";
             case LOCK_CLOUD_UNAVAILABLE -> "门锁云服务暂不可用，请稍后重新发送 fw开门。";
             default -> "开门失败：" + (message == null ? "请稍后重试。" : message);
         };
+    }
+
+    /**
+     * 判断一笔结算是否「无需支付」（0 元，或账单缺失算不出金额）。
+     *
+     * <p>⚠️ <b>它同时决定文案与「等付款截图」那道闸，两处必须共用这一份判据</b>：
+     * {@link #settleDone} 据它选话术（说「无需支付」还是报应付金额），
+     * {@code QqWriteCommandService#settle} 据它决定要不要登记等图。
+     * 分开各写一份的话，将来改一处就会出现「群里说账目已结清、系统却还在等他的图」
+     * 这种自相矛盾 —— 而他随手发的下一张图会撞上「已不是待支付状态」那句错话。
+     * 2026-10-10 现场撞到过：0 元结账（首 5 分钟免费）之后发了个表情，
+     * 机器人回「可能已在网页端完成付款」，而他那笔本来就无需付。
+     *
+     * <p>它覆盖的 0 元场景：首 5 分钟免费、月卡覆盖、免费活动、包场时段。
+     *
+     * @param amount 结算金额（分段账单的实收合计），可为 null
+     * @return 无需支付返回 true
+     */
+    public static boolean isFreeOfCharge(BigDecimal amount) {
+        return amount == null || amount.signum() == 0;
     }
 
     /**
@@ -1066,15 +1144,17 @@ public final class QqReplyText {
      * @return 回复文本
      */
     public static String settleDone(BigDecimal amount, boolean amountVisible, String settleUrl) {
-        if (amount == null || amount.signum() == 0) {
+        if (isFreeOfCharge(amount)) {
             return "已停止计时，本次无需支付，账目已结清。";
         }
-        if (!amountVisible) {
-            // 金额被关掉时（uspace.qqbot.self-amount-visible=false）不报数 ——
-            // 打开结算页自然看得到，而这里报了就是全群可见
-            return "已停止计时，请前往支付：" + settleUrl + PAY_BY_GROUP_HINT;
+        StringBuilder text = new StringBuilder("已停止计时，");
+        if (amountVisible) {
+            text.append("本次应付 ").append(yuan(amount)).append("。\n");
         }
-        return "已停止计时，本次应付 " + yuan(amount) + "。\n请前往支付：" + settleUrl + PAY_BY_GROUP_HINT;
+        // 金额被关掉时（uspace.qqbot.self-amount-visible=false）不报数 ——
+        // 打开结算页自然看得到，而这里报了就是全群可见
+        return text.append("网页付款：").append(settleUrl)
+                .append('\n').append(PAY_SCREENSHOT_ALSO).toString();
     }
 
     /**
@@ -1097,8 +1177,8 @@ public final class QqReplyText {
         if (amountVisible && amount != null) {
             text.append("\n应付 ").append(yuan(amount));
         }
-        text.append("\n订单 ").append(orderNo).append(" · 付款入口：").append(orderUrl);
-        return text.append(PAY_BY_GROUP_HINT).toString();
+        return text.append("\n订单 ").append(orderNo).append(" · 网页付款：").append(orderUrl)
+                .append('\n').append(PAY_SCREENSHOT_ALSO).toString();
     }
 
     /**
@@ -1110,12 +1190,20 @@ public final class QqReplyText {
      * {@link UnpaidBill} 那一层抽象。
      *
      * @param typeLabel 类型中文名（商品 / 月卡 / 包场）
+     * @param title     这一笔买的是什么（如「可乐 ×2」），可为 null。
+     *                  ⚠️ <b>有名称就必须报出来</b>：一个人同时挂着两笔同类未付款单是可能的
+     *                  （历史数据、以及「取消一笔之后又来一笔」的正常流转），
+     *                  只报单号的话，他无从确认被取消的是不是他想取消的那一笔
      * @param orderNo   单号
      * @param hint      取消后释放了什么的说明（如「占用的库存已释放」）
      * @return 回复文本
      */
-    public static String cancelDone(String typeLabel, String orderNo, String hint) {
-        return "已取消未付款的" + typeLabel + " " + orderNo + "，" + hint + "。";
+    public static String cancelDone(String typeLabel, String title, String orderNo, String hint) {
+        StringBuilder text = new StringBuilder("已取消未付款的").append(typeLabel);
+        if (title != null && !title.isBlank()) {
+            text.append('「').append(title).append('」');
+        }
+        return text.append(' ').append(orderNo).append('，').append(hint).append('。').toString();
     }
 
     /**
@@ -1157,8 +1245,9 @@ public final class QqReplyText {
      */
     public static String cancelOrderRefused(String ordersUrl) {
         return "计时订单不支持在群里取消。\n"
-                + "正在计时的请发送 fw结账 停止计时；已出账的请前往网页端付款"
-                + "（凭证未通过时请重新上传付款截图）：" + ordersUrl;
+                + "正在计时的：请发送 fw结账 停止计时\n"
+                + "已出账的：请发送 fw付款 后把付款截图发到群里，或前往网页端付款："
+                + ordersUrl;
     }
 
     /**
@@ -1184,8 +1273,8 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String productNotFound(String name) {
-        return "未找到名为「" + name + "」的商品。可发送 fw菜单 查看在售商品，"
-                + "名称须完全一致（含空格与括号）。";
+        return "未找到名为「" + name + "」的商品。\n"
+                + "名称须完全一致（含空格与括号），可发送 fw菜单 查看在售商品。";
     }
 
     /**
@@ -1212,10 +1301,28 @@ public final class QqReplyText {
             text.append("，共 ").append(yuan(order.getAmount()));
         }
         text.append("\n单号 ").append(order.getOrderNo())
-                .append("\n付款入口：").append(ordersUrl);
-        text.append(PAY_BY_GROUP_HINT);
+                .append("\n网页付款：").append(ordersUrl)
+                .append('\n').append(PAY_SCREENSHOT_ALSO);
         text.append("\n付款后请自行取货。");
         return text.toString();
+    }
+
+    /**
+     * 商品单在清单与取消回复里的名称（如「可乐 ×2」）。
+     *
+     * <p>商品这类账<b>靠名字认</b>：同一个人的两笔单只差一串单号，而单号谁也记不住
+     *（2026-10-10 由用户要求补上）。数量也要带 —— 1 瓶与 5 瓶差着钱，
+     * 只报名字的话，他在「取消哪一笔」上仍要犹豫一下。
+     *
+     * <p>放在文案层而不是某个调用方里：{@code fw未付款}（{@code QqCommandService}）
+     * 与 {@code fw付款} / {@code fw确认取消}（{@code QqWriteCommandService}）
+     * 都要用，各拼一份的话，「可乐 ×2」与「可乐x2」这种细节迟早会分叉。
+     *
+     * @param order 购买单（名称与数量都是下单那一刻的快照）
+     * @return 展示名，如「可乐 ×2」
+     */
+    public static String productTitle(ProductOrderVo order) {
+        return order.getProductName() + " ×" + order.getQuantity();
     }
 
     /**
@@ -1223,6 +1330,11 @@ public final class QqReplyText {
      *
      * <p>按错误码分派 —— 每条都要给一个<b>能做的动作</b>：售罄就少买点或等补货、
      * 下架就换一样、数量不合适就改数量。与 {@link #openFailure} 同一条原则。
+     *
+     * <p>⚠️ <b>「有一笔未付款商品单」那条把它名下那笔单的两个出口都写出来</b>：
+     * 两件事在群里都办得到 —— {@code fw确认取消} 取消、{@code fw付款} 撑起付款截图入口。
+     * <b>这两句只能在本类补</b>：商品模块给的消息是给网页端看的，
+     * 它不谈群指令（网页上根本没有这两条）。
      *
      * @param error   错误码，可为 null（未知错误）
      * @param message 错误码之外的自定义文案（取自 {@code BizResult.resolveMessage()}），可为 null
@@ -1235,19 +1347,164 @@ public final class QqReplyText {
         }
         return switch (error) {
             case PRODUCT_SOLD_OUT -> "该商品已售罄" + (message == null ? "" : "（" + message + "）")
-                    + "。可发送 fw菜单 查看其他商品：" + menuUrl;
-            case PRODUCT_STATUS_INVALID -> "该商品已下架。可发送 fw菜单 查看其他商品：" + menuUrl;
+                    + "\n可发送 fw菜单 查看其他商品：" + menuUrl;
+            case PRODUCT_STATUS_INVALID -> "该商品已下架\n可发送 fw菜单 查看其他商品：" + menuUrl;
             case PARAM_INVALID -> message == null ? "数量不合适，请修改后重新发送。" : message + "。";
             // 下面两条的主语是「名下那笔旧单」而不是「这次要买的东西」——
             // 用默认那条「下单失败：…」的话，用户会以为这次买的东西有问题，
             // 换个商品接着试，然后又撞同一堵墙
-            case PRODUCT_UNPAID_EXISTS -> message == null
+            // ⚠️ 两条出路各占一行、且行尾【不带句号】：用户长按复制一整行就能直接发出去，
+            // 带上句号会被解析器认成「不是指令」
+            case PRODUCT_UNPAID_EXISTS -> (message == null
                     ? "你有一笔未付款的商品单，请先完成支付或取消该单，再下单。"
-                    : message + "。取消可在网页端「商品订单」页操作。";
+                    : message + "。")
+                    + "\n取消请发送 fw取消订单"
+                    + "\n付款请发送 fw付款";
             case PRODUCT_PROOF_REJECTED ->
-                    "你的商品单付款凭证未通过复核，请先在网页端重新上传一张付款截图，再下单。";
+                    "你的商品单付款凭证未通过复核，请重新上传一张付款截图。\n"
+                            + "如已完成付款，请勿重复支付。\n"
+                            + "请发送 fw付款，之后" + PAY_SCREENSHOT_TEXT;
             default -> "下单失败：" + (message == null ? "请稍后重试。" : message);
         };
+    }
+
+    /**
+     * 「fw确认取消」名下没有待付款商品单时的回复。
+     *
+     * <p>⚠️ <b>口径只说「商品单」</b>：这条指令刻意只受理商品单 ——
+     * 包场与月卡的单子各有各的取消路径（{@code fw取消 <单号>}），
+     * 计时订单更是不许自消（见 {@code QqReplyText#cancelOrderRefused}）。
+     * 说成「你没有未付款的单」就是个<b>错误结论</b> —— 他可能正欠着一笔房间费。
+     * 末尾指路 {@code fw未付款}，把「那我还有什么没付」这一问接住。
+     *
+     * @return 回复文本
+     */
+    public static String cancelNothingPending() {
+        return "你名下没有待付款的商品单。\n可发送 fw未付款 查看全部未付款单。";
+    }
+
+    /**
+     * 「fw确认取消」撞上一笔凭证被驳回的商品单时的回复。
+     *
+     * <p><b>驳回的单不能取消</b>：那笔钱他可能真的付过，只是凭证没通过
+     *（状态守卫只放行待支付，见商品模块 {@code closePending}）——
+     * 取消等于把一笔可能的真实收款关掉。
+     *
+     * <p>所以给的必须是两条真能走的路：重传一张，或者找管理员
+     *（「不想买了」只有人能定，系统没有这条接口）。⚠️
+     * <b>「如已完成付款，请勿重复支付」不能省</b>：他看到「未通过复核」
+     * 极可能再扫一次码，真的付第二遍。
+     *
+     * @param orderNo 那笔商品单的单号
+     * @return 回复文本
+     */
+    public static String cancelRejected(String orderNo) {
+        return "商品单 " + orderNo + " 的付款凭证未通过复核，不能取消。\n"
+                + "请发送 fw付款 重新上传一张付款截图（如已完成付款，请勿重复支付）\n"
+                + "不想继续这笔的请联系管理员处理。";
+    }
+
+    /**
+     * 「fw付款」把付款截图入口撑起来之后的回复。
+     *
+     * <p>两类人共用：<b>还没付的</b>给金额与付款入口，<b>凭证被驳回的</b>直接说重传 ——
+     * 后者不再报金额（他付过一遍，再报一次数只会让他以为要付第二次）。
+     *
+     * <p>「闸已经撑起来了」这件事不用另说一句：
+     * {@link #PAY_SCREENSHOT_ALSO} 那句就是它的说明，与 {@code fw结账} 共用同一句。
+     *
+     * <p>⚠️ 驳回那一路<b>不给</b>「网页付款」这个标签：他不需要再付一次，
+     * 需要的是重传一张 —— 所以给的是光秃秃的 {@link #PAY_SCREENSHOT_TEXT}
+     * 加一条「也可在网页端重新上传」。写成「网页付款」会把人引去再付一遍。
+     *
+     * @param typeLabel     类型中文名（计时订单 / 商品单）
+     * @param orderNo       单号
+     * @param amount        应付金额
+     * @param amountVisible 金额是否显示（{@code uspace.qqbot.self-amount-visible}）
+     * @param payUrl        网页端入口（付款与重传都在那一页）
+     * @param rejected      是不是「凭证被驳回、等重传」的那一类
+     * @return 回复文本
+     */
+    public static String payArmed(String typeLabel, String orderNo, BigDecimal amount,
+                                  boolean amountVisible, String payUrl, boolean rejected) {
+        StringBuilder text = new StringBuilder();
+        if (rejected) {
+            return text.append("你的").append(typeLabel).append(' ').append(orderNo)
+                    .append(" 的付款凭证未通过复核，请重新上传一张付款截图。")
+                    .append("\n如已完成付款，请勿重复支付。")
+                    .append('\n').append(PAY_SCREENSHOT_TEXT)
+                    .append("\n也可在网页端重新上传：").append(payUrl)
+                    .toString();
+        }
+        text.append("你的").append(typeLabel).append(' ').append(orderNo).append(" 待付款");
+        if (amountVisible && amount != null) {
+            text.append("：应付 ").append(yuan(amount));
+        }
+        return text.append("\n网页付款：").append(payUrl)
+                .append('\n').append(PAY_SCREENSHOT_ALSO).toString();
+    }
+
+    /**
+     * 「fw付款」遇到名下不止一笔待付款账时的回复：<b>先受理第一笔</b>。
+     *
+     * <p>闸一次只能对着一个目标撑，而「先付哪一笔」在系统看来没有区别 ——
+     * 与其让他对着清单干等、再开一次浏览器，不如把第一笔直接打开，
+     * 剩下那几笔付完再发一次本指令（清单顺序固定，一轮一笔）。
+     *
+     * <p>⚠️ <b>开头那句「本次只受理第 1 笔」不能省</b>：截图本身认不出自己属于哪一笔，
+     * 落到哪一笔完全取决于撑闸时对着谁 —— 不写的话，他会以为系统能认出截图，
+     * 而那张图究竟落到了哪本账上，他事后只能从「哪笔变成了已支付」去猜。
+     * 逐行编号也是为这句话服务的（「第 1 笔」得对得上清单里的哪一行）。
+     *
+     * @param bills         待付款的账（计时 / 商品），<b>第一条就是本次受理的那笔</b>
+     * @param amountVisible 金额是否显示
+     * @param payUrl        本次受理那一笔的网页付款入口
+     * @return 多行文本
+     */
+    public static String payMultiple(List<UnpaidBill> bills, boolean amountVisible, String payUrl) {
+        StringBuilder text = new StringBuilder("你名下有 ")
+                .append(bills.size()).append(" 笔待付款的单，本次只受理第 1 笔的截图：\n");
+        for (int i = 0; i < bills.size(); i++) {
+            UnpaidBill bill = bills.get(i);
+            text.append("· ").append(i + 1).append(". [").append(bill.typeLabel()).append("] ");
+            if (bill.title() != null && !bill.title().isBlank()) {
+                text.append(bill.title()).append(" · ");
+            }
+            text.append(bill.orderNo());
+            if (amountVisible && bill.amount() != null) {
+                text.append(" · ").append(yuan(bill.amount()));
+            }
+            text.append(" · ").append(bill.statusText()).append('\n');
+        }
+        return text.append("网页付款：").append(payUrl)
+                .append('\n').append(PAY_SCREENSHOT_ALSO)
+                .append("\n其余 ").append(bills.size() - 1).append(" 笔可付完后再发一次 fw付款。")
+                .toString();
+    }
+
+    /**
+     * 未付款单的状态文案。
+     *
+     * <p>{@code REJECTED}（凭证未通过）多补一句「请重新上传付款截图」——
+     * 只报「凭证未通过」的话，用户知道出了事但不知道下一步做什么，
+     * 而下一步恰恰只有一件事可做。
+     *
+     * <p>判据用的是 {@link OrderStatus#REJECTED} 的名字，但它同时覆盖商品的
+     * {@code ProductOrderStatus.REJECTED} —— 两个枚举的常量名一样，
+     * 且这是唯一一个需要特殊说明的状态。将来若有一方改名，这里要跟着改
+     *（编译期发现不了，只有该状态的单子在群里显示会变回原样）。
+     *
+     * <p>住在文案层而不是某个调用方里：{@code QqCommandService}（{@code fw未付款}）
+     * 与 {@code QqWriteCommandService}（{@code fw付款}）都要用 ——
+     * 各写一份的话，两处对同一个状态的解释迟早不一致。
+     *
+     * @param statusName 状态枚举名（{@code OrderVo.status} / 商品单同名字段）
+     * @param label      模块给出的中文名
+     * @return 展示用状态文案
+     */
+    public static String unpaidStatusText(String statusName, String label) {
+        return OrderStatus.REJECTED.name().equals(statusName)
+                ? label + "，请重新上传付款截图" : label;
     }
 
     /**
@@ -1287,7 +1544,7 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String stockAdjustForbidden() {
-        return "「调整库存」仅限管理员使用。如需购买商品，请发送 fw买个可乐 或 fw可乐-2。";
+        return "「调整库存」仅限管理员使用。\n如需购买商品，请发送 fw买个可乐 或 fw可乐-2。";
     }
 
     /**
@@ -1335,7 +1592,7 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String deviceStatusForbidden() {
-        return "「调整机台状况」仅限管理员使用。如需查看机台信息，请前往网页端。";
+        return "「调整机台状况」仅限管理员使用。\n如需查看机台信息，请前往网页端。";
     }
 
     /**
@@ -1345,8 +1602,8 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String deviceNotFound(String name) {
-        return "未找到名为「" + name + "」的机台。名称须完全一致（含空格），"
-                + "可前往网页端查看机台列表。";
+        return "未找到名为「" + name + "」的机台。\n"
+                + "名称须完全一致（含空格），可前往网页端查看机台列表。";
     }
 
     /**
@@ -1359,8 +1616,35 @@ public final class QqReplyText {
      * @return 提示文本
      */
     public static String deviceNameAmbiguous(String name) {
-        return "有多台机台都叫「" + name + "」。群内按名字只能改唯一的一台，"
-                + "请前往网页端处理（可先在后台改掉重名，或按机台直接操作）。";
+        return "有多台机台都叫「" + name + "」。\n"
+                + "群内按名字只能改唯一的一台，请前往网页端处理"
+                + "（可先在后台改掉重名，或按机台直接操作）。";
+    }
+
+    /**
+     * 截图超过受理时限（{@code QqPaymentProofService.WAIT_WINDOW}）时的回复。
+     *
+     * <p>⚠️ 指路的指令是 {@code fw付款} 而<b>不是</b> {@code fw结账}（2026-10-10 改）：
+     * 等图的可能是房间订单，也可能是商品单，而 {@code fw结账} 只管前者 ——
+     * 对着一笔商品单让他「重新发送 fw结账」，他发完什么也不会发生。
+     *
+     * @return 回复文本
+     */
+    public static String screenshotExpired() {
+        return "该截图已超过受理时限，不再受理。\n"
+                + "如需补交，请重新发送 fw付款，之后" + PAY_SCREENSHOT_TEXT;
+    }
+
+    /**
+     * 图没取到时的回复（地址失效、超出大小上限、NapCat 没在跑）。
+     *
+     * <p>⚠️ <b>仍然是回话，不是静默</b>：等图的人正盯着群看。
+     * 这时那次等待<b>还没结束</b>（服务里没有 remove），所以他重发一张即可。
+     *
+     * @return 回复文本
+     */
+    public static String screenshotFetchFailed() {
+        return "截图获取失败（可能超出大小上限）。\n" + PAY_SCREENSHOT_TEXT;
     }
 
     /**
@@ -1373,6 +1657,22 @@ public final class QqReplyText {
      * （小额自动通过），再说一句「管理员将进行复核」会让他以为还欠着钱、
      * 甚至再付一次；反过来，没识别到单号时绝不能报「已结清」——
      * 那笔还挂在待复核上，钱一分都没算数。
+     *
+     * <p>⚠️ <b>未结清时一个字都不许诺「怎么换一张」（2026-10-10 由用户两轮指出）</b>：
+     * <ul>
+     *   <li><b>群里发不了第二张</b>：这张图一提交，那次等待就结束了
+     *       （{@code QqPaymentProofService} 里的 {@code waiting.remove}），
+     *       再发只会落进「没在等」那条静默分支</li>
+     *   <li><b>网页端此刻也没有入口</b>：重传面板只在
+     *       「待支付 / 凭证未通过 / 已被驳回」三种情形出现，
+     *       「已支付 + 待复核」时不出现（{@code OrderDetailView.vue} 那条
+     *       {@code v-if="isUnpaid || isRejected || rejectedProof"}）。
+     *       后端确实允许对「已支付 + 待复核」重交（{@code submit} 的 ④ 分支），
+     *       但那是给别处用的，前台没把它露出来</li>
+     * </ul>
+     * 所以真正的换图路径是<b>等管理员驳回</b>：驳回会把订单退回凭证未通过
+     *（{@code revertDelivery}），那一刻前端的重传入口自然出现，群里也会 @ 本人
+     * 提醒一次。这一段不写进文案 —— 「等复核」这三个字已经把话说完了。
      *
      * @param outTradeNo 商户单号（房间订单是 {@code OD…}、商品是 {@code PD…}）
      * @param amount     识别到的金额，可为 null（没识别出）
@@ -1393,14 +1693,9 @@ public final class QqReplyText {
             text.append("，流水号 ").append(paymentNo);
         }
         if (settled) {
-            text.append("\n本次已结清。");
-        } else {
-            text.append("\n尚未结清：管理员将人工复核这张截图。");
-            if (paymentNo == null || paymentNo.isBlank()) {
-                text.append("若截图里本应有交易单号，也可换一张更清晰的重新发送。");
-            }
+            return text.append("\n本次已结清。").toString();
         }
-        return text.toString();
+        return text.append("\n尚未结清：管理员将人工复核这张截图。").toString();
     }
 
     // ==================================================================

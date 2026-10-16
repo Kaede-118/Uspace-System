@@ -57,9 +57,14 @@ class InstoreServiceTests {
     /** 月卡的两张表。本模块只用得上卡表，购买单表是 {@code MonthlyCardService} 的构造需要 */
     private final FakeMonthlyCardMapper cardMapper = new FakeMonthlyCardMapper();
     private final FakeMonthlyCardOrderMapper cardOrderMapper = new FakeMonthlyCardOrderMapper();
+    /**
+     * 月卡服务。末位参数是用户表（后台开卡要用），本模块用不到 ——
+     * {@code userMapper} 声明在上面，字段按声明顺序初始化，这里读得到
+     */
     private final MonthlyCardService monthlyCardService = new MonthlyCardService(
             cardMapper.asMapper(), cardOrderMapper.asMapper(),
-            new PromotionProperties(), new BillingProperties(), event -> { });
+            new PromotionProperties(), new BillingProperties(), event -> { },
+            userMapper.asMapper());
 
     private final InstoreService service = new InstoreService(
             orderMapper.asMapper(), storeMapper.asMapper(),

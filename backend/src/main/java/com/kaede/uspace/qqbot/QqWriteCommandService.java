@@ -17,6 +17,7 @@ import com.kaede.uspace.order.dto.OneTimePasscodeVo;
 import com.kaede.uspace.order.dto.OrderOpenVo;
 import com.kaede.uspace.order.dto.OrderSettleVo;
 import com.kaede.uspace.order.dto.OrderVo;
+import com.kaede.uspace.product.ProductOrderStatus;
 import com.kaede.uspace.product.ProductService;
 import com.kaede.uspace.product.dto.CreateProductOrderRequest;
 import com.kaede.uspace.product.dto.ProductOrderVo;
@@ -34,6 +35,8 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -105,6 +108,15 @@ public class QqWriteCommandService {
 
     private final OneBotClient client;
 
+    /**
+     * 回复的发送队列：限速（默认 10±3 秒一条）并 @ 发指令的人。
+     *
+     * <p>⚠️ <b>{@code fw开门} 与 {@code fw结账} 的回复不走它</b> ——
+     * 人站在门口等密码、等结账结果，压进队列等十秒不可接受，
+     * 那两条链路直接用 {@link #client} 发（见 {@link #openDoor} 与 {@link #settle}）。
+     */
+    private final QqReplyQueue replyQueue;
+
     private final SysUserMapper sysUserMapper;
 
     private final OrderService orderService;
@@ -134,6 +146,7 @@ public class QqWriteCommandService {
 
     public QqWriteCommandService(QqbotProperties properties,
                                  OneBotClient client,
+                                 QqReplyQueue replyQueue,
                                  SysUserMapper sysUserMapper,
                                  OrderService orderService,
                                  OneTimePasscodeService oneTimePasscodeService,
@@ -146,6 +159,7 @@ public class QqWriteCommandService {
                                  Clock clock) {
         this.properties = properties;
         this.client = client;
+        this.replyQueue = replyQueue;
         this.sysUserMapper = sysUserMapper;
         this.orderService = orderService;
         this.oneTimePasscodeService = oneTimePasscodeService;
@@ -182,7 +196,7 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
@@ -200,7 +214,7 @@ public class QqWriteCommandService {
                 OrderVo retry = opened.getError() == ErrorCode.ORDER_ALREADY_ACTIVE
                         ? currentOrder(userId) : null;
                 if (retry == null) {
-                    client.sendGroupMessage(groupId, QqReplyText.openFailure(
+                    client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.openFailure(
                             opened.getError(), opened.resolveMessage(), ordersUrl()));
                     return;
                 }
@@ -225,13 +239,13 @@ public class QqWriteCommandService {
         if (!issued.isSuccess()) {
             // ⚠️ 这里【必须】回话：订单已经建好了（用户正在被计费），
             // 群里静悄悄的话他只会站在门口等一串永远不来的密码
-            client.sendGroupMessage(groupId, QqReplyText.openPasscodeFailed(
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.openPasscodeFailed(
                     issued.resolveMessage(), privatePasscodeSent, homeUrl()));
             log.error("[QQ机器人] fw开门 取一次性密码失败 orderId={} qq={}", orderId, qq);
             return;
         }
 
-        client.sendGroupMessage(groupId, QqReplyText.openPasscode(
+        client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.openPasscode(
                 issued.getData().getPasscode(), newlyCreated,
                 stayMinutes(order), privatePasscodeSent, homeUrl()));
         log.info("[QQ机器人] fw开门 完成 orderId={} 新建={} qq={}", orderId, newlyCreated, qq);
@@ -254,8 +268,10 @@ public class QqWriteCommandService {
      * （付款截图可以从群里发，但它<b>只是凭证</b>，真正认账的仍是管理员的复核。）
      *
      * <p>结算成功后还会撑起「等他发付款截图」那道闸，见 {@link QqPaymentProofService} ——
-     * 那是群内传图唯一的安全边界，两条分支都必须撑（少了它，群里的表情包
-     * 会被当成凭证、订单会被误标成已支付）。
+     * 那是群内传图唯一的安全边界：少了它，群里的表情包会被当成凭证、订单会被误标成已支付。
+     * <b>两种分支（刚停表 / 已停表）都要撑，但 0 元结清的那一笔不撑</b> ——
+     * 它没有可付的钱、也没有凭证可传，撑了只会让用户随手发的下一张图
+     * 得到一句说反了的话（见 {@link QqReplyText#isFreeOfCharge}）。
      *
      * @param groupId 发出指令的群
      * @param qq      发送者的 QQ 号
@@ -266,7 +282,7 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
@@ -281,7 +297,7 @@ public class QqWriteCommandService {
 
         BizResult<OrderSettleVo> settled = orderService.settleOrder(userId, order.getId());
         if (!settled.isSuccess()) {
-            client.sendGroupMessage(groupId, "结账失败：" + settled.resolveMessage()
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), "结账失败：" + settled.resolveMessage()
                     + "\n也可前往网页端结束使用：" + orderUrl(order.getId()));
             return;
         }
@@ -290,14 +306,22 @@ public class QqWriteCommandService {
         // 金额取分段账单的合计（实收，已扣月卡与活动减免）——
         // 与订单详情页展示的是同一个数，不必另算一遍
         BigDecimal amount = vo.getBill() == null ? null : vo.getBill().getTotalAmount();
-        client.sendGroupMessage(groupId, QqReplyText.settleDone(
+        client.sendGroupMessageAt(groupId, String.valueOf(qq), QqReplyText.settleDone(
                 amount, properties.isSelfAmountVisible(), orderUrl(order.getId())));
 
         // 结算成功了才登记「等他发付款截图」—— 这道闸是那条路唯一的安全边界，
         // 没有它，群里的表情包会被当成凭证、订单会被误标成已支付（见 QqPaymentProofService）。
+        // ⚠️ 0 元单不撑闸：它已经自动结清（状态直通 PAID），没有可付的钱、
+        // 也就没有凭证可传 —— 撑了的话，用户随手发的下一张图会得到一句说反了的
+        // 「可能已在网页端完成付款」，而他本来就无需付（2026-10-10 现场撞到过）。
+        // 释放掉之后那张图会走「根本没在等」的静默分支，这才是群聊该有的样子。
+        // ⚠️ 判据与 QqReplyText#settleDone 的「无需支付」共用同一份：两处错开就会出现
+        // 「群里说账目已结清、系统却还在等他发图」的自相矛盾（见 isFreeOfCharge 的注释）。
         // ⚠️ 传的是 user 而不是 userId：等待表以 QQ 号为键（入站事件只给得出它），
         // 而载入目标要的是用户 ID —— 两个 ID 都由实体带着，写不反
-        paymentProofService.expect(user, PaymentTargetType.ORDER, order.getId());
+        if (!QqReplyText.isFreeOfCharge(amount)) {
+            paymentProofService.expect(user, PaymentTargetType.ORDER, order.getId());
+        }
 
         log.info("[QQ机器人] fw结账 完成 orderId={} qq={}", order.getId(), qq);
     }
@@ -332,7 +356,7 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
@@ -340,7 +364,7 @@ public class QqWriteCommandService {
         BizResult<ProductVo> found = productService.findLiveByName(name);
         ProductVo product = found.isSuccess() ? found.getData() : null;
         if (product == null) {
-            client.sendGroupMessage(groupId, QqReplyText.productNotFound(name));
+            replyQueue.submit(groupId, qq, QqReplyText.productNotFound(name));
             return;
         }
 
@@ -349,7 +373,7 @@ public class QqWriteCommandService {
         request.setQuantity(quantity == null ? 1 : quantity);
         BizResult<ProductOrderVo> created = productService.createOrder(userId, request);
         if (!created.isSuccess()) {
-            client.sendGroupMessage(groupId, QqReplyText.productOrderFailure(
+            replyQueue.submit(groupId, qq, QqReplyText.productOrderFailure(
                     created.getError(), created.resolveMessage(), mallUrl()));
             log.info("[QQ机器人] 群内下单失败 qq={} 商品={} 数量={} 原因={}",
                     qq, name, request.getQuantity(), created.getError());
@@ -357,7 +381,7 @@ public class QqWriteCommandService {
         }
 
         ProductOrderVo order = created.getData();
-        client.sendGroupMessage(groupId, QqReplyText.productOrdered(
+        replyQueue.submit(groupId, qq, QqReplyText.productOrdered(
                 order, properties.isSelfAmountVisible(), productOrdersUrl()));
         // 建单成功才撑起「等他发付款截图」那道闸 —— 与 fw结账 是同一条安全边界：
         // 少了它，群里的表情包会被当成凭证，一笔没收到钱的单子当场变成已支付
@@ -365,6 +389,202 @@ public class QqWriteCommandService {
 
         log.info("[QQ机器人] 群内下单完成 productOrderId={} 单号={} qq={}",
                 order.getId(), order.getOrderNo(), qq);
+    }
+
+    // ==================================================================
+    // fw付款
+    // ==================================================================
+
+    /**
+     * 把「等付款截图」那道闸重新撑起来（{@code fw付款}）。
+     *
+     * <p><b>它补的是截图那条路缺的一个入口</b>：撑闸原本只有两处 ——
+     * {@code fw结账} 与群里下单商品，两个都发生在「刚刚」那一刻。一笔出账半天、
+     * 后来才想起来付的单子在群里没有路：截图发出去毫无反应
+     *（那条路上唯一允许的静默是「根本没在等」，见 {@link QqPaymentProofService}），
+     * 而用户只会以为机器人坏了。
+     *
+     * <p><b>闸只往这两类账上撑：计时订单与商品单</b> —— 它们是「提交即落账」的两类，
+     * 也恰恰是凭证会被驳回的两类（驳回之后要做的事就是重传一张，那条路同样卡在这儿）。
+     * 包场与月卡的未付款单不走这里：它们要管理员复核才交付，付款更适合在网页端完成
+     *（那一页还看得见场次与卡种）。
+     *
+     * <p>⚠️ <b>名下有多笔时不替他挑</b>：闸一次只能对着一个目标撑，
+     * 挑错了的话他发出去的那张图会被提交到另一笔账上 —— 那是这条链路里
+     * 最不能出的一类错（同一条理由见 {@link QqPaymentProofService} 的类注释）。
+     * 列清楚、让他自己挑一笔去网页端付，比赌一次猜对强。
+     *
+     * @param groupId 发出指令的群
+     * @param qq      发送者的 QQ 号
+     */
+    public void pay(Long groupId, Long qq) {
+        if (!checkAllowed(groupId, qq)) {
+            return;
+        }
+        SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
+        if (user == null) {
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
+            return;
+        }
+        Long userId = user.getId();
+
+        // 两类各查各的（与 fw未付款 同一套数据源），任何一类失败都不降级 ——
+        // 少查一类还说「你没有待付款的单」是个错误结论
+        BizResult<List<OrderVo>> orders = orderService.findUnpaidOrders(userId);
+        BizResult<List<ProductOrderVo>> products = productService.listUnpaidOrders(userId);
+        if (!orders.isSuccess() || orders.getData() == null
+                || !products.isSuccess() || products.getData() == null) {
+            log.error("[QQ机器人] 查未付款单失败，fw付款 中止 qq={}", qq);
+            replyQueue.submit(groupId, qq, "查不到未付款信息，稍后再试。");
+            return;
+        }
+
+        List<OrderVo> orderList = orders.getData();
+        List<ProductOrderVo> productList = products.getData();
+        List<UnpaidBill> bills = payableBills(orderList, productList);
+        if (bills.isEmpty()) {
+            replyQueue.submit(groupId, qq, "你名下没有待付款的计时订单或商品单。"
+                    + "可发送 fw未付款 查看全部未付款单。");
+            return;
+        }
+
+        // 本次受理哪一笔：计时优先、商品殿后（与 fw未付款 的清单同序）。
+        // 闸一次只能对着一个目标撑，而「先付哪一笔」在系统看来没有区别 ——
+        // 多笔时就把第一笔打开，剩下那几笔付完再发一次本指令（见 QqReplyText#payMultiple）
+        OrderVo timer = orderList.isEmpty() ? null : orderList.get(0);
+        ProductOrderVo productOrder = timer == null ? productList.get(0) : null;
+        if (timer != null) {
+            paymentProofService.expect(user, PaymentTargetType.ORDER, timer.getId());
+        } else {
+            paymentProofService.expect(user, PaymentTargetType.PRODUCT, productOrder.getId());
+        }
+
+        String orderNo = timer != null ? timer.getOrderNo() : productOrder.getOrderNo();
+        BigDecimal amount = timer != null ? timer.getPayableAmount() : productOrder.getAmount();
+        String payUrl = timer != null ? orderUrl(timer.getId()) : productOrdersUrl();
+        // REJECTED 与「还没付」要分开说：前者的下一步是重传一张，
+        // 而再报一次金额只会让他以为要付第二遍（见 QqReplyText#payArmed）
+        boolean rejected = timer != null
+                ? OrderStatus.REJECTED.name().equals(timer.getStatus())
+                : ProductOrderStatus.REJECTED.name().equals(productOrder.getStatus());
+
+        if (bills.size() > 1) {
+            replyQueue.submit(groupId, qq, QqReplyText.payMultiple(
+                    bills, properties.isSelfAmountVisible(), payUrl));
+        } else if (timer != null && !rejected) {
+            // 还没付的计时订单与 fw结账 的回头路是同一种情形，文案共用一份
+            //（那一条本来就写着「已停止计时、尚未付款」）
+            replyQueue.submit(groupId, qq, QqReplyText.settleAlreadyStopped(
+                    orderNo, amount, properties.isSelfAmountVisible(), payUrl));
+        } else {
+            replyQueue.submit(groupId, qq, QqReplyText.payArmed(
+                    timer != null ? "计时订单" : "商品单", orderNo, amount,
+                    properties.isSelfAmountVisible(), payUrl, rejected));
+        }
+        log.info("[QQ机器人] fw付款 已撑起截图入口 类型={} 单号={} 本单共{}笔 驳回={} qq={}",
+                timer != null ? PaymentTargetType.ORDER : PaymentTargetType.PRODUCT,
+                orderNo, bills.size(), rejected, qq);
+    }
+
+    /**
+     * 把两类待付款账换算成清单行（{@code fw付款} 的多笔情形用）。
+     *
+     * <p>与 {@code QqCommandService#collectUnpaidBills} 的换算规则一致
+     *（同一种类型、同一个状态文案、同样标着「可取消」与「可在群里付」），
+     * 差别只在<b>少了包场与月卡两行</b> —— 那两类不在群内撑闸的范围内。
+     *
+     * @param orders   待付款的计时订单
+     * @param products 待付款的商品单
+     * @return 清单行，计时在前、商品在后
+     */
+    private static List<UnpaidBill> payableBills(List<OrderVo> orders,
+                                                 List<ProductOrderVo> products) {
+        List<UnpaidBill> bills = new ArrayList<>();
+        for (OrderVo order : orders) {
+            bills.add(new UnpaidBill("计时", null, order.getOrderNo(), order.getPayableAmount(),
+                    QqReplyText.unpaidStatusText(order.getStatus(), order.getStatusText()),
+                    false, true));
+        }
+        for (ProductOrderVo order : products) {
+            bills.add(new UnpaidBill("商品", QqReplyText.productTitle(order), order.getOrderNo(),
+                    order.getAmount(),
+                    QqReplyText.unpaidStatusText(order.getStatus(), order.getStatusLabel()),
+                    true, true));
+        }
+        return bills;
+    }
+
+    // ==================================================================
+    // fw确认取消
+    // ==================================================================
+
+    /**
+     * 取消名下那笔待付款的商品单（{@code fw确认取消}）。
+     *
+     * <p><b>它不带单号，凭的是「最近那笔就是挡着他的那笔」</b> ——
+     * 下单被挡下时那条回复点名的正是这一笔（商品模块读
+     * {@code selectUnsettledByUser}，与这里用的 {@code selectUnpaidByUser}
+     * 是同一条 SQL 的 {@code LIMIT 1} 版，都按 id 倒序）。
+     * 用户因此不必抄那串 20 位数字，而<b>抄单号恰恰是最容易做错的一步</b>。
+     *
+     * <p>⚠️ <b>名下同时挂着两笔待付款商品单是可能的</b>（历史数据、以及
+     * 互斥校验上线之前建的），所以这条指令的语义是「关掉最近的这一笔」：
+     * 再发一次就关掉剩下的那一笔。回复里带上商品名与数量，
+     * 他才知道被关掉的是不是他想关的那一笔。
+     *
+     * <p><b>只受理商品单</b>：月卡购买单与包场各有各的取消路径
+     *（{@code fw取消 <单号>}），计时订单更是不许自消（见 {@link #cancelOrder}）——
+     * 这条指令的语义是「把挡着我下单的那笔关掉」，泛化出去就成了「随便取消一笔」。
+     *
+     * <p>⚠️ <b>凭证被驳回的那笔不能取消</b>：那笔钱他可能真的付过，
+     * 只是凭证没通过（状态守卫只放行待支付，见商品模块 {@code closePending}）。
+     * 那时给的是两条真能走的路 —— {@code fw付款} 重传，或者找管理员。
+     *
+     * @param groupId 发出指令的群
+     * @param qq      发送者的 QQ 号
+     */
+    public void confirmCancel(Long groupId, Long qq) {
+        if (!checkAllowed(groupId, qq)) {
+            return;
+        }
+        SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
+        if (user == null) {
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
+            return;
+        }
+        Long userId = user.getId();
+
+        BizResult<List<ProductOrderVo>> unpaid = productService.listUnpaidOrders(userId);
+        if (!unpaid.isSuccess() || unpaid.getData() == null) {
+            log.error("[QQ机器人] 查未付款商品单失败，fw确认取消 中止 qq={}", qq);
+            replyQueue.submit(groupId, qq, "查不到未付款信息，稍后再试。");
+            return;
+        }
+        ProductOrderVo order = unpaid.getData().isEmpty() ? null : unpaid.getData().get(0);
+        if (order == null) {
+            replyQueue.submit(groupId, qq, QqReplyText.cancelNothingPending());
+            return;
+        }
+        if (ProductOrderStatus.REJECTED.name().equals(order.getStatus())) {
+            replyQueue.submit(groupId, qq, QqReplyText.cancelRejected(order.getOrderNo()));
+            log.info("[QQ机器人] fw确认取消 命中凭证被驳回的单，已拒绝 qq={} 单号={}",
+                    qq, order.getOrderNo());
+            return;
+        }
+
+        BizResult<Void> result = productService.cancelOrderByNo(
+                userId, order.getOrderNo(), TradeSource.QQ);
+        if (!result.isSuccess()) {
+            replyQueue.submit(groupId, qq, QqReplyText.cancelFailed(
+                    result.getError(), result.resolveMessage()));
+            log.info("[QQ机器人] fw确认取消 失败 qq={} 单号={} 原因={}",
+                    qq, order.getOrderNo(), result.getError());
+            return;
+        }
+        replyQueue.submit(groupId, qq, QqReplyText.cancelDone(
+                PaymentTargetType.PRODUCT.getLabel(), QqReplyText.productTitle(order),
+                order.getOrderNo(), cancelHint(PaymentTargetType.PRODUCT)));
+        log.info("[QQ机器人] fw确认取消 完成 qq={} 单号={}", qq, order.getOrderNo());
     }
 
     // ==================================================================
@@ -400,11 +620,11 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         if (!isAdmin(user)) {
-            client.sendGroupMessage(groupId, QqReplyText.stockAdjustForbidden());
+            replyQueue.submit(groupId, qq, QqReplyText.stockAdjustForbidden());
             log.info("[QQ机器人] 库存指令被非管理员拒绝 qq={} 商品={}", qq, name);
             return;
         }
@@ -412,7 +632,7 @@ public class QqWriteCommandService {
         BizResult<ProductVo> found = productService.findLiveByName(name);
         ProductVo product = found.isSuccess() ? found.getData() : null;
         if (product == null) {
-            client.sendGroupMessage(groupId, QqReplyText.productNotFound(name));
+            replyQueue.submit(groupId, qq, QqReplyText.productNotFound(name));
             return;
         }
 
@@ -421,7 +641,7 @@ public class QqWriteCommandService {
         int before = product.getStock();
         BizResult<ProductVo> updated = productService.updateStock(product.getId(), stock);
         if (!updated.isSuccess()) {
-            client.sendGroupMessage(groupId, "调整失败："
+            replyQueue.submit(groupId, qq, "调整失败："
                     + updated.resolveMessage() + "。可发送 fw菜单 查看在售商品。");
             log.info("[QQ机器人] 群内调整库存失败 qq={} 商品={} 原因={}",
                     qq, name, updated.getError());
@@ -429,7 +649,7 @@ public class QqWriteCommandService {
         }
 
         ProductVo after = updated.getData();
-        client.sendGroupMessage(groupId, QqReplyText.stockAdjusted(
+        replyQueue.submit(groupId, qq, QqReplyText.stockAdjusted(
                 after.getName(), before, after.getStock(), after.getAvailableStock()));
         log.info("[QQ机器人] 群内调整库存完成 id={} 名称={} {} → {} qq={}",
                 after.getId(), after.getName(), before, after.getStock(), qq);
@@ -461,11 +681,11 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         if (!isAdmin(user)) {
-            client.sendGroupMessage(groupId, QqReplyText.deviceStatusForbidden());
+            replyQueue.submit(groupId, qq, QqReplyText.deviceStatusForbidden());
             log.info("[QQ机器人] 机台状况指令被非管理员拒绝 qq={} 机台={}", qq, name);
             return;
         }
@@ -474,7 +694,7 @@ public class QqWriteCommandService {
         if (!found.isSuccess()) {
             // 两种失败分开说：找不到要「核对名字」，同名多台要「去后台区分开」——
             // 管理员要做的下一件事不同，合并成一句他就只能猜
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, qq,
                     ErrorCode.DEVICE_NAME_AMBIGUOUS.equals(found.getError())
                             ? QqReplyText.deviceNameAmbiguous(name)
                             : QqReplyText.deviceNotFound(name));
@@ -486,7 +706,7 @@ public class QqWriteCommandService {
         if (status.equals(oldStatus)) {
             // 与网页端「重复点两下不算错误」同一口径，但回复不说「X → X」：
             // 那看着像出了故障，而事实是「你要的状态已经是了」
-            client.sendGroupMessage(groupId,
+            replyQueue.submit(groupId, qq,
                     QqReplyText.deviceStatusUnchanged(device.getName(), device.getStatusLabel()));
             return;
         }
@@ -497,14 +717,14 @@ public class QqWriteCommandService {
         request.setStatus(status);
         BizResult<Void> updated = deviceService.updateStatus(device.getId(), request);
         if (!updated.isSuccess()) {
-            client.sendGroupMessage(groupId, "调整失败："
+            replyQueue.submit(groupId, qq, "调整失败："
                     + updated.resolveMessage() + "。可发送 fw帮助 查看可用指令。");
             log.info("[QQ机器人] 群内调整机台状况失败 qq={} 机台={} 原因={}",
                     qq, name, updated.getError());
             return;
         }
 
-        client.sendGroupMessage(groupId, QqReplyText.deviceStatusAdjusted(
+        replyQueue.submit(groupId, qq, QqReplyText.deviceStatusAdjusted(
                 device.getName(), DeviceStatus.labelOf(oldStatus), DeviceStatus.labelOf(status)));
         log.info("[QQ机器人] 群内调整机台状况完成 id={} 名称={} {} → {} qq={}",
                 device.getId(), device.getName(), oldStatus, status, qq);
@@ -541,20 +761,20 @@ public class QqWriteCommandService {
         }
         SysUser user = sysUserMapper.selectByQq(String.valueOf(qq));
         if (user == null) {
-            client.sendGroupMessage(groupId, QqReplyText.NOT_BOUND);
+            replyQueue.submit(groupId, qq, QqReplyText.NOT_BOUND);
             return;
         }
         Long userId = user.getId();
 
         PaymentTargetType type = PaymentTargetType.fromOrderNo(orderNo);
         if (type == null) {
-            client.sendGroupMessage(groupId, "没认出这个单号（应以 OD / PD / MC / BK 开头）。"
+            replyQueue.submit(groupId, qq, "没认出这个单号（应以 OD / PD / MC / BK 开头）。"
                     + "可发送 fw未付款 查看自己的未付款单。");
             return;
         }
         if (type == PaymentTargetType.ORDER) {
             // 计时订单不可取消：不是「暂不支持」，而是刻意不放开 —— 见方法注释
-            client.sendGroupMessage(groupId, QqReplyText.cancelOrderRefused(ordersUrl()));
+            replyQueue.submit(groupId, qq, QqReplyText.cancelOrderRefused(ordersUrl()));
             log.info("[QQ机器人] 取消指令命中计时订单，已拒绝 qq={} 单号={}", qq, orderNo);
             return;
         }
@@ -568,14 +788,16 @@ public class QqWriteCommandService {
             case ORDER -> throw new IllegalStateException("计时订单应在上一分支被拒绝");
         };
         if (!result.isSuccess()) {
-            client.sendGroupMessage(groupId, QqReplyText.cancelFailed(
+            replyQueue.submit(groupId, qq, QqReplyText.cancelFailed(
                     result.getError(), result.resolveMessage()));
             log.info("[QQ机器人] 群内取消失败 qq={} 单号={} 类型={} 原因={}",
                     qq, orderNo, type, result.getError());
             return;
         }
-        client.sendGroupMessage(groupId, QqReplyText.cancelDone(
-                type.getLabel(), orderNo, cancelHint(type)));
+        // 名称传 null：这条路手上只有一个单号（它按前缀路由），
+        // 拿名字要再查一次库，而带单号的取消本来就是用户自己指定的一笔
+        replyQueue.submit(groupId, qq, QqReplyText.cancelDone(
+                type.getLabel(), null, orderNo, cancelHint(type)));
         log.info("[QQ机器人] 群内取消完成 qq={} 单号={} 类型={}", qq, orderNo, type);
     }
 
@@ -640,12 +862,12 @@ public class QqWriteCommandService {
      */
     private boolean checkAllowed(Long groupId, Long qq) {
         if (!properties.getBroadcast().isEnabled()) {
-            client.sendGroupMessage(groupId, NO_BROADCAST_HINT);
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), NO_BROADCAST_HINT);
             log.info("[QQ机器人] 播报未开启，写指令被拒 qq={}", qq);
             return false;
         }
         if (!properties.isWriteEnabled()) {
-            client.sendGroupMessage(groupId, WRITE_DISABLED_HINT);
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), WRITE_DISABLED_HINT);
             return false;
         }
 
@@ -654,7 +876,7 @@ public class QqWriteCommandService {
         LocalDateTime last = lastWriteAt.get(qq);
         if (last != null && cooldown != null && !cooldown.isZero() && last.plus(cooldown).isAfter(now)) {
             long waitSeconds = Duration.between(now, last.plus(cooldown)).getSeconds() + 1;
-            client.sendGroupMessage(groupId, "操作过于频繁，请 " + waitSeconds + " 秒后重试。");
+            client.sendGroupMessageAt(groupId, String.valueOf(qq), "操作过于频繁，请 " + waitSeconds + " 秒后重试。");
             return false;
         }
         lastWriteAt.put(qq, now);
@@ -697,13 +919,13 @@ public class QqWriteCommandService {
         OrderVo pending = result.isSuccess() ? result.getData() : null;
         if (pending == null || !OrderStatus.PENDING_PAYMENT.name().equals(pending.getStatus())) {
             // 一条未结清的都没有（或那一笔还在计时中，那是另一条分支的事）
-            client.sendGroupMessage(groupId,
+            client.sendGroupMessageAt(groupId, user.getQq(),
                     "你当前没有未结清的订单。发送 fw开门 可开始计时。");
             return;
         }
 
         paymentProofService.expect(user, PaymentTargetType.ORDER, pending.getId());
-        client.sendGroupMessage(groupId, QqReplyText.settleAlreadyStopped(
+        client.sendGroupMessageAt(groupId, user.getQq(), QqReplyText.settleAlreadyStopped(
                 pending.getOrderNo(), pending.getPayableAmount(),
                 properties.isSelfAmountVisible(), orderUrl(pending.getId())));
         log.info("[QQ机器人] fw结账 命中待付款订单，已重新撑起截图入口 orderId={} qq={}",

@@ -129,7 +129,7 @@ const showAvatarImage = computed(() => !!avatar.value && !avatarFailed.value)
  * 「认不出就原样显示」的做法不同，是因为这是一枚要挤进昵称前的胶囊，
  * 露出 code（如 "WEEKEND"）更长也更看不懂。
  */
-const FALLBACK_LABELS = { ALL_DAY: '全天月卡', NIGHT: '夜间月卡' }
+const FALLBACK_LABELS = { ALL_DAY: '全天月卡', NIGHT: '夜间月卡', STAFF: 'STAFF 卡' }
 const cardLabel = computed(() => {
   if (!props.cardType) return ''
   return props.cardTypeLabel || FALLBACK_LABELS[props.cardType] || '月卡'

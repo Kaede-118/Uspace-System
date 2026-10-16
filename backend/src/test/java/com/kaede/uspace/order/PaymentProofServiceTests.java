@@ -9,6 +9,7 @@ import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.entity.TradeLog;
 import com.kaede.uspace.order.event.PaymentProofPendingEvent;
 import com.kaede.uspace.order.dto.AdminProofVo;
+import com.kaede.uspace.order.dto.ProofStatusVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
 import com.kaede.uspace.order.entity.Order;
@@ -999,6 +1000,69 @@ class PaymentProofServiceTests {
         request.setProofUrl(OK_URL);
         return request;
     }
+
+    // ==================================================================
+    // 查某一笔的凭证状态（2026-10-10 加）
+    // 月卡页与包场页靠它把「已交图、等复核」那一笔显示成「待复核」——
+    // 否则页面显示「待支付 + 去支付」，用户会再去转一次账
+    // ==================================================================
+
+    @Test
+    @DisplayName("凭证状态：还没交图时三个字段全 null（正常结果，不是失败）")
+    void findStatus_emptyWhenNoProof() {
+        MonthlyCardOrder order = seedPendingCardOrder();
+
+        BizResult<ProofStatusVo> result = service.findStatus(
+                USER_ID, PaymentTargetType.MONTHLY_CARD.name(), order.getId());
+
+        assertTrue(result.isSuccess(), "「还没交图」是最常见的情形，不该当成错误");
+        assertNull(result.getData().getVerifyStatus());
+        assertNull(result.getData().getVerifyStatusLabel());
+        assertNull(result.getData().getRejectReason());
+    }
+
+    @Test
+    @DisplayName("凭证状态：交过图就是「待复核」—— 页面据此把支付按钮收起来")
+    void findStatus_reportsSubmitted() {
+        MonthlyCardOrder order = seedPendingCardOrder();
+        seedUser(USER_ID);
+        submit(request(PaymentTargetType.MONTHLY_CARD, order.getId()));
+
+        BizResult<ProofStatusVo> result = service.findStatus(
+                USER_ID, PaymentTargetType.MONTHLY_CARD.name(), order.getId());
+
+        assertEquals(PaymentProofStatus.SUBMITTED.name(), result.getData().getVerifyStatus());
+        assertEquals("待复核", result.getData().getVerifyStatusLabel());
+    }
+
+    @Test
+    @DisplayName("⚠️ 凭证状态：别人的单一律按「没有凭证」返回，不区分「不存在」与「不是你的」")
+    void findStatus_scopesToOwner() {
+        MonthlyCardOrder order = seedPendingCardOrder();
+        seedUser(USER_ID);
+        submit(request(PaymentTargetType.MONTHLY_CARD, order.getId()));
+
+        BizResult<ProofStatusVo> result = service.findStatus(
+                OTHER_USER, PaymentTargetType.MONTHLY_CARD.name(), order.getId());
+
+        assertTrue(result.isSuccess(), "按「没有凭证」返回，而不是一个能用来探存在的错误码");
+        assertNull(result.getData().getVerifyStatus(),
+                "⚠️ 区分开来的话，拿别人的 targetId 挨个试就知道哪些单子存在 —— "
+                        + "与取消那条路同一口径");
+    }
+
+    @Test
+    @DisplayName("凭证状态：认不出的收款类型直接拒，别拿着它去查库")
+    void findStatus_rejectsUnknownType() {
+        assertEquals(ErrorCode.PARAM_INVALID, service.findStatus(
+                USER_ID, "NOT_A_TYPE", 1L).getError());
+        assertEquals(ErrorCode.PARAM_INVALID, service.findStatus(
+                USER_ID, PaymentTargetType.MONTHLY_CARD.name(), null).getError());
+    }
+
+    // ==================================================================
+    // 造数据
+    // ==================================================================
 
     /**
      * 预置一条待支付的订单。

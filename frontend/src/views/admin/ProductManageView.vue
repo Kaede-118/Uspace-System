@@ -1,12 +1,14 @@
 <script setup>
 /**
- * 商品管理（运营后台）：两个 tab —— <b>商品维护</b>与<b>商品订单</b>。
+ * 商品管理（运营后台）：<b>只有货架维护</b> —— 增删改、上下架、补货、库存排序。
  *
- * <p>为什么商品订单也在这里：后台的「商品」这一块如果只有货架，管理员摆好了货
- * 却看不到任何一笔交易，那这一页只是半个功能。两者共用同一套分页与状态标签。
+ * <p><b>「商品订单」子页 2026-10-16 搬走了</b>：原先这里是「商品维护 / 商品订单」
+ * 两个 tab，现在订单移到「订单流水」页（`OrderManageView`）与计时订单并列 ——
+ * 那两样回答的是同一个问题「谁、什么时候、花了多少」，放在一页才比得了；
+ * 而摆货架与看流水本来就是两件事，后者不该顺手挂在商品页下。
  *
  * <p>⚠️ <b>本页的分页参数是 {@code pageNum} / {@code pageSize}</b>，
- * 与公告、包场那两页的 {@code page} / {@code size} <b>不一样</b>
+ * 与公告、包场、订单那几页的 {@code page} / {@code size} <b>不一样</b>
  * （后端如此，不是笔误）。传错不会报错，只会永远返回第一页 ——
  * 表现为「翻页没反应」，而控制台里一行异常都没有。
  *
@@ -28,24 +30,19 @@ import {
   updateProduct,
   updateProductStock,
   deleteProduct,
-  uploadProductCover,
-  listAdminProductOrders
+  uploadProductCover
 } from '@/api/admin'
 import { toastSuccess, toastError } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
-import { formatMoney, formatDateTime } from '@/utils/format'
-import { PRODUCT_ORDER_STATUS, productOrderStatusCls } from '@/utils/labels'
+import { formatMoney } from '@/utils/format'
 import AdminPager from '@/components/AdminPager.vue'
 import AdminSheet from '@/components/AdminSheet.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ImageUploader from '@/components/ImageUploader.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
 
-/** 每页条数。⚠️ 本页两个列表的分页参数都是 pageNum + pageSize */
+/** 每页条数。⚠️ 本页的分页参数是 pageNum + pageSize（见文件头） */
 const PAGE_SIZE = 10
-
-/** 当前 tab：products 商品维护 / orders 商品订单 */
-const tab = ref('products')
 
 /* ---------------- 商品维护 ---------------- */
 
@@ -66,16 +63,6 @@ const enabledFilter = ref('')
  * 两件事不能只做一半。
  */
 const sortByStock = ref(false)
-
-/* ---------------- 商品订单 ---------------- */
-
-const orderPage = ref(1)
-const orderTotal = ref(0)
-const orders = ref([])
-const ordersLoading = ref(false)
-const orderStatus = ref('')
-/** 是否已经加载过订单。切到那一页时才去拉，不在打开页面时就打两个请求 */
-const ordersLoaded = ref(false)
 
 /* ---------------- 表单弹层 ---------------- */
 
@@ -195,38 +182,6 @@ async function load() {
   }
 }
 
-/** 拉取商品订单（切到那个 tab 时才第一次调）。 */
-async function loadOrders() {
-  ordersLoading.value = true
-  try {
-    const params = { pageNum: orderPage.value, pageSize: PAGE_SIZE }
-    if (orderStatus.value) params.status = orderStatus.value
-
-    const resp = await listAdminProductOrders(params)
-    const count = resp.data?.total || 0
-    const maxPage = Math.max(1, Math.ceil(count / PAGE_SIZE))
-
-    if (orderPage.value > maxPage) {
-      orderPage.value = maxPage
-      return loadOrders()
-    }
-
-    orders.value = resp.data?.records || []
-    orderTotal.value = count
-    ordersLoaded.value = true
-  } catch (err) {
-    toastError(errorMessage(err, '加载失败'))
-  } finally {
-    ordersLoading.value = false
-  }
-}
-
-/** 切 tab。订单是只读的，切过去时按需加载一次。 */
-function onTabChange(next) {
-  tab.value = next
-  if (next === 'orders' && !ordersLoaded.value) loadOrders()
-}
-
 /** 切筛选：回第一页再查。 */
 function onFilterChange() {
   page.value = 1
@@ -242,12 +197,6 @@ function onFilterChange() {
 function onSortToggle() {
   sortByStock.value = !sortByStock.value
   load()
-}
-
-/** 切订单状态筛选。 */
-function onOrderFilterChange() {
-  orderPage.value = 1
-  loadOrders()
 }
 
 /** 打开「新增」表单。 */
@@ -451,164 +400,96 @@ onMounted(load)
         <button class="btn btn-primary product__new" @click="openCreate">新增商品</button>
       </div>
 
-      <div class="product__tabs">
+      <div class="product__filters">
+        <input
+          v-model="keyword"
+          class="field-input product__search"
+          placeholder="按名称搜索"
+          @keyup.enter="onFilterChange"
+        />
+        <select v-model="enabledFilter" class="field-input product__select" @change="onFilterChange">
+          <option value="">全部状态</option>
+          <option value="1">已上架</option>
+          <option value="0">已下架</option>
+        </select>
+        <button class="btn btn-ghost product__search-btn" @click="onFilterChange">查询</button>
+
+        <!-- 补货优先：点一下让后端按库存从少到多重排（跨页有效） -->
         <button
-          class="product__tab"
-          :class="{ 'product__tab--on': tab === 'products' }"
-          @click="onTabChange('products')"
+          class="product__sort"
+          :class="{ 'product__sort--on': sortByStock }"
+          :title="sortByStock ? '当前：库存从少到多' : '点一下按库存从少到多排列'"
+          @click="onSortToggle"
         >
-          商品维护
-        </button>
-        <button
-          class="product__tab"
-          :class="{ 'product__tab--on': tab === 'orders' }"
-          @click="onTabChange('orders')"
-        >
-          商品订单
+          库存少→多
         </button>
       </div>
 
-      <!-- ============ tab 一：商品维护 ============ -->
-      <template v-if="tab === 'products'">
-        <div class="product__filters">
-          <input
-            v-model="keyword"
-            class="field-input product__search"
-            placeholder="按名称搜索"
-            @keyup.enter="onFilterChange"
-          />
-          <select v-model="enabledFilter" class="field-input product__select" @change="onFilterChange">
-            <option value="">全部状态</option>
-            <option value="1">已上架</option>
-            <option value="0">已下架</option>
-          </select>
-          <button class="btn btn-ghost product__search-btn" @click="onFilterChange">查询</button>
+      <LoadingMask :loading="loading" />
 
-          <!-- 补货优先：点一下让后端按库存从少到多重排（跨页有效） -->
-          <button
-            class="product__sort"
-            :class="{ 'product__sort--on': sortByStock }"
-            :title="sortByStock ? '当前：库存从少到多' : '点一下按库存从少到多排列'"
-            @click="onSortToggle"
-          >
-            库存少→多
-          </button>
-        </div>
-
-        <LoadingMask :loading="loading" />
-
-        <div v-if="products.length" class="product__list">
-          <div v-for="p in products" :key="p.id" class="product__item">
-            <div class="product__cover">
-              <img v-if="p.cover" :src="p.cover" :alt="p.name" />
-              <span v-else class="product__cover-fallback">🎁</span>
-            </div>
-
-            <div class="product__info">
-              <div class="product__line">
-                <!--
-                  状态贴最左、自成一行 —— 一栏对齐，扫一眼就能看出哪几件下架了。
-                  售罄用后端给的 soldOut：可售量为 0（含被未支付单占掉的部分）时就算售罄
-                -->
-                <span :class="p.enabled ? 'tag tag-success' : 'tag'">
-                  {{ p.enabled ? '已上架' : '已下架' }}
-                </span>
-                <span v-if="p.soldOut" class="tag tag-danger">已售罄</span>
-                <span class="product__name">{{ p.name }}</span>
-              </div>
-              <div class="product__price">¥{{ formatMoney(p.price) }}</div>
-            </div>
-
-            <!--
-              库存与可售量是两个数：有未支付的待支付单时库存还有货，但那些货已经被占住，
-              只显示库存会让管理员以为「明明有货怎么下不了单」。
-              库存给大字号，可售量只在两者不同时补一行小字
-            -->
-            <div class="product__stock">
-              <span class="product__stock-label">库存</span>
-              <span class="product__stock-value">{{ p.stock }}</span>
-              <span v-if="p.availableStock !== p.stock" class="product__occupied">
-                可售 {{ p.availableStock }}
-              </span>
-            </div>
-
-            <!--
-              操作区。四个按钮<b>一律横排、绝不上下堆叠</b> ——
-              竖着排的话相邻两个只隔几个像素，手指一歪就删了商品。
-              顺序也刻意：「删除」在最左（离右手最远），最常用的「补货」在最右。
-            -->
-            <div class="product__actions">
-              <button class="product__btn product__btn--danger" @click="removing = p">删除</button>
-              <button
-                class="product__btn product__btn--warn"
-                :disabled="submitting"
-                @click="openDisable(p)"
-              >
-                {{ p.enabled ? '下架' : '上架' }}
-              </button>
-              <button class="product__btn" @click="openEdit(p)">编辑</button>
-              <button class="product__btn product__btn--ok" @click="openRestock(p)">补货</button>
-            </div>
+      <div v-if="products.length" class="product__list">
+        <div v-for="p in products" :key="p.id" class="product__item">
+          <div class="product__cover">
+            <img v-if="p.cover" :src="p.cover" :alt="p.name" />
+            <span v-else class="product__cover-fallback">🎁</span>
           </div>
-        </div>
 
-        <EmptyState
-          v-else-if="!loading"
-          icon="🛍"
-          text="没有符合条件的商品"
-          hint="换个筛选条件，或新增一件"
-        />
-
-        <AdminPager :page="page" :size="PAGE_SIZE" :total="total" @update:page="(p) => { page = p; load() }" />
-      </template>
-
-      <!-- ============ tab 二：商品订单 ============ -->
-      <template v-else>
-        <div class="product__filters">
-          <select v-model="orderStatus" class="field-input product__select" @change="onOrderFilterChange">
-            <option value="">全部状态</option>
-            <option v-for="s in PRODUCT_ORDER_STATUS" :key="s.value" :value="s.value">
-              {{ s.label }}
-            </option>
-          </select>
-        </div>
-
-        <LoadingMask :loading="ordersLoading" />
-
-        <div v-if="orders.length" class="product__list">
-          <div v-for="o in orders" :key="o.id" class="product__order">
-            <div class="product__head">
-              <span class="product__no">{{ o.orderNo }}</span>
-              <!-- 状态中文用后端给的 statusLabel，只有配色取自 labels.js -->
-              <span :class="productOrderStatusCls(o.status)">{{ o.statusLabel }}</span>
-            </div>
-
+          <div class="product__info">
             <div class="product__line">
-              <span class="product__name">{{ o.productName }} × {{ o.quantity }}</span>
-              <span class="product__price">¥{{ formatMoney(o.amount) }}</span>
+              <!--
+                状态贴最左、自成一行 —— 一栏对齐，扫一眼就能看出哪几件下架了。
+                售罄用后端给的 soldOut：可售量为 0（含被未支付单占掉的部分）时就算售罄
+              -->
+              <span :class="p.enabled ? 'tag tag-success' : 'tag'">
+                {{ p.enabled ? '已上架' : '已下架' }}
+              </span>
+              <span v-if="p.soldOut" class="tag tag-danger">已售罄</span>
+              <span class="product__name">{{ p.name }}</span>
             </div>
+            <div class="product__price">¥{{ formatMoney(p.price) }}</div>
+          </div>
 
-            <p class="product__meta">
-              单价 ¥{{ formatMoney(o.unitPrice) }} · 下单于 {{ formatDateTime(o.createdAt) }}
-              <template v-if="o.paidAt"> · 付款于 {{ formatDateTime(o.paidAt) }}</template>
-            </p>
+          <!--
+            库存与可售量是两个数：有未支付的待支付单时库存还有货，但那些货已经被占住，
+            只显示库存会让管理员以为「明明有货怎么下不了单」。
+            库存给大字号，可售量只在两者不同时补一行小字
+          -->
+          <div class="product__stock">
+            <span class="product__stock-label">库存</span>
+            <span class="product__stock-value">{{ p.stock }}</span>
+            <span v-if="p.availableStock !== p.stock" class="product__occupied">
+              可售 {{ p.availableStock }}
+            </span>
+          </div>
+
+          <!--
+            操作区。四个按钮<b>一律横排、绝不上下堆叠</b> ——
+            竖着排的话相邻两个只隔几个像素，手指一歪就删了商品。
+            顺序也刻意：「删除」在最左（离右手最远），最常用的「补货」在最右。
+          -->
+          <div class="product__actions">
+            <button class="product__btn product__btn--danger" @click="removing = p">删除</button>
+            <button
+              class="product__btn product__btn--warn"
+              :disabled="submitting"
+              @click="openDisable(p)"
+            >
+              {{ p.enabled ? '下架' : '上架' }}
+            </button>
+            <button class="product__btn" @click="openEdit(p)">编辑</button>
+            <button class="product__btn product__btn--ok" @click="openRestock(p)">补货</button>
           </div>
         </div>
+      </div>
 
-        <EmptyState
-          v-else-if="!ordersLoading"
-          icon="🧾"
-          text="还没有商品订单"
-          hint="顾客在商城里下单后，这里就能看到"
-        />
+      <EmptyState
+        v-else-if="!loading"
+        icon="🛍"
+        text="没有符合条件的商品"
+        hint="换个筛选条件，或新增一件"
+      />
 
-        <AdminPager
-          :page="orderPage"
-          :size="PAGE_SIZE"
-          :total="orderTotal"
-          @update:page="(p) => { orderPage = p; loadOrders() }"
-        />
-      </template>
+      <AdminPager :page="page" :size="PAGE_SIZE" :total="total" @update:page="(p) => { page = p; load() }" />
     </div>
 
     <p class="product__hint">
@@ -783,26 +664,6 @@ onMounted(load)
   font-size: 13px;
 }
 
-.product__tabs {
-  display: flex;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
-}
-
-.product__tab {
-  height: 30px;
-  padding: 0 var(--sp-4);
-  border-radius: var(--r-pill);
-  background: var(--c-primary-pale);
-  color: var(--c-primary);
-  font-size: 13px;
-}
-
-.product__tab--on {
-  background: var(--c-primary);
-  color: #fff;
-}
-
 .product__filters {
   display: flex;
   flex-wrap: wrap;
@@ -928,16 +789,6 @@ onMounted(load)
   color: var(--c-primary);
 }
 
-/* 商品订单 tab 用（那一行仍是「名称 × 数量 / 金额」的老排布） */
-.product__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--c-text-muted);
-}
-
 .product__stock {
   display: flex;
   flex-direction: column;
@@ -1024,27 +875,6 @@ onMounted(load)
 .product__btn--ok {
   background: #cdead9;
   color: #2b7d52;
-}
-
-.product__order {
-  padding: var(--sp-3) 0;
-}
-
-.product__order + .product__order {
-  border-top: 1px solid var(--c-border);
-}
-
-.product__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-}
-
-.product__no {
-  font-size: 12px;
-  color: var(--c-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .product__check {

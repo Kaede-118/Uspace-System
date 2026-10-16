@@ -5,7 +5,14 @@
  */
 import http from './http'
 
-/** 卡种。 */
+/**
+ * 卡种。
+ *
+ * <p>⚠️ <b>只有这两种可购买</b>：后端还有一个 {@code STAFF} 卡（后台发放的员工免单卡），
+ * 它不在 {@code /api/cards/types} 的在售列表里，购买接口对它一律拒绝 ——
+ * 它只在后台的 {@code POST /api/admin/cards} 发放，所以这里刻意不列它。
+ * 用户端见到它只有一处：卡包里已持有的那张（显示为「STAFF 卡 · 长期有效」）。
+ */
 export const CardType = {
   /** 全天月卡：所有时段免费 */
   ALL_DAY: 'ALL_DAY',

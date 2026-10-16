@@ -8,9 +8,13 @@ import com.kaede.uspace.common.result.BizResult;
 import com.kaede.uspace.common.result.ErrorCode;
 import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.promotion.dto.CardPurchaseVo;
+import com.kaede.uspace.promotion.dto.CardTypeVo;
 import com.kaede.uspace.promotion.dto.CardWalletVo;
+import com.kaede.uspace.promotion.dto.MonthlyCardVo;
 import com.kaede.uspace.promotion.entity.MonthlyCard;
 import com.kaede.uspace.promotion.entity.MonthlyCardOrder;
+import com.kaede.uspace.user.FakeSysUserMapper;
+import com.kaede.uspace.user.entity.SysUser;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,13 +63,16 @@ class MonthlyCardServiceTests {
     private final PromotionProperties properties = new PromotionProperties();
     private final BillingProperties billingProperties = new BillingProperties();
 
+    /** 用户表：后台开卡要用（确认人存在、把卡费记进累计消费） */
+    private final FakeSysUserMapper userMapper = new FakeSysUserMapper();
+
     /** 被测服务，每个用例前重建 */
     private MonthlyCardService service;
 
     @BeforeEach
     void setUp() {
         service = new MonthlyCardService(cardMapper.asMapper(), orderMapper.asMapper(),
-                properties, billingProperties, event -> { });
+                properties, billingProperties, event -> { }, userMapper.asMapper());
     }
 
     // ==================================================================
@@ -270,6 +278,145 @@ class MonthlyCardServiceTests {
     }
 
     // ==================================================================
+    // STAFF 卡与后台开卡 / 停卡
+    // ==================================================================
+
+    @Test
+    @DisplayName("⚠️ 守门：STAFF 卡不能在购买接口下单 —— 否则谁都能给自己发一张永久免费卡")
+    void purchase_rejectsStaffCard() {
+        BizResult<CardPurchaseVo> result = service.purchase(USER_ID, MonthlyCardType.STAFF);
+
+        assertEquals(ErrorCode.PARAM_INVALID, result.getError());
+        assertEquals(0, orderMapper.size(), "拒绝就不该落下任何购买单");
+    }
+
+    @Test
+    @DisplayName("STAFF 卡不出现在在售卡种列表里（购买页的数据源）")
+    void cardTypes_excludesStaffCard() {
+        List<String> types = service.cardTypes().getData().stream()
+                .map(CardTypeVo::getCardType).toList();
+
+        assertEquals(List.of("ALL_DAY", "NIGHT"), types,
+                "在售的只有两种月卡；STAFF 卡混进来的话顾客能买到它");
+    }
+
+    @Test
+    @DisplayName("开卡：普通卡按配置价、有效期 30 天含首尾，卡费记进累计消费")
+    void issueCard_regularCardRecordsPrice() {
+        SysUser user = userMapper.seed(userOf(USER_ID));
+
+        BizResult<MonthlyCardVo> result = service.issueCard(USER_ID, MonthlyCardType.ALL_DAY, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(TODAY, result.getData().getStartDate());
+        assertEquals(TODAY.plusDays(29), result.getData().getEndDate(), "含首尾 30 天");
+        assertEquals(new BigDecimal("600"), result.getData().getPrice());
+        assertEquals(new BigDecimal("600"), user.getCardPaid(),
+                "面对面收的钱要记进累计消费（与线上支付走同一个累加点）");
+    }
+
+    @Test
+    @DisplayName("开卡：实收金额可覆盖（当面交易打折），填 0 则一分不记")
+    void issueCard_customPriceAndZero() {
+        SysUser user = userMapper.seed(userOf(USER_ID));
+
+        BizResult<MonthlyCardVo> first = service.issueCard(
+                USER_ID, MonthlyCardType.NIGHT, new BigDecimal("200"));
+        assertTrue(first.isSuccess(), "打折卖是正常操作");
+        assertEquals(new BigDecimal("200"), user.getCardPaid());
+        assertEquals(new BigDecimal("200"), first.getData().getPrice(),
+                "卡上记的是实收，事后对账看的就是它");
+    }
+
+    @Test
+    @DisplayName("开卡：已有生效卡时拒绝（与线上购买同一口径）")
+    void issueCard_rejectsWhenCardActive() {
+        userMapper.seed(userOf(USER_ID));
+        cardMapper.seed(activeCard(USER_ID, MonthlyCardType.ALL_DAY, TODAY, TODAY.plusDays(29)));
+
+        BizResult<MonthlyCardVo> result = service.issueCard(USER_ID, MonthlyCardType.NIGHT, null);
+
+        assertEquals(ErrorCode.CARD_ALREADY_ACTIVE, result.getError(),
+                "不给人开第二张重叠的卡");
+        assertEquals(1, cardMapper.size(), "拒绝就不该多出记录");
+    }
+
+    @Test
+    @DisplayName("开卡：用户不存在时按 404 拒绝")
+    void issueCard_rejectsUnknownUser() {
+        BizResult<MonthlyCardVo> result = service.issueCard(9999L, MonthlyCardType.ALL_DAY, null);
+
+        assertEquals(ErrorCode.USER_NOT_FOUND, result.getError());
+        assertEquals(0, cardMapper.size());
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：STAFF 卡无价、到期日填远期日期，且允许与已购月卡并存")
+    void issueCard_staffCardCoexistsWithPaidCard() {
+        SysUser user = userMapper.seed(userOf(USER_ID));
+        cardMapper.seed(activeCard(USER_ID, MonthlyCardType.NIGHT, TODAY, TODAY.plusDays(29)));
+
+        BizResult<MonthlyCardVo> result = service.issueCard(USER_ID, MonthlyCardType.STAFF, null);
+
+        assertTrue(result.isSuccess(),
+                "店员自己买过月卡是正常操作，挡住他只会让STAFF 卡永远发不出来");
+        assertEquals(MonthlyCardType.STAFF_START_DATE, result.getData().getStartDate(),
+                "起始日是远在过去的日期，不是开卡当日 —— 填开卡当日的话，"
+                        + "「先开门、后开卡」与跨零点挂单的人在在店列表里看不到卡（2026-10-10 踩过）");
+        assertEquals(MonthlyCardType.STAFF_END_DATE, result.getData().getEndDate(),
+                "「无到期日」靠远期日期表达");
+        assertEquals(0, result.getData().getPrice().signum(), "STAFF 卡无价");
+        assertNull(result.getData().getRemainingDays(), "不报「还剩两万多天」");
+        assertNull(user.getCardPaid(), "0 元开卡不记累计消费");
+        assertTrue(result.getData().getEffective(), "STAFF 卡开出来就是生效的");
+
+        // 并存时计费必须取STAFF 卡 —— 取到夜间月卡的话，员工白天玩会被照常计费，
+        // 而他以为自己是免单的。这条排序在 SQL 里，假实现里逐条对齐
+        CardCoverage coverage = service.findCoverageAt(USER_ID, TODAY);
+        assertNotNull(coverage);
+        assertTrue(coverage.covers(BillingPeriod.DAY, TODAY.atTime(15, 0)),
+                "白天也要免 —— 不能取到只覆盖夜场的月卡");
+        assertTrue(coverage.covers(BillingPeriod.NIGHT, TODAY.atTime(23, 0)));
+        assertTrue(coverage.covers(BillingPeriod.DAY, LocalDate.of(2060, 1, 1).atTime(12, 0)),
+                "到期日在 2099，任何正常订单区间都在覆盖之内");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：停卡立刻停止免单，视图里的 effective 同步翻掉")
+    void revokeCard_stopsCoverageImmediately() {
+        MonthlyCard card = cardMapper.seed(
+                activeCard(USER_ID, MonthlyCardType.STAFF, TODAY, MonthlyCardType.STAFF_END_DATE));
+
+        BizResult<MonthlyCardVo> result = service.revokeCard(card.getId());
+
+        assertTrue(result.isSuccess());
+        assertEquals(MonthlyCardStatus.REVOKED.name(), result.getData().getStatus());
+        assertFalse(result.getData().getEffective());
+        assertNull(service.findActiveCard(USER_ID, TODAY),
+                "停完立刻查不到 —— 免单随之停止（判定只认 ACTIVE）");
+        assertEquals(MonthlyCardStatus.REVOKED.name(), cardMapper.get(card.getId()).getStatus(),
+                "落库的状态也要是已停用");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：停卡只认生效中的卡，已退款的不被「已停用」覆盖掉事实")
+    void revokeCard_rejectsNonActive() {
+        MonthlyCard refunded = cardMapper.seed(
+                activeCard(USER_ID, MonthlyCardType.ALL_DAY, TODAY, TODAY.plusDays(29)));
+        refunded.setStatus(MonthlyCardStatus.REFUNDED.name());
+
+        BizResult<MonthlyCardVo> result = service.revokeCard(refunded.getId());
+
+        assertEquals(ErrorCode.CARD_STATUS_INVALID, result.getError());
+        assertEquals(MonthlyCardStatus.REFUNDED.name(),
+                cardMapper.get(refunded.getId()).getStatus(),
+                "状态守卫拦住的话，退款的事实不会被改写");
+
+        assertEquals(ErrorCode.CARD_NOT_FOUND,
+                service.revokeCard(9999L).getError(), "不存在的卡按 404 处理");
+    }
+
+    // ==================================================================
     // 卡包与到期翻转
     // ==================================================================
 
@@ -319,6 +466,20 @@ class MonthlyCardServiceTests {
     // ==================================================================
     // 构造辅助
     // ==================================================================
+
+    /**
+     * 造一个用户（后台开卡要先把人放进假用户表）。
+     *
+     * @param userId 用户 ID
+     * @return 用户实体（未落库）
+     */
+    private static SysUser userOf(Long userId) {
+        SysUser user = new SysUser();
+        user.setId(userId);
+        user.setUsername("user" + userId);
+        user.setNickname("测试用户" + userId);
+        return user;
+    }
 
     /**
      * 造一张月卡。

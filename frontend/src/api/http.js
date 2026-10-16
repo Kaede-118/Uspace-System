@@ -7,6 +7,7 @@
 import axios from 'axios'
 import { ApiError } from '@/utils/error'
 import { getToken, clearAuth } from '@/utils/storage'
+import { finishLoading, isSilentMode, startLoading } from '@/composables/useLoading'
 
 /**
  * 后端地址。
@@ -72,6 +73,22 @@ const http = axios.create({
   withCredentials: false
 })
 
+/* ---------------- 全局加载遮罩 ---------------- */
+
+/**
+ * 收起这个请求对应的遮罩。
+ *
+ * <p>⚠️ <b>只认发起时记下的 {@code __counted}，不重新判断 silent / 静默模式</b>：
+ * 判断条件在请求在途期间可能已经变了（发起时是静默刷新、回来时静默已关闭），
+ * 那时多减一次，会把别的请求的遮罩提前关掉 —— 表现为遮罩一闪而过、
+ * 而请求还在路上。
+ *
+ * @param {object} [config] axios 请求配置（网络错误、请求被取消时可能没有）
+ */
+function endLoading(config) {
+  if (config?.__counted) finishLoading()
+}
+
 /* ---------------- 请求拦截：带上凭证 ---------------- */
 
 http.interceptors.request.use(
@@ -79,6 +96,19 @@ http.interceptors.request.use(
     const token = getToken()
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
+    }
+    /*
+     * 请求确实发出去了 —— 亮起全局遮罩，让用户看得见「在等」。
+     *
+     * ⚠️ 放在拦截器的最后一行：这之前若抛错，请求根本没发出去，
+     * 不该显示「正在加载」。
+     * ⚠️ 两种请求跳过：带 silent 标记的（轮询，每隔几秒一次）、
+     * 以及静默模式下发的（keep-alive 返回页面时的后台刷新）。
+     * ⚠️ 计过数就在 config 上记一笔，响应回来据此配对 —— 见 endLoading 的说明。
+     */
+    if (!config.silent && !isSilentMode()) {
+      config.__counted = true
+      startLoading()
     }
     return config
   },
@@ -101,6 +131,8 @@ http.interceptors.response.use(
    * 而控制台里一行报错都没有。
    */
   (response) => {
+    // 先收遮罩再处理数据：万一下面抛错，遮罩也已经收掉了
+    endLoading(response.config)
     const body = response.data
     // 支付回调那两个端点返回的不是 ApiResult（微信/支付宝自己的协议），
     // 但前端不会直接调它们，这里统一按 ApiResult 处理即可
@@ -119,6 +151,8 @@ http.interceptors.response.use(
    * <p>后端用的是【真实 HTTP 状态码】而不是一律 200，所以绝大多数业务失败都走这里。
    */
   (error) => {
+    // ⚠️ 失败分支同样要收 —— 少了这一句，一次失败的请求会让遮罩永远盖着
+    endLoading(error.config)
     const response = error.response
     const body = response?.data
     const status = response?.status || 0

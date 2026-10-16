@@ -7,23 +7,22 @@
  */
 import { computed } from 'vue'
 import { formatMoney, formatDateTime, formatDuration } from '@/utils/format'
+import { orderStatusCls } from '@/utils/labels'
 
 const props = defineProps({
   /** OrderVo */
   order: { type: Object, required: true }
 })
 
-/** 状态标签配色。 */
-const statusClass = computed(() => {
-  switch (props.order.status) {
-    case 'IN_USE':
-      return 'tag' /* 主色，表示正在计费 */
-    case 'PENDING_PAYMENT':
-      return 'tag tag-warning'
-    default:
-      return 'tag tag-success'
-  }
-})
+/**
+ * 状态标签配色。口径在 {@code labels.js}（订单卡片、详情页、后台订单列表
+ * 三处共用一份，见那里 {@code ORDER_STATUS} 的说明）。
+ *
+ * <p>⚠️ 这里原来自己写了一份 switch、只判 IN_USE / PENDING_PAYMENT，
+ * 其余一律绿色 —— 于是「凭证未通过」在列表里是绿的、点进详情页却是红的，
+ * 同一个状态两个颜色，且不报任何错。
+ */
+const statusClass = computed(() => orderStatusCls(props.order.status))
 
 /** 金额前缀：没付的叫「应付」，付过的叫「实付」。 */
 const amountLabel = computed(() => (props.order.status === 'PAID' ? '实付' : '应付'))

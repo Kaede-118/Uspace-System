@@ -102,3 +102,28 @@ export function clearAuth() {
   clearToken()
   clearUser()
 }
+
+/* ---------------- 「添加到桌面」引导 ---------------- */
+
+/**
+ * ⚠️ 这个 key 刻意不跟着 {@link clearAuth} 一起清：它记的是「这个用户
+ * 不想再看到那条提示」，与登录态是两件事 —— 登出后再进站仍然不该提示。
+ */
+const INSTALL_GUIDE_KEY = 'uspace_install_guide_dismissed'
+
+/**
+ * 「添加到桌面」引导提示是否已被用户关掉过。
+ *
+ * <p>关掉就永久不再提示 —— 它是「建议」而不是「通知」，
+ * 反复出现只会让人烦；想再看到它，清一次浏览器数据即可。
+ *
+ * @returns {boolean} 关过返回 true
+ */
+export function isInstallGuideDismissed() {
+  return safeGet(INSTALL_GUIDE_KEY) === '1'
+}
+
+/** 记下「用户关掉了添加到桌面的引导」（点「暂不」「知道了」，或已经装完了）。 */
+export function dismissInstallGuide() {
+  safeSet(INSTALL_GUIDE_KEY, '1')
+}

@@ -105,6 +105,7 @@ public class FakeMonthlyCardMapper implements InvocationHandler {
             case "selectActiveAt" -> selectActiveAt(args);
             case "selectByUser" -> selectByUser((Long) args[0]);
             case "expireBefore" -> expireBefore((LocalDate) args[0]);
+            case "revokeActive" -> revokeActive((Long) args[0]);
             case "selectPageBy" -> selectPageBy(args);
             default -> throw new UnsupportedOperationException(
                     "假 Mapper 未实现方法 " + method.getName()
@@ -149,8 +150,10 @@ public class FakeMonthlyCardMapper implements InvocationHandler {
      * 查某日生效的卡。
      *
      * <p>四个条件与真 SQL 逐字对应：逻辑未删、状态为生效中、
-     * 生效日不晚于该日、失效日不早于该日。取 ID 最大的一张，
-     * 对应真 SQL 的 {@code ORDER BY id DESC LIMIT 1}。
+     * 生效日不晚于该日、失效日不早于该日。取失效最晚的一张
+     *（同一天到期时再比 ID），对应真 SQL 的
+     * {@code ORDER BY end_date DESC, id DESC LIMIT 1} ——
+     * 这条排序让STAFF 卡（到期日 2099）在与月卡并存时天然胜出。
      *
      * @param args 依次为用户 ID、日期
      * @return 生效中的月卡；没有则返回 null
@@ -165,7 +168,8 @@ public class FakeMonthlyCardMapper implements InvocationHandler {
                 .filter(c -> MonthlyCardStatus.ACTIVE.name().equals(c.getStatus()))
                 .filter(c -> c.getStartDate() != null && !c.getStartDate().isAfter(date))
                 .filter(c -> c.getEndDate() != null && !c.getEndDate().isBefore(date))
-                .max(Comparator.comparing(MonthlyCard::getId))
+                .max(Comparator.comparing(MonthlyCard::getEndDate)
+                        .thenComparing(MonthlyCard::getId))
                 .orElse(null);
     }
 
@@ -204,6 +208,25 @@ public class FakeMonthlyCardMapper implements InvocationHandler {
             }
         }
         return affected;
+    }
+
+    /**
+     * 把一张生效中的卡置为已停用（后台收回）。
+     *
+     * <p>状态守卫与真 SQL 一致：只有 {@code ACTIVE} 能停，其余返回 0 ——
+     * 假实现漏掉守卫的话，测试就发现不了「已退款的卡被改成已停用」
+     * 这类覆盖事实的状态变化。
+     *
+     * @param id 卡 ID
+     * @return 受影响行数；0 表示卡不存在或不是生效中状态
+     */
+    private int revokeActive(Long id) {
+        MonthlyCard card = rows.get(id);
+        if (!isAlive(card) || !MonthlyCardStatus.ACTIVE.name().equals(card.getStatus())) {
+            return 0;
+        }
+        card.setStatus(MonthlyCardStatus.REVOKED.name());
+        return 1;
     }
 
     /**

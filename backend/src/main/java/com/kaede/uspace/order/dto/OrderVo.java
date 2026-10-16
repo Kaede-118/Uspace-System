@@ -29,6 +29,20 @@ public class OrderVo {
     /** 订单号，对外展示与客服核对用 */
     private String orderNo;
 
+    /** 下单用户 ID */
+    private Long userId;
+
+    /**
+     * 下单用户昵称（昵称未填时回落登录名）。
+     *
+     * <p><b>只有后台列表接口（{@code /api/admin/orders}）填充它</b> ——
+     * 后台的流水要一眼看出「这是谁的单」；用户端查自己的订单时它恒为 null
+     * （那条路不带、也不必带，见 {@code OrderService#listOrders}）。
+     *
+     * <p>用户已注销或确实查不到时为 null，前端回落成「用户 #ID」。
+     */
+    private String userNickname;
+
     /** 门店 ID */
     private Long storeId;
 
@@ -170,6 +184,8 @@ public class OrderVo {
         OrderVo vo = new OrderVo();
         vo.setId(order.getId());
         vo.setOrderNo(order.getOrderNo());
+        vo.setUserId(order.getUserId());
+        // userNickname 不在这里填：它要查用户表，只有后台列表那条路需要（见字段注释）
         vo.setStoreId(order.getStoreId());
         vo.setBookingId(order.getBookingId());
         vo.setStartTime(order.getStartTime());

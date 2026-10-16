@@ -125,26 +125,86 @@ export function deviceStatusCls(status) {
 }
 
 /**
- * 月卡类型（后端 {@code MonthlyCardType}），两项。
+ * 卡类型（后端 {@code MonthlyCardType}），三项。
  *
  * <p>用户端在店名册那份数据由后端直接给出中文（{@code cardTypeLabel}），
  * 而运营后台的用户列表只给 code —— 那一列要参与筛选与排序，多传一个
  * 纯展示字段会让「哪些是数据、哪些是渲染」变得含混。所以后台这一侧由前端映射。
+ *
+ * <p>⚠️ <b>STAFF 卡不在商城的在售列表里</b>（后端 {@code cardTypes()} 过滤掉了它），
+ * 但本表是「所有卡种的中文名」，所以三项都要有 —— 后台的用户筛选、
+ * 卡包、后台开卡弹层都要能显示STAFF 卡。
  */
 export const MONTHLY_CARD_TYPES = [
   { value: 'ALL_DAY', label: '全天月卡', cls: 'tag tag-success' },
-  { value: 'NIGHT', label: '夜间月卡', cls: 'tag' }
+  { value: 'NIGHT', label: '夜间月卡', cls: 'tag' },
+  { value: 'STAFF', label: 'STAFF 卡', cls: 'tag tag-warning' }
 ]
 
 /**
  * 月卡类型的中文名。
  *
  * @param {string} cardType 卡种 code；为空表示没有生效卡
- * @returns {string} 「全天月卡」/「夜间月卡」/「无」
+ * @returns {string} 「全天月卡」/「夜间月卡」/「STAFF 卡」/「无」
  */
 export function cardTypeLabel(cardType) {
   const item = MONTHLY_CARD_TYPES.find((c) => c.value === cardType)
   return item ? item.label : '无'
+}
+
+/**
+ * 月卡状态的标签配色（后端 {@code MonthlyCardStatus}）。
+ *
+ * <p>中文名不在这里 —— 后端 {@code MonthlyCardVo} 已给 {@code statusLabel}，
+ * 按「后端给了的一律用后端的」那条规矩走（见文件头）。这里只管配色。
+ *
+ * @param {string} status 状态名 ACTIVE / EXPIRED / REFUNDED / REVOKED
+ * @returns {string} 形如 "tag tag-success"
+ */
+export function cardStatusCls(status) {
+  switch (status) {
+    case 'ACTIVE':
+      return 'tag tag-success'
+    case 'REFUNDED':
+    case 'REVOKED':
+      return 'tag tag-danger'
+    default:
+      return 'tag'
+  }
+}
+
+/**
+ * 订单状态（后端 {@code OrderStatus}），四态。
+ *
+ * <p>⚠️ <b>2026-10-10 从三处局部实现里收拢来的</b>：用户端的订单卡片与订单详情页
+ * 各有一份 {@code statusClass}，而后台订单列表还要第三份 —— 三份迟早分岔，
+ * 且分岔不报错（同一个 REJECTED 在一处红、另一处绿）。这正是本文件存在的理由。
+ *
+ * <p>顺带修掉一个真实的分岔：{@code OrderCard} 原来只判 IN_USE / PENDING_PAYMENT，
+ * 其余一律绿色 —— 于是「凭证未通过」在列表里是绿的、点进详情是红的。
+ *
+ * <p>{@code label} 供后台筛选下拉使用，行内展示用后端给的 {@code statusText}
+ *（「后端给了的一律用后端的」那条规矩）。
+ */
+export const ORDER_STATUS = [
+  { value: 'IN_USE', label: '使用中', cls: 'tag' },
+  { value: 'PENDING_PAYMENT', label: '待支付', cls: 'tag tag-warning' },
+  { value: 'PAID', label: '已支付', cls: 'tag tag-success' },
+  { value: 'REJECTED', label: '凭证未通过', cls: 'tag tag-danger' }
+]
+
+/**
+ * 取订单状态的标签配色。
+ *
+ * <p>认不出的取值退回默认灰标签，不抛异常（与其他几个 {@code xxxCls} 同一条规矩）——
+ * 状态列是 VARCHAR，可能存着枚举之外的字符串，显示出来好过整页白屏。
+ *
+ * @param {string} status 状态名
+ * @returns {string} 形如 "tag tag-warning"
+ */
+export function orderStatusCls(status) {
+  const item = ORDER_STATUS.find((s) => s.value === status)
+  return item ? item.cls : 'tag'
 }
 
 /**

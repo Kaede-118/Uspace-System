@@ -10,16 +10,23 @@
  * {@code periodText} 里的「22:00 – 次日 10:00」由后端的
  * {@code uspace.billing.day-start / day-end} 决定，写死会在改配置时对不上。
  */
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { listProducts } from '@/api/product'
 import { createProductOrder } from '@/api/product'
 import { listCardTypes, purchaseCard, getMyCards } from '@/api/card'
 import { toastSuccess, toastError } from '@/composables/useToast'
+import { useKeepAliveRefresh } from '@/composables/useKeepAliveRefresh'
 import { errorMessage, isCode, ErrorCode } from '@/utils/error'
 import { formatMoney, formatDate } from '@/utils/format'
 import ProductDetailSheet from '@/components/ProductDetailSheet.vue'
 import PaySheet from '@/components/PaySheet.vue'
 import EmptyState from '@/components/EmptyState.vue'
+
+/**
+ * 组件名，供 `App.vue` 的 keep-alive include 列表匹配。
+ * ⚠️ 必须与文件名一致 —— 写错不会报任何错，只是缓存静默失效、返回时仍要重新加载。
+ */
+defineOptions({ name: 'MallView' })
 
 const tab = ref('goods')
 const tabs = [
@@ -99,9 +106,19 @@ async function onBuyCard(cardType) {
   }
 }
 
-/** 支付完成：刷新数据（商品库存变了、月卡可能生效了）。 */
-async function onPaid() {
-  toastSuccess('支付成功')
+/**
+ * 支付完成：刷新数据（商品库存变了、月卡可能生效了）。
+ *
+ * <p>⚠️ <b>月卡走扫码转账时不能说「支付成功」</b>（2026-10-10 修）：那条路交的是
+ * 付款截图，卡要等管理员复核通过才发（后端 {@code deliverOnSubmit=false}）——
+ * 用户把截图贴上、看到一句「支付成功」，转头去卡包发现没有卡。
+ * 判据用返回体里的 {@code delivered}，不按 targetType 自己猜。
+ *
+ * @param {object} [info] 凭证提交的返回体；线上通道那条路没有（即为已交付）
+ */
+async function onPaid(info) {
+  const deferred = payTargetType.value === 'MONTHLY_CARD' && info?.delivered === false
+  toastSuccess(deferred ? '付款凭证已提交，待管理员复核后开通' : '支付成功')
   payVisible.value = false
   await Promise.all([loadProducts(), loadCards()])
 }
@@ -123,10 +140,15 @@ async function loadCards() {
   if (mineRes.status === 'fulfilled') activeCard.value = mineRes.value.data?.active || null
 }
 
-onMounted(async () => {
+/*
+ * 首次加载 + 从别的页面切回来时的过期刷新，都交给 keep-alive 那个 composable：
+ * 数据还新鲜就【不重新加载】（秒开），过期了才静默补一次。
+ * 商品与月卡的变化都不频繁，保鲜期给到 60 秒。
+ */
+useKeepAliveRefresh(async () => {
   await Promise.all([loadProducts(), loadCards()])
   loading.value = false
-})
+}, 60000)
 </script>
 
 <template>
@@ -174,6 +196,15 @@ onMounted(async () => {
 
     <!-- ========== 月卡 ========== -->
     <template v-else>
+      <!--
+        ⚠️ 买之前就要说清「不是即时生效」（2026-10-10 由用户要求）：
+        扫码转账那条路交的是付款截图，管理员复核通过才发卡 ——
+        等用户付完再看到这句话就晚了，他会先怀疑钱丢了
+      -->
+      <p class="card-hint">
+        月卡并非即时生效：付款后需等管理员复核，通过后才会开通。
+      </p>
+
       <!-- 已有生效中的卡时先把状态亮出来，免得用户买完才发现买重了 -->
       <div v-if="activeCard" class="card card-active">
         <div class="card-title">当前月卡</div>
@@ -343,6 +374,15 @@ onMounted(async () => {
 }
 
 /* ---- 月卡 ---- */
+
+/* 「不是即时生效」那句（2026-10-10 由用户要求）：放在卡种列表之前，
+   买之前就该看到 —— 与卡包里待支付那张单上的同一句是同一件事 */
+.card-hint {
+  margin-bottom: var(--sp-3);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-text-sub);
+}
 
 .card-active {
   margin-bottom: var(--sp-3);

@@ -21,11 +21,16 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.kaede.uspace.user.entity.SysUser;
+import com.kaede.uspace.user.mapper.SysUserMapper;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 商品服务。
@@ -63,14 +68,22 @@ public class ProductService {
      */
     private final ApplicationEventPublisher events;
 
+    /**
+     * 用户表。只为后台商品订单列表补「这单是谁买的」——
+     * 用户端查自己的订单时用不到（那条路不带昵称）。
+     */
+    private final SysUserMapper sysUserMapper;
+
     public ProductService(ProductMapper productMapper,
                           ProductOrderMapper orderMapper,
                           ProductProperties properties,
-                          ApplicationEventPublisher events) {
+                          ApplicationEventPublisher events,
+                          SysUserMapper sysUserMapper) {
         this.productMapper = productMapper;
         this.orderMapper = orderMapper;
         this.properties = properties;
         this.events = events;
+        this.sysUserMapper = sysUserMapper;
     }
 
     // ==================================================================
@@ -495,7 +508,51 @@ public class ProductService {
         }
         IPage<ProductOrder> page = orderMapper.selectPageBy(
                 new Page<>(pageNum, pageSize), userId, statusFilter);
-        return BizResult.ok(PageResult.of(page, ProductOrderVo::from));
+        PageResult<ProductOrderVo> result = PageResult.of(page, ProductOrderVo::from);
+        // 后台的流水要一眼看出「这是谁买的」—— 逐条查用户是 N+1，批量补一次。
+        // 用户端（固定传自己的 userId）也走这条路，多一次按主键的批量查，可以接受
+        attachUserNames(result.getRecords());
+        return BizResult.ok(result);
+    }
+
+    /**
+     * 给一批购买单视图补上购买人昵称（后台列表用）。
+     *
+     * <p>昵称取 {@code nickname}、没填时回落到登录名 —— 与后台用户列表、
+     * 订单流的展示口径一致（几处都要能认出同一个人）。
+     *
+     * <p>查不到的用户（已注销）留 null，前端回落成「用户 #ID」：
+     * 这里不填一个编造的名字，免得把「查不到」伪装成「叫这个名字」。
+     *
+     * @param records 当前页的购买单视图，原地补 {@code userNickname}
+     */
+    private void attachUserNames(List<ProductOrderVo> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        List<Long> userIds = records.stream()
+                .map(ProductOrderVo::getUserId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return;
+        }
+        Map<Long, String> names = sysUserMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, ProductService::displayName));
+        records.forEach(vo -> vo.setUserNickname(names.get(vo.getUserId())));
+    }
+
+    /**
+     * 用户显示名：昵称优先，没填时回落登录名。
+     *
+     * @param user 用户实体
+     * @return 展示用的名字
+     */
+    private static String displayName(SysUser user) {
+        return user.getNickname() == null || user.getNickname().isBlank()
+                ? user.getUsername()
+                : user.getNickname();
     }
 
     // ==================================================================

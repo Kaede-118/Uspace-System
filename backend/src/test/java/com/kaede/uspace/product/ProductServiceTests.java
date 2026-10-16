@@ -11,6 +11,7 @@ import com.kaede.uspace.product.dto.ProductSaveRequest;
 import com.kaede.uspace.product.dto.ProductVo;
 import com.kaede.uspace.product.entity.Product;
 import com.kaede.uspace.product.entity.ProductOrder;
+import com.kaede.uspace.user.FakeSysUserMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -59,6 +60,9 @@ class ProductServiceTests {
     private final FakeProductOrderMapper orderMapper = new FakeProductOrderMapper();
     private final ProductProperties properties = new ProductProperties();
 
+    /** 用户表：后台订单列表要按它补购买人昵称 */
+    private final FakeSysUserMapper userMapper = new FakeSysUserMapper();
+
     /** 被测服务，每个用例前重建 */
     private ProductService service;
 
@@ -69,7 +73,7 @@ class ProductServiceTests {
     void setUp() {
         publishedEvents.clear();
         service = new ProductService(productMapper.asMapper(), orderMapper.asMapper(),
-                properties, publishedEvents::add);
+                properties, publishedEvents::add, userMapper.asMapper());
     }
 
     // ==================================================================

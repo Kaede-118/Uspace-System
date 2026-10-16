@@ -111,13 +111,22 @@ export function usePreviewPolling(options = {}) {
     return at >= renderedPreviewAt
   }
 
-  /** 拉一次预览。 */
-  async function fetchOnce() {
+  /**
+   * 拉一次预览。
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.silent] 是否跳过全局加载遮罩。默认 true ——
+   *        轮询属于后台刷新，弹遮罩会把正在看的页面反复盖住。
+   *        ⚠️ {@link start} 的【首次】加载必须传 false：那一刻页面还是空的，
+   *        用户需要看见「在加载」。结账页尤其明显 —— 少了它，点「离店结账」
+   *        跳过来只有一张空页面，看起来像卡死了。
+   */
+  async function fetchOnce({ silent = true } = {}) {
     if (!orderId) return
     const requestedId = orderId
     loading.value = true
     try {
-      const resp = await getPreview(requestedId)
+      const resp = await getPreview(requestedId, { silent })
       /*
        * 【坑二：停止后仍在途的响应】
        *
@@ -180,7 +189,8 @@ export function usePreviewPolling(options = {}) {
     stop()
     orderId = id
     renderedPreviewAt = ''
-    await fetchOnce()
+    // 首次加载【不静默】：页面此刻是空的，要让用户看见「在加载」
+    await fetchOnce({ silent: false })
     if (orderId) {
       schedule()
       startTick()

@@ -5,27 +5,25 @@ import java.util.Arrays;
 /**
  * 月卡状态。取值与建表脚本里 {@code biz_monthly_card.status} 的注释一一对应。
  *
- * <p>状态流转只有两跳：
+ * <p>状态流转：
  * <pre>
  *   （支付成功 → 生成卡即进入）ACTIVE 生效中
  *          │
- *       到期日已过（定时任务翻转）
- *          ↓
- *      EXPIRED 已过期
- *
- *   ACTIVE ──管理员人工退款──> REFUNDED 已退款
+ *          ├─ 到期日已过（定时任务翻转）──> EXPIRED 已过期
+ *          ├─ 管理员人工退款 ────────────> REFUNDED 已退款
+ *          └─ 后台收回（停用）───────────> REVOKED 已停用
  * </pre>
  *
  * <p><b>为什么没有「待支付」</b>：还没付钱的卡不是卡。购买尝试记在
  * {@code biz_monthly_card_order} 里（状态见 {@link CardOrderStatus}），
- * 付成功了才往本表插一张卡。合成一张表的话，
- * {@code start_date} / {@code end_date} 就得放开为可空 ——
- * 而那是「卡」的核心属性，让核心属性可空说明表里混进了不是卡的东西。
+ * 付成功了才往本表插一张卡。
  *
  * <p><b>过期与否以 {@code end_date} 为准，状态只是给人看的</b>：
  * 免单判定同时校验状态与日期，所以定时任务漏跑（服务停过）也不会
  * 出现「过期卡还在免单」。反过来，把卡置成 {@link #REFUNDED}
- * 会立刻停止免单 —— 这正是日期之外还要判状态的理由。
+ * 或 {@link #REVOKED} 都会立刻停止免单 —— 这正是日期之外还要判状态的理由。
+ * STAFF 卡（{@link MonthlyCardType#STAFF}）的到期日在 2099，实际上不会自己结束，
+ * 状态同样是它唯一的开关。
  */
 public enum MonthlyCardStatus {
 
@@ -36,7 +34,21 @@ public enum MonthlyCardStatus {
     EXPIRED("已过期"),
 
     /** 已退款。走管理员人工审批，资金线下退 */
-    REFUNDED("已退款");
+    REFUNDED("已退款"),
+
+    /**
+     * 已停用。后台把卡收回 —— <b>只停权益，不动钱</b>（退款与它对不上时是两回事，
+     * 钱的事一律线下处置）。
+     *
+     * <p>它与 {@link #REFUNDED} 分开，是因为两者回答的问题不同：
+     * 「钱退了吗」与「卡还在不在」。STAFF 卡没有钱的问题（不售卖），
+     * 撤销它只可能是「离职」或「发错了」，报「已退款」纯粹是误导。
+     *
+     * <p>典型用法：误发给错人的月卡、STAFF 卡离职回收。置为已停用之后
+     * 免单立刻停止（判定只认 {@code ACTIVE}），卡包与后台列表里还能看到，
+     * 历史说得清。
+     */
+    REVOKED("已停用");
 
     /** 面向用户的中文说明，供前端展示 */
     private final String label;

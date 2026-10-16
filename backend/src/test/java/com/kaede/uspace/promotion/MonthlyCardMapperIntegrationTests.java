@@ -109,6 +109,50 @@ class MonthlyCardMapperIntegrationTests {
     }
 
     @Test
+    @DisplayName("⚠️ 守门：STAFF 卡与月卡并存时取 STAFF 卡（到期日 2099 胜出）")
+    void selectActiveAt_prefersStaffCard() {
+        LocalDate today = LocalDate.now();
+
+        // 刻意让 STAFF 卡的 id 更小（先插入）：排序若还按 id DESC，取到的会是那张月卡 ——
+        // 反过来插就验不到「按到期日排序」这件事（id 大的一方恰好也是到期晚的一方）
+        MonthlyCard staff = insertCard(USER_ID, MonthlyCardType.STAFF,
+                today, MonthlyCardType.STAFF_END_DATE);
+        MonthlyCard monthly = insertCard(USER_ID, MonthlyCardType.NIGHT,
+                today, today.plusDays(29));
+        assertTrue(monthly.getId() > staff.getId(), "构造前提：月卡更晚插入、id 更大");
+
+        assertEquals(staff.getId(), cardMapper.selectActiveAt(USER_ID, today).getId(),
+                "取到夜间月卡的话，员工白天玩会被照常计费，而他以为自己是免单的");
+    }
+
+    @Test
+    @DisplayName("⚠️ 守门：停用只认生效中的卡，已退款的不被覆盖成已停用")
+    void revokeActive_guardsStatus() {
+        LocalDate today = LocalDate.now();
+        MonthlyCard active = insertCard(USER_ID, MonthlyCardType.STAFF,
+                today, MonthlyCardType.STAFF_END_DATE);
+
+        assertEquals(1, cardMapper.revokeActive(active.getId()), "生效中的卡可以停");
+        assertEquals(MonthlyCardStatus.REVOKED.name(),
+                cardMapper.selectById(active.getId()).getStatus(),
+                "SQL 里写的是字面量 'REVOKED'，与枚举名必须一致");
+        assertEquals(0, cardMapper.revokeActive(active.getId()),
+                "重复点第二下返回 0（调用方据此回「不是生效中状态」而不是静默成功）");
+        assertNull(cardMapper.selectActiveAt(USER_ID, today),
+                "停完立刻查不到 —— 免单随之停止（判定只认 ACTIVE）");
+
+        MonthlyCard refunded = insertCard(OTHER_USER_ID, MonthlyCardType.ALL_DAY,
+                today, today.plusDays(29));
+        refunded.setStatus(MonthlyCardStatus.REFUNDED.name());
+        cardMapper.updateById(refunded);
+
+        assertEquals(0, cardMapper.revokeActive(refunded.getId()),
+                "已退款的卡不该被改成已停用 —— 那会覆盖掉退款的事实");
+        assertEquals(MonthlyCardStatus.REFUNDED.name(),
+                cardMapper.selectById(refunded.getId()).getStatus());
+    }
+
+    @Test
     @DisplayName("生效判定：逻辑删除的卡查不出来")
     void selectActiveAt_excludesDeleted() {
         LocalDate today = LocalDate.now();

@@ -134,7 +134,8 @@ export function usePayment() {
     polling.value = true
     try {
       for (let i = 0; i < POLL_TIMES; i++) {
-        const resp = await getPaymentStatus(outTradeNo, channel)
+        // silent：查单每 2 秒一次，弹全局遮罩会把收银台反复盖住
+        const resp = await getPaymentStatus(outTradeNo, channel, { silent: true })
         const data = resp.data
         if (data?.message) statusMessage.value = data.message
         if (data?.paid) {

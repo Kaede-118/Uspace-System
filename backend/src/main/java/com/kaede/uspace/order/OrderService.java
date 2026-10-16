@@ -41,6 +41,8 @@ import com.kaede.uspace.space.ClosureService;
 import com.kaede.uspace.space.entity.Booking;
 import com.kaede.uspace.space.mapper.BookingMapper;
 import com.kaede.uspace.space.mapper.StoreMapper;
+import com.kaede.uspace.user.entity.SysUser;
+import com.kaede.uspace.user.mapper.SysUserMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -57,8 +59,10 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 订单服务（模块 8）。
@@ -146,6 +150,12 @@ public class OrderService {
      */
     private final ApplicationEventPublisher eventPublisher;
 
+    /**
+     * 用户表。只为后台订单列表补「这单是谁下的」——
+     * 用户端查自己的订单时用不到（那条路不带昵称）。
+     */
+    private final SysUserMapper sysUserMapper;
+
     public OrderService(OrderMapper orderMapper,
                         StoreMapper storeMapper,
                         LockMapper lockMapper,
@@ -160,7 +170,8 @@ public class OrderService {
                         OrderProperties orderProperties,
                         LockProperties lockProperties,
                         ApplicationEventPublisher eventPublisher,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        SysUserMapper sysUserMapper) {
         this.orderMapper = orderMapper;
         this.storeMapper = storeMapper;
         this.lockMapper = lockMapper;
@@ -176,6 +187,7 @@ public class OrderService {
         this.lockProperties = lockProperties;
         this.eventPublisher = eventPublisher;
         this.objectMapper = objectMapper;
+        this.sysUserMapper = sysUserMapper;
     }
 
     // ==================================================================
@@ -717,11 +729,25 @@ public class OrderService {
      * 包场是独占时段，散客必须在那之前离开 —— 包场开始时由定时任务触发本方法
      * （见 {@code BookingClearScheduler}），把人清出去、密码一并撤销。
      *
-     * <p><b>计费截止到包场开始时刻</b>，而不是执行结算的当前时刻：包场开始之后
-     * 这段时间本该只有参与者能用，把定时任务的执行延迟算进顾客账上并不合理。
-     * 代价是任务偶尔晚跑几十秒、那几十秒不计费 —— 这一取舍对顾客有利，
-     * 更实际的好处是<b>金额不随执行时机浮动</b>，同样的场景每次算出来都一样，
-     * 事后核对账单时不会出现「同一笔单重算一遍金额变了」的困惑。
+     * <p><b>结算时刻分两种取法</b>：
+     *
+     * <ul>
+     *   <li><b>订单在包场开始前就开着的</b> —— 截止到包场开始时刻，而不是执行结算的
+     *       当前时刻：包场开始之后这段时间本该只有参与者能用，把定时任务的执行延迟
+     *       算进顾客账上并不合理。代价是任务偶尔晚跑几十秒、那几十秒不计费 ——
+     *       这一取舍对顾客有利，更实际的好处是<b>金额不随执行时机浮动</b>，
+     *       同样的场景每次算出来都一样，事后核对账单时不会出现
+     *       「同一笔单重算一遍金额变了」的困惑</li>
+     *   <li><b>订单晚于包场开始的</b> —— 结算到当前时刻。这类订单只可能来自
+     *       <b>追溯包场</b>：包场在本时段已经开始之后才创建/付款，下单那一刻
+     *       准入还拦不住人，所以它完全合法，同样要清出去。绝不能按包场开始时刻
+     *       倒着结算 —— 那会算出负时长，区间查询也失去意义</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>2026-10-10 修正</b>：原先对第二类是直接跳过的，理由是「包场开始后
+     * 非参与者已下不了单，这类订单不该存在」。那个前提只对「提前排好的包场」成立 ——
+     * 追溯包场下它不但存在、而且合法（实测：20:20 才付款的 10:00–22:00 包场，
+     * 10:55 进店的散客一直没被清出去）。跳过改为「按当前时刻结算」。
      *
      * <p><b>参与者不受影响</b>：包场人与被邀请者都要跳过 —— 少了这条，
      * 付了包场费的人会被自己的包场清出去。
@@ -743,22 +769,21 @@ public class OrderService {
             return 0;
         }
         LocalDateTime startAt = booking.getStartAt();
+        LocalDateTime now = LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS);
         List<Order> active = orderMapper.selectActiveByStore(booking.getStoreId());
 
         int settled = 0;
         for (Order order : active) {
-            // 包场开始后才开的单，在准入上就不该存在（那时非参与者已下不了单）。
-            // 真出现（比如管理员补录）也不能按包场开始时刻倒着结算，直接跳过
-            if (!order.getStartTime().isBefore(startAt)) {
-                continue;
-            }
             if (isBookingParticipant(booking, order)) {
                 continue;
             }
-            applySettlement(order, startAt, null, null, OrderLeftEvent.Source.BOOKING_CLEAR);
+            // 结算时刻分两种（理由见方法注释）：包场前就开着的单截止到包场开始时刻；
+            // 晚于包场开始的单（追溯包场）结算到当前时刻，不能倒着填到开门之前
+            LocalDateTime settleAt = order.getStartTime().isBefore(startAt) ? startAt : now;
+            applySettlement(order, settleAt, null, null, OrderLeftEvent.Source.BOOKING_CLEAR);
             settled++;
             log.info("[订单] 包场清场 orderNo={} userId={} 计费截止={}",
-                    order.getOrderNo(), order.getUserId(), startAt);
+                    order.getOrderNo(), order.getUserId(), settleAt);
         }
         return settled;
     }
@@ -1050,7 +1075,50 @@ public class OrderService {
                                                      LocalDateTime to, Integer adjusted) {
         IPage<Order> page = orderMapper.selectPageForAdmin(new Page<>(pageNum, pageSize),
                 userId, trimToNull(status), from, to, adjusted);
-        return BizResult.ok(PageResult.of(page, OrderVo::from));
+        PageResult<OrderVo> result = PageResult.of(page, OrderVo::from);
+        // 后台的流水要一眼看出「这是谁的单」—— 逐条查用户是 N+1，批量补一次
+        attachUserNames(result.getRecords());
+        return BizResult.ok(result);
+    }
+
+    /**
+     * 给一批订单视图补上下单人昵称（后台列表用）。
+     *
+     * <p>昵称取 {@code nickname}、没填时回落到登录名 —— 与后台用户列表、
+     * 在店名册的展示口径一致（三处都要能认出同一个人）。
+     *
+     * <p>查不到的用户（已注销）留 null，前端回落成「用户 #ID」：
+     * 这里不填一个编造的名字，免得把「查不到」伪装成「叫这个名字」。
+     *
+     * @param records 当前页的订单视图，原地补 {@code userNickname}
+     */
+    private void attachUserNames(List<OrderVo> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        List<Long> userIds = records.stream()
+                .map(OrderVo::getUserId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return;
+        }
+        Map<Long, String> names = sysUserMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(SysUser::getId, OrderService::displayName));
+        records.forEach(vo -> vo.setUserNickname(names.get(vo.getUserId())));
+    }
+
+    /**
+     * 用户显示名：昵称优先，没填时回落登录名。
+     *
+     * @param user 用户实体
+     * @return 展示用的名字
+     */
+    private static String displayName(SysUser user) {
+        return user.getNickname() == null || user.getNickname().isBlank()
+                ? user.getUsername()
+                : user.getNickname();
     }
 
     /**

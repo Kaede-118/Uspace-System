@@ -22,6 +22,7 @@ import { listRejectedProofs } from '@/api/payment'
 import { toastError, toastSuccess } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
 import { formatMoney, formatDuration, formatDateTime } from '@/utils/format'
+import { orderStatusCls } from '@/utils/labels'
 import NavBar from '@/components/NavBar.vue'
 import BillSegmentList from '@/components/BillSegmentList.vue'
 import PaymentPanel from '@/components/PaymentPanel.vue'
@@ -60,13 +61,12 @@ const isRejected = computed(() => order.value?.status === 'REJECTED')
 /** 实付金额。已支付时就是订单金额，未支付时是应付额 —— 两者是同一个数。 */
 const payableText = computed(() => formatMoney(order.value?.payableAmount ?? 0))
 
-/** 状态标签的配色。 */
-const statusClass = computed(() => {
-  if (isUsing.value) return 'tag'
-  if (isRejected.value) return 'tag tag-danger'
-  if (isUnpaid.value) return 'tag tag-warning'
-  return 'tag tag-success'
-})
+/**
+ * 状态标签的配色。口径在 {@code labels.js}（与订单卡片、后台订单列表共用一份，
+ * 见那里 {@code ORDER_STATUS} 的说明）—— 原来这里按 isUsing / isRejected /
+ * isUnpaid 逐个判，与订单卡片那份各写各的，两处已经分过一次岔。
+ */
+const statusClass = computed(() => orderStatusCls(order.value?.status))
 
 async function load() {
   loading.value = true

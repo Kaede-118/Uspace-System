@@ -737,8 +737,47 @@ class QqCommandParserTests {
     }
 
     @Test
+    @DisplayName("解析：fw付款 与 fw取消订单 两条新指令（2026-10-10 加）")
+    void parse_recognizesPayAndConfirmCancel() {
+        assertEquals(QqCommand.Kind.PAY, QqCommandParser.parse("fw付款").kind());
+        assertEquals(QqCommand.Kind.PAY, QqCommandParser.parse("FW 付款").kind(),
+                "大小写与前缀后的空格都认");
+
+        assertEquals(QqCommand.Kind.CONFIRM_CANCEL, QqCommandParser.parse("fw取消订单").kind());
+        assertEquals(QqCommand.Kind.CONFIRM_CANCEL, QqCommandParser.parse("fwcancelorder").kind());
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fw确认取消").kind(),
+                "⚠️ 2026-10-10 由用户改名：旧写法不再认，落到「没认出这条指令」");
+
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fw支付").kind(),
+                "⚠️ 名字定的是「付款」：pay 已是 fw结账 的别名，"
+                        + "「支付」不再单独认 —— 认了就成了第三条近义词");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND, QqCommandParser.parse("fw付钱").kind());
+    }
+
+    @Test
+    @DisplayName("解析：⚠️ fw付款/fw取消订单 多跟一截的，落回「没认出」而不是被当成商品名")
+    void parse_payAndConfirmCancelRejectTrailingJunk() {
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND,
+                QqCommandParser.parse("fw取消订单PD202610101430251739").kind(),
+                "⚠️ 这条路【刻意不】容忍单号：容忍了，用户就会以为撤的是他指定的那一笔，"
+                        + "而 fw取消订单 撤的永远是最近一笔；放它过去还会被当成一个带数字的"
+                        + "商品名去查库存指令，答一句「未找到名为『取消订单PD2026…』的商品」");
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND,
+                QqCommandParser.parse("fw付款PD202610101430251739").kind());
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND,
+                QqCommandParser.parse("fw取消订单一下").kind());
+        assertEquals(QqCommand.Kind.UNKNOWN_COMMAND,
+                QqCommandParser.parse("fw付款吧").kind());
+    }
+
+    @Test
     @DisplayName("回环：未付款清单与取消回复都不能解析成指令（含 fw取消 字样的那条）")
     void parse_unpaidAndCancelRepliesAreIgnored() {
+        assertEquals(QqCommand.Kind.IGNORE,
+                QqCommandParser.parse("你有一笔未付款的商品单（PD202610081130074395），"
+                        + "请先完成支付或取消该单。\n取消请发送 fw取消订单\n付款请发送 fw付款").kind(),
+                "⚠️ 这条回复里带 fw取消订单 与 fw付款 字样 —— 整条不以 fw 开头，"
+                        + "必须仍是闲聊，否则机器人会回复自己、无限循环");
         assertEquals(QqCommand.Kind.IGNORE,
                 QqCommandParser.parse("已取消未付款的商品 PD202610101200009012，占用的库存已释放。").kind(),
                 "取消回复是机器人自己发的 ——「取消」在句子中间不是关键词");

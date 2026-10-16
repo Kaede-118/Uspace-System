@@ -4,6 +4,7 @@ import com.kaede.uspace.common.result.ApiResult;
 import com.kaede.uspace.common.security.UserPrincipal;
 import com.kaede.uspace.common.trade.TradeSource;
 import com.kaede.uspace.order.dto.ProofImageVo;
+import com.kaede.uspace.order.dto.ProofStatusVo;
 import com.kaede.uspace.order.dto.ProofSubmitRequest;
 import com.kaede.uspace.order.dto.ProofSubmitVo;
 import com.kaede.uspace.order.dto.RejectedProofVo;
@@ -114,5 +115,29 @@ public class PaymentProofController {
     public ResponseEntity<ApiResult<List<RejectedProofVo>>> listRejected(
             @AuthenticationPrincipal UserPrincipal me) {
         return ApiResult.of(paymentProofService.listRejected(me.id()));
+    }
+
+    /**
+     * 查某一笔收款的凭证状态（2026-10-10 加）。
+     *
+     * <p><b>给「延后交付」那两类用</b>：包场与月卡提交凭证之后目标仍停在待支付
+     *（交付发生在复核通过那一刻），页面若照旧显示「待支付 + 去支付」，
+     * 用户很可能再去转一次账。前端拿这个查询把那一笔显示成「待复核」。
+     *
+     * <p>没有凭证时返回的是<b>三个字段全 null 的正常结果</b>（不是 404）：
+     * 月卡页与包场页每次加载都会问一次，「还没交图」是最常见的情形 ——
+     * 与 {@code /rejected} 返回空列表同一条契约。
+     *
+     * @param me         当前登录用户
+     * @param targetType 收款类型名（ORDER / BOOKING / MONTHLY_CARD / PRODUCT）
+     * @param targetId   目标主键
+     * @return 该笔的凭证状态；别人的、或不存在的，按「没有凭证」返回
+     */
+    @GetMapping("/status")
+    public ResponseEntity<ApiResult<ProofStatusVo>> status(
+            @AuthenticationPrincipal UserPrincipal me,
+            @RequestParam String targetType,
+            @RequestParam Long targetId) {
+        return ApiResult.of(paymentProofService.findStatus(me.id(), targetType, targetId));
     }
 }

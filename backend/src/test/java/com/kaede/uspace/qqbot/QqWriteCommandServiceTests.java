@@ -38,8 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@link QqWriteCommandService} 的单元测试 —— <b>覆盖「调整库存」与「调整机台状况」
- * 这两条</b>（另外几条写指令要组装整套订单服务才测得了，那是将来单独一件事）。
+ * {@link QqWriteCommandService} 的单元测试 —— <b>覆盖「调整库存」「调整机台状况」
+ * 与「fw取消订单」三条</b>（fw付款 与另几条写指令要组装整套订单服务才测得了，
+ * 那是将来单独一件事 —— 本类给订单服务传的是 {@code null}，碰到它就是 NPE）。
  *
  * <p>它守的核心是一条权限：<b>只有管理员能改库存、改机台状况</b>。两条都判错的
  * 两种方式都不报错 —— 放过非管理员（数据被不该改的人改掉）或挡住管理员
@@ -103,6 +104,10 @@ class QqWriteCommandServiceTests {
         properties.getBroadcast().setEnabled(true);
         // 冷却设 0：它挡的是连点，与权限无关，留着只会让用例之间互相干扰
         properties.setWriteCommandCooldown(Duration.ZERO);
+        // 回复队列的限流关掉（上限 0 = 直发）：默认是 3~10 秒一条，
+        // 留着的话每个用例都要真等好几秒，而本类测的不是队列本身
+        //（队列的节奏由 QqReplyQueueTests 管）
+        properties.setReplyMaxInterval(Duration.ZERO);
 
         userMapper = new FakeSysUserMapper();
         seedUser(ADMIN_USER_ID, ADMIN_QQ, UserRole.ADMIN);
@@ -111,12 +116,14 @@ class QqWriteCommandServiceTests {
         productMapper = new FakeProductMapper();
         orderMapper = new FakeProductOrderMapper();
         ProductService productService = new ProductService(productMapper.asMapper(),
-                orderMapper.asMapper(), new ProductProperties(), event -> { });
+                orderMapper.asMapper(), new ProductProperties(), event -> { },
+                userMapper.asMapper());
 
         deviceMapper = new FakeDeviceMapper();
         DeviceService deviceService = newDeviceService(deviceMapper);
 
-        service = new QqWriteCommandService(properties, client, userMapper.asMapper(),
+        service = new QqWriteCommandService(properties, client,
+                new QqReplyQueue(client, properties), userMapper.asMapper(),
                 null, null, productService, deviceService, null, null, null,
                 new WebProperties(), CLOCK);
     }
@@ -329,6 +336,66 @@ class QqWriteCommandServiceTests {
     }
 
     // ==================================================================
+    // fw取消订单（2026-10-10）
+    // ==================================================================
+
+    @Test
+    @DisplayName("fw取消订单：关掉最近那笔待付款商品单，回复报出商品名")
+    void confirmCancel_closesNewestPendingOrder() {
+        // ⚠️ 刻意造两笔：历史数据里同时挂着两笔是可能的（互斥校验上线之前建的），
+        // 而这条指令的语义是「关掉最近的这一笔」，再发一次才轮到下一笔
+        ProductOrder older = seedProductOrder("PD202610081130074395", NORMAL_USER_ID,
+                ProductOrderStatus.PENDING_PAYMENT.name());
+        ProductOrder newer = seedProductOrder("PD202610091610569901", NORMAL_USER_ID,
+                ProductOrderStatus.PENDING_PAYMENT.name());
+
+        service.confirmCancel(GROUP_ID, NORMAL_QQ);
+
+        assertEquals(ProductOrderStatus.CLOSED.name(), newer.getStatus(),
+                "撤的是最近一笔 —— 下单被挡下时那条回复点名的正是它");
+        assertEquals(ProductOrderStatus.PENDING_PAYMENT.name(), older.getStatus(),
+                "⚠️ 老的那笔不能顺手一起关掉：这条指令一次只撤一笔，"
+                        + "多关掉的那笔没有任何人会发现");
+        String reply = singleMessage();
+        assertTrue(reply.contains("可乐 ×2"),
+                "被撤的是哪一笔要说得出名字 —— 两笔单只差一串单号：" + reply);
+        assertTrue(reply.contains(newer.getOrderNo()), reply);
+    }
+
+    @Test
+    @DisplayName("fw取消订单：名下没有待付款商品单时，只说商品单并指路 fw未付款")
+    void confirmCancel_nothingPending() {
+        ProductOrder others = seedProductOrder("PD202610081130074395", ADMIN_USER_ID,
+                ProductOrderStatus.PENDING_PAYMENT.name());
+
+        service.confirmCancel(GROUP_ID, NORMAL_QQ);
+
+        assertEquals(ProductOrderStatus.PENDING_PAYMENT.name(), others.getStatus(),
+                "⚠️ 别人的单子绝不能被关掉（查询按 user_id 过滤，写下就出事 —— "
+                        + "而这事只在群里回复一句「已取消」就过去了）");
+        String reply = singleMessage();
+        assertTrue(reply.contains("没有待付款的商品单"), reply);
+        assertTrue(reply.contains("fw未付款"), "要接住「那我还有什么没付」这一问：" + reply);
+    }
+
+    @Test
+    @DisplayName("⚠️ fw取消订单：凭证被驳回的那笔不能取消，指路 fw付款 与管理员")
+    void confirmCancel_refusesRejected() {
+        ProductOrder rejected = seedProductOrder("PD202610081130074395", NORMAL_USER_ID,
+                ProductOrderStatus.REJECTED.name());
+
+        service.confirmCancel(GROUP_ID, NORMAL_QQ);
+
+        assertEquals(ProductOrderStatus.REJECTED.name(), rejected.getStatus(),
+                "⚠️ 那笔钱他可能真的付过，只是凭证没通过 —— 关掉等于把一笔真实收款抹掉");
+        String reply = singleMessage();
+        assertTrue(reply.contains("不能取消"), reply);
+        assertTrue(reply.contains("fw付款"), "要给出真能走的那条路，而不是一句「不行」：" + reply);
+        assertTrue(reply.contains("请勿重复支付"),
+                "⚠️ 他看到「未通过复核」极可能再付一次：" + reply);
+    }
+
+    // ==================================================================
     // 造数据与桩
     // ==================================================================
 
@@ -463,6 +530,14 @@ class QqWriteCommandServiceTests {
 
         @Override
         public boolean sendGroupMessage(Long groupId, String text) {
+            groupMessages.add(text);
+            return true;
+        }
+
+        @Override
+        public boolean sendGroupMessageAt(Long groupId, String atQq, String text) {
+            // 指令回复现在统一带 @（走段数组那条），不覆写的话这些消息
+            // 会落到父类的真实实现（没有连接、静默失败），断言就全看不到
             groupMessages.add(text);
             return true;
         }

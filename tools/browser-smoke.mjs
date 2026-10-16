@@ -40,7 +40,7 @@ const run = async () => {
     await loginInto(page, { api, app })
     console.log(`[准备] 已登录，后端 ${api} / 前端 ${app}\n`)
 
-    /* ---------- 后台六个页面 ---------- */
+    /* ---------- 后台各页面 ---------- */
     const adminPages = [
       { name: '公告管理', hash: '#/admin/notices', expect: ['公告', '发公告'] },
       // 类型名取自字典（2026-10-10 店主改版：击 / 中 / 萌 / 雀）——
@@ -50,6 +50,9 @@ const run = async () => {
       // 门店：两个 tab（停业 / 免费时段）。导航改成两行（一行四个）之后，
       // 它是第二行的第一个 —— 页面本身出不来通常是路由或组件引入出的问题
       { name: '门店管理', hash: '#/admin/store', expect: ['门店', '停业时段', '免费时段', '新增停业'] },
+      // 订单流水：第八个 tab（2026-10-10 加）。此前后台看不到计时订单的流水 ——
+      // 后端接口一直存在，只是没有页面消费它
+      { name: '订单流水', hash: '#/admin/orders', expect: ['订单流水', '全部状态', '只看人工调整'] },
       { name: '商品管理', hash: '#/admin/products', expect: ['商品', '新增商品', '商品订单'] },
       // 收款管理默认落在「待复核」tab —— 那才是管理员每次进来要处理的事。
       // 三个 tab 都要在文字里出现：加了对账 tab 之后，这一页承担的是
@@ -163,6 +166,26 @@ const run = async () => {
     await page.clickText('取消')
 
     check('商品页无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
+
+    /* ---------- 用户页：月卡弹层（面对面开卡 / 停卡） ---------- */
+    console.log('\n[交互] 用户页 · 月卡弹层')
+    page.errors.length = 0
+    await page.goto(`${app}/#/admin/users`, 96)
+    await page.waitForContent()
+
+    // 点第一行操作区里的第一个按钮（「月卡」）。用选择器而不是 clickText ——
+    // 筛选栏里有个「全部月卡」下拉，按文本点可能点到它
+    await page.eval(`document.querySelector('.urow__ops button') && document.querySelector('.urow__ops button').click()`)
+    await sleep(700)
+    const cardSheetText = String((await page.eval('document.body.innerText')) || '')
+    check('「月卡」弹出开卡弹层', cardSheetText.includes('开卡'), cardSheetText.slice(0, 120))
+    check('卡种下拉里能选到 STAFF 卡',
+      cardSheetText.includes('STAFF 卡'),
+      'STAFF 卡只在后台发放 —— 下拉里没有它，管理员就发不出这张卡')
+    check('弹层说明了「名下有没有卡」', cardSheetText.includes('名下'), cardSheetText.slice(0, 120))
+    check('月卡弹层无控制台错误', page.errors.length === 0, page.errors.slice(0, 2).join(' | '))
+    await page.clickText('关闭')
+    await sleep(300)
 
     /* ---------- 收款页：对账 tab ---------- */
     console.log('\n[交互] 收款页 · 对账 tab')

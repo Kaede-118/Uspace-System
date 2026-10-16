@@ -196,12 +196,19 @@ async function onCheck() {
       @confirm="onConfirmMockPay"
     />
 
+    <!--
+      ⚠️ 凭证那条路要把返回体原样转给父组件（2026-10-10 修）：里面带着后端的
+      `delivered` —— 它说明这一笔是「提交即交付」还是「等管理员复核」。
+      吞掉它的话，月卡页在提交截图之后照样弹一句「月卡已生效」，
+      而那时卡还没发（deliverOnSubmit=false），用户会以为系统出了错。
+      线上通道那条路没有这个字段（回调即到账），父组件把 undefined 当「已交付」处理
+    -->
     <ProofSubmitSheet
       v-model:visible="proofVisible"
       :target-type="targetType"
       :target-id="targetId"
       :amount="amount"
-      @submitted="emit('paid')"
+      @submitted="emit('paid', $event)"
     />
   </div>
 </template>

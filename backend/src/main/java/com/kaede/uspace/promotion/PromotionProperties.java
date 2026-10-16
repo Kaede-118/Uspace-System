@@ -82,13 +82,20 @@ public class PromotionProperties {
          * <p>用穷尽 switch 而不是 if-else：新增卡种时漏配价格会<b>编译不过</b>，
          * 而不是静默地按 0 元卖出去。
          *
+         * <p>STAFF 卡（{@link MonthlyCardType#STAFF}）<b>没有价格，走到这里直接抛</b> ——
+         * 它不能在售，任何给它定价的调用路径（购买、发卡默认价）都是写错了，
+         * 而「静默按 0 元」会让这个错误一路走到账单上才被发现。
+         *
          * @param type 卡种
          * @return 该卡种的价格（元）
+         * @throws IllegalArgumentException 传STAFF 卡时抛出（它无价、不可购买）
          */
         public BigDecimal priceOf(MonthlyCardType type) {
             return switch (type) {
                 case ALL_DAY -> allDayPrice;
                 case NIGHT -> nightPrice;
+                case STAFF -> throw new IllegalArgumentException(
+                        "STAFF 卡不可购买、没有价格 —— 不该走到定价这里");
             };
         }
     }

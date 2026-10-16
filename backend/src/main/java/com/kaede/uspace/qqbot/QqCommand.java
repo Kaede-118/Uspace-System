@@ -85,6 +85,19 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
         SETTLE,
 
         /**
+         * 付款：把「等付款截图」那道闸重新撑起来（{@code fw付款}）—— <b>写指令</b>。
+         *
+         * <p>它服务的是<b>已经出账、还没付</b>的单子（计时订单与商品单）——
+         * 撑闸原本只有 {@code fw结账} 与群里下单商品两处，都发生在「刚刚」，
+         * 隔了半天才想起来付的单子在群里没有入口。凭证被驳回的那类同样走它：
+         * 「重新上传一张」在这条路上与首次付款是同一个动作。
+         *
+         * <p>⚠️ 它<b>不承载资金动作</b>，撑起的是一道受理截图的闸 ——
+         * 钱始终在用户与支付平台之间走，认账的是管理员复核。
+         */
+        PAY,
+
+        /**
          * 取消一笔未付款的单（{@code fw取消 <单号>}）—— <b>写指令</b>。
          *
          * <p>只受理<b>商品单、月卡购买单、未付款包场</b>这三类 ——
@@ -98,6 +111,21 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
          * 解析器不查库、也不知道这个单号存不存在。
          */
         CANCEL_ORDER,
+
+        /**
+         * 取消名下那笔待付款的商品单（{@code fw取消订单}）—— <b>写指令</b>。
+         *
+         * <p>它是 {@link #CANCEL_ORDER} 的<b>无参版</b>，只受理商品单：
+         * 挡着下单的就是「最近那笔待付款商品单」，单号是多余的一步手续，
+         * 而抄那串 20 位数字恰恰是用户最容易做错的地方。
+         *
+         * <p>⚠️ <b>只认商品单是刻意的</b>：没有单号可路由，它就不该猜类型 ——
+         * 泛化出去就成了「随便取消一笔」，而计时订单明令不许自消
+         *（见 {@link #CANCEL_ORDER}）。要取消包场或月卡，仍走带单号的那条。
+         * 名字比行为宽（「订单」），回复里的「没有待付款的商品单」与
+         * {@code fw未付款} 指路就是补这个落差。
+         */
+        CONFIRM_CANCEL,
 
         /** 查近期包场时间表（{@code fw包场}） */
         BOOKING_SCHEDULE,
@@ -299,6 +327,15 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
     }
 
     /**
+     * 构造「付款」指令。
+     *
+     * @return 指令
+     */
+    public static QqCommand pay() {
+        return new QqCommand(Kind.PAY, null);
+    }
+
+    /**
      * 构造「取消未付款单」指令。
      *
      * @param orderNo 单号（解析器已转大写，<b>尚未与任何模块核对过</b>）
@@ -306,6 +343,15 @@ public record QqCommand(Kind kind, String argument, Integer quantity, String sta
      */
     public static QqCommand cancelOrder(String orderNo) {
         return new QqCommand(Kind.CANCEL_ORDER, orderNo);
+    }
+
+    /**
+     * 构造「取消那笔待付款商品单」指令。
+     *
+     * @return 指令
+     */
+    public static QqCommand confirmCancel() {
+        return new QqCommand(Kind.CONFIRM_CANCEL, null);
     }
 
     /**

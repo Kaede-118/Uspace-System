@@ -15,6 +15,35 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
     />
     <meta name="theme-color" content="#6B4FA8" />
+
+    <!--
+      ============ 添加到桌面（PWA 的最小一半） ============
+      这里只做「可安装」，不做离线缓存 —— 与 public/sw.js 是同一个取舍。
+
+      manifest：浏览器据此判定「站点可安装」，判定通过才会给
+      beforeinstallprompt 事件（引导提示条据此弹原生窗口，见
+      composables/useInstallPrompt.js）。图标是 public/icons/ 下三个 PNG。
+
+      ⚠️ 三个文件必须同时在：manifest、sw.js（在 public/ 下）、以及下面这些
+      link/meta。少任何一处，可安装判定不通过，而页面上【没有任何报错】——
+      表现只是「提示条永远不出现」，最难查的一类。
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!--
+      iOS 不吃 manifest 的那套：它认这三个老 meta 与 apple-touch-icon。
+      - apple-mobile-web-app-capable：从主屏幕打开时全屏（否则仍带 Safari 地址栏）
+      - apple-mobile-web-app-title：图标下的名字（iOS 会截断，四个字正好）
+      - status-bar-style=default：状态栏白底黑字，与浅色页面底色一致
+        （black-translucent 会让页面顶到状态栏下面，需要顶部安全区兜底）
+    -->
+    <link rel="apple-touch-icon" href="/icons/icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="共享空间" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- 上面那条的标准版写法，供仍读它的浏览器使用 -->
+    <meta name="mobile-web-app-capable" content="yes" />
+
     <title>共享娱乐空间</title>
   </head>
   <body>

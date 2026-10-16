@@ -11,10 +11,12 @@
  * 越权进到页面里也拿不到任何数据，每个请求都会被挡回 403。
  * 守卫的价值只是省掉「进去看到一片空白」的坏体验。
  */
+import { nextTick } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import userRoutes from './routes.user'
 import adminRoutes from './routes.admin'
 import { isLoggedIn, isAdmin } from '@/stores/user'
+import { startNavigation, endNavigation } from '@/composables/useLoading'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -35,6 +37,21 @@ const router = createRouter({
   scrollBehavior() {
     return { top: 0 }
   }
+})
+
+/**
+ * 跳转一开始就亮起全局加载遮罩。
+ *
+ * <p>⭐ <b>这是「点击按钮当下就有反馈」的关键</b>。目标页面是懒加载的，
+ * 点下去之后要先【下载它的 chunk】才轮得到发请求 —— 经隧道那一段一秒多，
+ * 不在这里亮遮罩的话，用户点完只看到「什么都没发生」。
+ *
+ * <p>⚠️ 注册在下面那条「放行判断」守卫【之前】，且只管亮遮罩、不参与放行 ——
+ * 这样即使本次导航随后被拦下（未登录被重定向、非管理员回首页），
+ * 遮罩也已经亮了，由 {@code endNavigation} 的 10 秒兜底收掉。
+ */
+router.beforeEach(() => {
+  startNavigation()
 })
 
 router.beforeEach((to) => {
@@ -65,6 +82,13 @@ router.beforeEach((to) => {
 router.afterEach((to) => {
   const base = '共享娱乐空间'
   document.title = to.meta.title ? `${to.meta.title} · ${base}` : base
+
+  /*
+   * ⚠️ 等一拍（nextTick）再收：「跳转中」之后接手的是目标页面的首个请求，
+   * 而 onMounted 与那次请求都落在这一拍之内 —— 立刻收的话，
+   * 遮罩会「灭一下又亮起来」（两帧之间），比不收还难看。
+   */
+  nextTick(() => endNavigation())
 })
 
 export default router

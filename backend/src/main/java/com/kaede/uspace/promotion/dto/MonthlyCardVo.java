@@ -53,11 +53,24 @@ public class MonthlyCardVo {
     private String coverageLabel;
 
     /**
+     * 此刻是否真正生效（状态为生效中、且今天落在有效期之内）。
+     *
+     * <p>由后端算好而不是让前端拼 {@code status === 'ACTIVE'}：日期那一半
+     * 也要判，而「过期翻转是定时任务做的、可能滞后」这件事只有后端知道
+     *（见 {@code MonthlyCard.isEffectiveOn}）。前端拿这个布尔值决定
+     * 操作按钮的显隐即可，不要在客户端重实现一遍口径。
+     */
+    private Boolean effective;
+
+    /**
      * 剩余天数（含今天）。
      *
      * <p><b>只有此刻真正生效的卡才有值</b>，其余（已过期、已退款、还没到生效日）
      * 一律为 null —— 前端据此决定要不要显示「还剩 N 天」，
      * 而不是自己拿日期去算（那样就得在客户端再实现一遍「含首尾」的口径）。
+     *
+     * <p><b>STAFF 卡也是 null</b>：它的到期日在 2099，算出「还剩两万多天」
+     * 对谁都没有意义 —— 前端按卡种显示「长期有效」。
      */
     private Long remainingDays;
 
@@ -65,7 +78,7 @@ public class MonthlyCardVo {
      * 把实体转成视图。
      *
      * @param card  月卡实体
-     * @param today 今天的日期，用于算剩余天数
+     * @param today 今天的日期，用于算剩余天数与生效判定
      * @return 月卡视图
      */
     public static MonthlyCardVo from(MonthlyCard card, LocalDate today) {
@@ -82,6 +95,7 @@ public class MonthlyCardVo {
         vo.setPaidAt(card.getPaidAt());
         vo.setPaymentMethod(card.getPaymentMethod());
         vo.setCoverageLabel(coverageLabelOf(card.getCardType()));
+        vo.setEffective(card.isEffectiveOn(today));
         vo.setRemainingDays(remainingDaysOf(card, today));
         return vo;
     }
@@ -101,17 +115,21 @@ public class MonthlyCardVo {
     /**
      * 算剩余天数（含今天）。
      *
-     * <p>判定口径与免单判定保持一致：<b>状态为生效中，且今天落在生效与失效日期之间
-     * （两端都含）</b>。少判状态的话，一张已退款的卡也会显示「还剩 12 天」。
+     * <p>判定口径与免单判定共用 {@link MonthlyCard#isEffectiveOn} —— 分开各写一份的话，
+     * 会出现「列表说生效、结算说不生效」这种自相矛盾（少判状态的话，
+     * 一张已退款的卡也会显示「还剩 12 天」）。
      *
      * @param card  月卡实体
      * @param today 今天的日期
-     * @return 剩余天数；当前不生效时返回 null
+     * @return 剩余天数；当前不生效时、或STAFF 卡（远期到期日）返回 null
      */
     private static Long remainingDaysOf(MonthlyCard card, LocalDate today) {
-        if (!MonthlyCardStatus.ACTIVE.name().equals(card.getStatus())
-                || card.getStartDate() == null || card.getEndDate() == null
-                || card.getStartDate().isAfter(today) || card.getEndDate().isBefore(today)) {
+        if (!card.isEffectiveOn(today)) {
+            return null;
+        }
+        // STAFF 卡的到期日在 2099：它其实不会到期，「还剩两万多天」是句废话。
+        // 按卡种判而不是按日期大小判 —— 后者在 2099 年之后会静默失效
+        if (MonthlyCardType.STAFF.name().equals(card.getCardType())) {
             return null;
         }
         // 含首尾：最后一天当天显示「还剩 1 天」，而不是 0 天

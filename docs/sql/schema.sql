@@ -642,6 +642,17 @@ CREATE TABLE `biz_access_record` (
 --   （包场 biz_booking 反过来是单表：包场是**一场活动**，排期与付款是同一件事的
 --     两个阶段，待支付的包场已经占住了那个时段，不存在「先有付款才有活动」。）
 --
+-- 【STAFF 卡（2026-10-10 加）】
+--   店员自己人玩不计费，一条**身份标记**而非一次消费：不可购买（只在后台发放）、
+--   无价格、实质无到期日。三条特殊性的落法：
+--     · 不可购买 —— MonthlyCardType.isOnSale() 为 false，在售列表与购买接口都据此拒绝
+--     · 无到期日 —— 到期日填 2099-12-31（MonthlyCardType.STAFF_END_DATE），
+--       **不把日期列放开为可空**：放开的话 SQL 的日期条件、计费切段与跳档预告
+--       都得加 null 分支，而那条链路上漏判一处不是「少免一次」而是 NPE、结不了账。
+--       填远期日期的代价只剩展示层（卡包与后台按卡种显示「长期有效」）
+--     · 收回靠状态 —— 到期日在 2099，实质不会自己结束，
+--       停用（status = REVOKED）是它唯一的结束方式
+--
 -- 与「月度累计消费优惠」的关系（两处口径不同，实现时勿混）：
 --   · 月卡期间订单金额为 0，其卡费【不计入】月度累计消费的优惠门槛
 --     （月卡本身就是独立优惠政策，不再叠加）
@@ -655,12 +666,12 @@ CREATE TABLE `biz_monthly_card` (
   `id`             BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
   `card_no`        VARCHAR(32)   NOT NULL                COMMENT '卡号，对外展示',
   `user_id`        BIGINT        NOT NULL                COMMENT '持卡用户 ID，月卡绑定本人使用',
-  `card_type`      VARCHAR(20)   NOT NULL                COMMENT '卡类型：ALL_DAY 全天 / NIGHT 夜间（夜间仅 22:00–次日 10:00 免费）',
-  `price`          DECIMAL(10,2) NOT NULL                COMMENT '购买价格（元），支付时快照，事后调价不影响已售出的卡',
-  `start_date`     DATE          NOT NULL                COMMENT '生效日期（= 支付当日）',
-  `end_date`       DATE          NOT NULL                COMMENT '失效日期（含当日）= start_date + 29 天',
+  `card_type`      VARCHAR(20)   NOT NULL                COMMENT '卡类型：ALL_DAY 全天 / NIGHT 夜间（仅 22:00–次日 10:00 免费）/ STAFF 卡（仅后台发放，无价格、实质无到期日）',
+  `price`          DECIMAL(10,2) NOT NULL                COMMENT '购买价格（元），支付时快照，事后调价不影响已售出的卡；STAFF 卡为 0',
+  `start_date`     DATE          NOT NULL                COMMENT '生效日期（= 支付/开卡当日）',
+  `end_date`       DATE          NOT NULL                COMMENT '失效日期（含当日）= start_date + 29 天；STAFF 卡填 2099-12-31（远期日期，表达「无到期日」）',
   `status`         VARCHAR(20)   NOT NULL DEFAULT 'ACTIVE'
-                   COMMENT '状态：ACTIVE 生效中 / EXPIRED 已过期 / REFUNDED 已退款',
+                   COMMENT '状态：ACTIVE 生效中 / EXPIRED 已过期 / REFUNDED 已退款 / REVOKED 已停用（后台收回，只停权益不动钱）',
   `payment_method` VARCHAR(20)   DEFAULT NULL            COMMENT '支付通道，取值同 biz_order.payment_method',
   `pay_order_no`   VARCHAR(32)   DEFAULT NULL            COMMENT '产生本卡的购买单号（biz_monthly_card_order.order_no）',
   `paid_at`        DATETIME      DEFAULT NULL            COMMENT '支付时刻，精确到时刻，供对账',

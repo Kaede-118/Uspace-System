@@ -18,12 +18,13 @@
  * 前者只对 {@code IN_USE} 生效、显示计时与金额；后者只说「你欠着费」，
  * 不显示计时（待支付不是进行中）。
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onDeactivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getStoreStatus, getNotices, getBookingSchedule, getFreePeriods } from '@/api/store'
 import { getCurrentOrder, createOrder, listMyOrders, getPasscode } from '@/api/order'
 import { listRejectedProofs } from '@/api/payment'
 import { usePreviewPolling } from '@/composables/usePreviewPolling'
+import { useKeepAliveRefresh } from '@/composables/useKeepAliveRefresh'
 import { toastSuccess, toastError, toastInfo } from '@/composables/useToast'
 import { errorMessage, isCode, ErrorCode } from '@/utils/error'
 import { displayName } from '@/stores/user'
@@ -32,6 +33,12 @@ import { periodPhaseOf } from '@/utils/labels'
 import NoticeItem from '@/components/NoticeItem.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingMask from '@/components/LoadingMask.vue'
+
+/**
+ * 组件名，供 `App.vue` 的 keep-alive include 列表匹配。
+ * ⚠️ 必须与文件名一致 —— 写错不会报任何错，只是缓存静默失效、返回时仍要重新加载。
+ */
+defineOptions({ name: 'HomeView' })
 
 /* ---------------- 只读数据 ---------------- */
 
@@ -161,6 +168,10 @@ async function loadAll() {
   } else {
     stopPreview()
   }
+
+  // 收尾放在这里而不是 onMounted 里：keep-alive 返回页面时的静默刷新
+  // 走的是同一个函数，那条路径也得把 loading 收掉
+  loading.value = false
 }
 
 /* ---------------- 开门 ---------------- */
@@ -169,6 +180,38 @@ const passcodeVisible = ref(false)
 const passcodeInfo = ref(null)
 /** 遮罩上的文案。开门与查密码共用同一个遮罩，文案要跟着变。 */
 const busyText = ref('')
+
+/**
+ * 「开门计时」的二次确认是否显示。
+ *
+ * <p><b>它是首页上唯一一个「点一下就开始花钱」的按钮</b>：走通之后订单立即成立、
+ * 门锁密码立即下发、计时立即开始，而误触的代价是一笔实打实的钱。
+ * 所以它比「查看密码」多一道确认，并把后果直接写在文案里。
+ */
+const confirmOpenVisible = ref(false)
+
+/**
+ * 点「开门计时」—— 先弹确认，不直接下单。
+ *
+ * <p>⚠️ <b>只有「还没有进行中订单」的那副面孔才走这里</b>：有订单时这个按钮
+ * 是「查看密码」，点它只是把已经存在的密码再显示一遍，不产生任何费用
+ *（两副面孔的切换见 template 里的三元表达式）。
+ */
+function onQuickOpen() {
+  confirmOpenVisible.value = true
+}
+
+/**
+ * 确认框里点「确认开门」—— 收起确认框，走原来的开门流程。
+ *
+ * <p>⚠️ 刻意<b>不复用</b> onOpenDoor 已经查到的那次结果，而是在它内部重新查一次：
+ * 确认框弹出的这几秒里，用户可能在另一个标签页或群里已经开过门了。
+ * 那道检查是防重复下单的，不能因为「刚查过」就省掉。
+ */
+function onConfirmOpen() {
+  confirmOpenVisible.value = false
+  onOpenDoor()
+}
 
 /**
  * 点击「开门计时」。
@@ -307,17 +350,21 @@ function onGoResubmit(proof) {
   router.push(landings[proof.targetType] || '/orders')
 }
 
-onMounted(async () => {
-  try {
-    await loadAll()
-  } finally {
-    loading.value = false
-  }
-})
+/*
+ * 首次加载 + 从别的页面切回来时的过期刷新，都交给 keep-alive 那个 composable：
+ * 数据还新鲜就【不重新加载】（秒开），过期了才静默补一次。
+ */
+useKeepAliveRefresh(loadAll, 30000)
 
-onUnmounted(() => {
-  stopPreview()
-})
+/*
+ * ⚠️ 停轮询必须挂在 onDeactivated 上：本页被 keep-alive 缓存之后，
+ * 切走时【不会】卸载，只写 onUnmounted 的话它永远不触发 ——
+ * 轮询会在后台一直打接口，而用户根本不在这一页。
+ * onUnmounted 保留一份，是为了 keep-alive 自身被销毁时也能停干净；
+ * stop() 是幂等的，重复调用没有副作用。
+ */
+onDeactivated(() => stopPreview())
+onUnmounted(() => stopPreview())
 </script>
 
 <template>
@@ -414,8 +461,12 @@ onUnmounted(() => {
         「开门计时」与「查看密码」是同一个按钮的两副面孔：有进行中订单时
         它变成后者。点击前先查一次 current 也是这个道理 ——
         让用户看到的是「你已经开过门了」，而不是一个错误提示。
+
+        ⚠️ 两副面孔的「代价」不同，所以流程也不同：「查看密码」点了只是再显示
+        一次已有密码，「开门计时」点了会真的下单计费 —— 后者因此要先过一道
+        二次确认（见 onQuickOpen / 页面底部的确认弹层）。
       -->
-      <button class="quick" @click="currentOrder ? onViewPasscode() : onOpenDoor()">
+      <button class="quick" @click="currentOrder ? onViewPasscode() : onQuickOpen()">
         <span class="quick__icon">🔑</span>
         <span class="quick__label">{{ currentOrder ? '查看密码' : '开门计时' }}</span>
       </button>
@@ -499,6 +550,23 @@ onUnmounted(() => {
     </div>
 
     <LoadingMask :loading="opening" :text="busyText" />
+
+    <!--
+      开门二次确认。
+      ⚠️ 与下面的密码弹层共用 .modal 样式，但两者不会同时出现 ——
+      点「确认开门」时先收起本框，再走开门流程，成功后才轮到密码弹层。
+      点空白处关闭 = 取消（默认安全的那一侧）。
+    -->
+    <div v-if="confirmOpenVisible" class="modal" @click.self="confirmOpenVisible = false">
+      <div class="modal__box">
+        <p class="modal__title">确认开门？</p>
+        <p class="modal__confirm-text">确认后将发放门锁密码，并开始计时计费</p>
+        <div class="modal__actions">
+          <button class="btn btn-ghost" @click="confirmOpenVisible = false">取消</button>
+          <button class="btn btn-primary" @click="onConfirmOpen">确认开门</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 密码弹层 -->
     <div v-if="passcodeVisible" class="modal" @click.self="passcodeVisible = false">
@@ -879,6 +947,15 @@ onUnmounted(() => {
 }
 
 /* 密码弹层 */
+/*
+ * ⚠️ 刻意【不加半透明背景】（2026-10-10 改）。原来是 rgba(43,35,64,0.45)：
+ * 请求期间全局加载遮罩（半透明白）先出现在同一个位置，两者一白一黑、
+ * 且一个淡出一个瞬现，切过去时闪一下很明显。
+ * 去掉背景之后密码框直接落在页面上，可辨识度由 .modal__box 的阴影承担。
+ *
+ * 还加了 0.18s 淡入：与加载遮罩的淡出重叠，切换才顺。
+ * 点击卡片外的区域仍然能关闭（@click.self 判的是事件目标，与有没有背景无关）。
+ */
 .modal {
   position: fixed;
   inset: 0;
@@ -887,7 +964,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: var(--sp-5);
-  background: rgba(43, 35, 64, 0.45);
+  animation: modal-in 0.18s ease-out;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .modal__box {
@@ -897,6 +980,8 @@ onUnmounted(() => {
   border-radius: var(--r-card);
   background: #fff;
   text-align: center;
+  /* 没有背景遮罩之后，靠阴影把它从页面上「托」起来（取值与 ToastHost 一致） */
+  box-shadow: 0 4px 16px rgba(43, 35, 64, 0.18);
 }
 
 .modal__title {
@@ -932,5 +1017,28 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.6;
   text-align: left;
+}
+
+/*
+ * 二次确认框的正文。
+ *
+ * ⚠️ 比 .modal__hint 重一档（13px + 正文色，而非 12px 灰字）：
+ * 它说的是「点下去会发生什么」，是这一屏里唯一需要用户读进去的一句话 ——
+ * 写成灰色小字会被人直接跳过，那这道确认就白设了。
+ */
+.modal__confirm-text {
+  margin: var(--sp-3) 0 var(--sp-4);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--c-text);
+}
+
+/*
+ * 两个按钮并排：取消（浅底）在左、确认（实底）在右。
+ * .btn 自身是 width:100%，放进 flex 后各占一半，不必另写宽度。
+ */
+.modal__actions {
+  display: flex;
+  gap: var(--sp-3);
 }
 </style>
