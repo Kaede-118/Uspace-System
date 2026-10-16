@@ -6,17 +6,24 @@
  * 导航放在顶部，八个入口都是 {@code <router-link>}，分两行排
  * （一行四个，八个正好排满两行 —— 横向拉动的入口最难找，见下方样式里的说明）。
  *
- * <p>⚠️ <b>高亮交给 {@code router-link-active}</b>，不要自己监听路由算当前项 ——
- * 将来加了 {@code /admin/bookings/:id} 这类子路径，手工判断必然会漏，
- * 而漏掉的表现只是「导航没有高亮」，不会有任何报错。
+ * <p>⚠️ <b>高亮由 {@code isActive()} 按路径前缀判定</b>（2026-10-16 改）。
+ * 原先交给 {@code router-link-active}，当时的说明是「将来加了
+ * {@code /admin/bookings/:id} 这类子路径，手工判断必然会漏」——
+ * 那句话把机制记错了：vue-router 的 active 判定比较的是<b>匹配到的路由记录</b>，
+ * 只有当那个子路径是<b>嵌套</b>在 tab 的路由之下时才会点亮它。
+ * 订单详情（{@code /admin/orders/:id}）正是与 {@code /admin/orders} <b>并列</b>
+ * 的一条子路由（嵌套要列表页里挂一个 {@code <router-view>}），
+ * 于是点进详情后「订单」这个 tab 会灭掉，管理员看不出自己在哪一节。
+ * 所以这里改成显式的前缀判定，并且<b>只此一处</b> —— 各页面不要自己再判一遍。
  *
  * <p>⚠️ <b>必须有一个回用户端的出口</b>：管理员从后台进去之后，
  * 浏览器后退之外没有别的路可走（后台没有 TabBar，NavBar 的返回按钮也不适用）。
  */
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { logout } from '@/api/auth'
 import { clear } from '@/stores/user'
 
+const route = useRoute()
 const router = useRouter()
 
 /** 九个 tab。顺序即导航顺序，与论文里模块的排列无关，按运营的使用频率排。 */
@@ -31,6 +38,20 @@ const TABS = [
   { to: '/admin/products', icon: '🛍', label: '商品' },
   { to: '/admin/access', icon: '🚪', label: '进出' }
 ]
+
+/**
+ * 这个 tab 是不是「当前所在的那一节」。
+ *
+ * <p>相等或<b>以其为前缀</b>（{@code /admin/orders/:id} 也算「订单」那一节，
+ * 见文件头）。前缀比较必须带上那个斜杠 —— 不加的话 {@code /admin/orders-x}
+ * 这种将来可能出现的路径也会点亮它。
+ *
+ * @param {{ to: string }} tab 导航项
+ * @returns {boolean}
+ */
+function isActive(tab) {
+  return route.path === tab.to || route.path.startsWith(`${tab.to}/`)
+}
 
 /**
  * 退出登录。
@@ -62,7 +83,13 @@ async function onLogout() {
 
       <nav class="admin__nav">
         <div class="admin__nav-inner">
-          <router-link v-for="tab in TABS" :key="tab.to" class="admin__tab" :to="tab.to">
+          <router-link
+            v-for="tab in TABS"
+            :key="tab.to"
+            class="admin__tab"
+            :class="{ 'admin__tab--on': isActive(tab) }"
+            :to="tab.to"
+          >
             <span class="admin__tab-icon">{{ tab.icon }}</span>
             <span>{{ tab.label }}</span>
           </router-link>
@@ -163,8 +190,8 @@ async function onLogout() {
   font-size: 13px;
 }
 
-/* 高亮态由 vue-router 自动挂上，见文件头那段说明 */
-.admin__tab.router-link-active {
+/* 高亮态由 isActive() 判定，见文件头那段说明 */
+.admin__tab--on {
   background: var(--c-primary);
   color: #fff;
 }

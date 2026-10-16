@@ -60,6 +60,21 @@ export default [
         meta: { title: '订单流水' }
       },
       {
+        /*
+         * 订单详情（2026-10-16 加）。
+         *
+         * ⚠️ 与 'orders' 是【并列】的两条子路由，不是嵌套 —— 嵌套要
+         * OrderManageView 里有一个 <router-view>，那等于让列表页去承载详情页。
+         * 并列的代价是 vue-router 的 router-link-active 不会把「订单」那个 tab
+         * 点亮（它按 matched 记录判定，两条路由之间没有父子关系），
+         * 所以 AdminLayout 里改成了按路径前缀判定，见那里的说明。
+         */
+        path: 'orders/:id',
+        name: 'admin-order-detail',
+        component: () => import('@/views/admin/OrderDetailView.vue'),
+        meta: { title: '订单详情' }
+      },
+      {
         path: 'payments',
         name: 'admin-payments',
         component: () => import('@/views/admin/PaymentManageView.vue'),

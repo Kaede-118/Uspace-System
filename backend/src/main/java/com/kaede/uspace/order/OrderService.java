@@ -1124,6 +1124,10 @@ public class OrderService {
     /**
      * 后台查询订单详情。
      *
+     * <p>与列表一样补上下单人昵称（2026-10-16）：后台的订单详情页是从流水点进来的，
+     * 那一页最先要回答的就是「这是谁的单」—— 只给一个 {@code userId} 的话，
+     * 管理员还得回用户页按 ID 查一遍。用户端那条路不带它（看自己的订单不必印名字）。
+     *
      * @param orderId 订单 ID
      * @return 订单视图；不存在时返回 404
      */
@@ -1134,6 +1138,7 @@ public class OrderService {
         }
         OrderVo vo = OrderVo.from(order);
         attachBill(vo, order);
+        attachUserNames(List.of(vo));
         return BizResult.ok(vo);
     }
 

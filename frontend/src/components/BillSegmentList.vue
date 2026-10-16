@@ -79,6 +79,35 @@ const hasActivityFree = computed(() => Number(shownActivityFree.value) > 0)
 /** 实付与合计不同才需要单独列「应付」那一行。 */
 const showFinalPay = computed(() => Number(finalPay.value) !== Number(totalAmount.value))
 
+/**
+ * 三项减免之和（元）—— 0 表示这一单没享受到任何优惠。
+ *
+ * <p>与后台订单流水卡片上的口径**逐字同源**：同一份 BillingResult 的两个消费方，
+ * 一处改了另一处必须跟着改（这是它们共用同一份判据的原因）。
+ */
+const cutTotal = computed(
+  () =>
+    Number(shownDiscount.value || 0) +
+    Number(shownCardFree.value || 0) +
+    Number(shownActivityFree.value || 0)
+)
+
+/** 有没有优惠 —— 决定账单上要不要多出「优惠前」那一行（没优惠的单子不加噪音）。 */
+const hasCut = computed(() => cutTotal.value > 0)
+
+/**
+ * 优惠前的计价（元）= 合计 + 三项减免。
+ *
+ * <p>⚠️ <b>这是反推出来的</b>：后端落库的 {@code totalAmount} 与
+ * {@code payableAmount} 存的都是<b>实收</b>（已按分段封顶、已含月度优惠、
+ * 已扣月卡与活动免除），订单上并没有「原价」列。
+ *
+ * <p>有一处刻意不精确：<b>半场累计封顶</b>削掉的钱不算优惠（那是同一半场的
+ * 额度已经收满了），于是它会被算进这里 —— 这个数字的口径就是
+ * 「没享受到这些优惠与额度时要付多少」，与后台流水卡片上的「计价」完全一致。
+ */
+const originAmount = computed(() => Number(totalAmount.value) + cutTotal.value)
+
 /*
  * 半场累计封顶的解释（2026-10-10）：封顶价按【半场】算 ——
  * 同一个半场（日场 10:00-22:00、夜场 22:00-次日 10:00）里，
@@ -144,12 +173,21 @@ const quotaCutSegment = computed(() =>
       <span>{{ formatDuration(stayMinutes) }}</span>
     </div>
 
-    <div class="bill__row bill__row--total">
-      <span>合计</span>
-      <span>¥{{ formatMoney(totalAmount) }}</span>
+    <!--
+      金额区排成一个算式：优惠前 → 各项减免 → 合计 → 应付（2026-10-16 调整）。
+      原先只有「合计 21」下面跟一句「月度优惠 -3」，读起来像「21 还要再减 3」；
+      而实际上是 24 减掉 3 才是 21。排成 24 − 3 = 21 就没有这个歧义了。
+      「优惠前」只在真有优惠时出现 —— 九成订单没有优惠，那一行纯属噪音。
+    -->
+    <div v-if="hasCut" class="bill__row bill__row--origin">
+      <span>优惠前</span>
+      <span>¥{{ formatMoney(originAmount) }}</span>
     </div>
 
-    <!-- 说明性金额：解释「为什么便宜了」，不是「再减多少」 -->
+    <!--
+      说明性金额：它们不是「再减多少」，而是「已经减了多少」——
+      所以排在合计【之前】，作为算式的中间项
+    -->
     <div v-if="hasDiscount" class="bill__row bill__row--note">
       <span>月度优惠</span>
       <span>-¥{{ formatMoney(shownDiscount) }}</span>
@@ -161,6 +199,11 @@ const quotaCutSegment = computed(() =>
     <div v-if="hasActivityFree" class="bill__row bill__row--note">
       <span>活动减免</span>
       <span>-¥{{ formatMoney(shownActivityFree) }}</span>
+    </div>
+
+    <div class="bill__row bill__row--total">
+      <span>合计</span>
+      <span>¥{{ formatMoney(totalAmount) }}</span>
     </div>
 
     <div v-if="showFinalPay" class="bill__row bill__row--total">
@@ -277,6 +320,15 @@ const quotaCutSegment = computed(() =>
   font-size: 13px;
   color: var(--c-text-sub);
   padding: 3px 0;
+}
+
+/*
+ * 「优惠前」比合计轻一档：它是算式的起点（解释这个合计是怎么来的），不是结论；
+ * 但比 note 行重一点 —— 它是一笔金额，不是注解。
+ */
+.bill__row--origin {
+  font-size: 13px;
+  color: var(--c-text-muted);
 }
 
 .bill__row--note {

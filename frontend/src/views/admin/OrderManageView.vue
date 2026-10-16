@@ -18,6 +18,24 @@
  * （账单上「时长」明显短于「在店时长」），流水上标出来，管理员才不必
  * 逐单点进详情去查「为什么这单这么便宜 / 时长这么短」。
  *
+ * <p><b>金额上带「计价 → 实付」与减免明细</b>（2026-10-16 加）——
+ * 有优惠的单子会多出一行「计价 ¥40.00 实付 ¥35.00」与
+ * 「月度优惠 / 月卡抵扣 / 活动减免」各是多少。原先流水上只有一个实收金额，
+ * 管理员看到月卡用户的 ¥0.00 或 ¥3.50 只能靠猜：是月卡免的、活动免的，
+ * 还是月度优惠价？三个口径在后端是三列，在这里就摊成三行。
+ *
+ * <p><b>点任意一单进订单详情</b>（2026-10-16 加）——
+ * {@code /admin/orders/:id}，展示主体与用户端订单详情页是同一个组件
+ * （{@code OrderDetailContent}），管理员看到的账单结构与顾客看到的逐字一致。
+ *
+ * <p><b>卡片上印用户 ID，而且能点</b>（2026-10-16 加）—— 筛选栏是按「用户 ID」查的，
+ * 而管理员背不下每个人的 ID、昵称又可能重名；点那个 ID 就地按他筛一遍，
+ * 省掉「看一眼、回来手抄一串数字」那一步。
+ *
+ * <p><b>筛选与页码会写进 URL 的 query</b>（2026-10-16 加）——
+ * 从详情页返回时按原条件复原，连看几单不必每次重填筛选。
+ * 顺带得到两个好处：刷新不丢筛选、把 URL 发给同事等于把「我看的那一屏」发过去。
+ *
  * <p><b>人工调整时长的入口在计时订单每一行的右侧</b>（2026-10-16 加）——
  * 只给未了结的订单（使用中 / 待支付 / 凭证未通过）显示：已支付的单调整必然改金额，
  * 改完要牵出退款，后端会拒（{@code ORDER_NOT_ADJUSTABLE}）。
@@ -25,8 +43,13 @@
  * <p>⚠️ <b>两个接口的分页参数不一样</b>（后端如此，不是笔误）：
  * 计时订单用 {@code page} / {@code size}，商品订单用 {@code pageNum} / {@code pageSize}。
  * 传错不会报错，只会永远返回第一页 —— 表现为「翻页没反应」。
+ *
+ * <p>⚠️ <b>商品订单的卡片不跳详情</b>：它的「详情」是商品与数量，
+ * 卡片上已经写全了；订单详情那一页讲的是时长与分段账单，对它是另一回事。
+ * 所以只有计时订单的卡片可点。
  */
 import { ref, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { listOrders, listAdminProductOrders, adjustOrder } from '@/api/admin'
 import { toastError, toastSuccess } from '@/composables/useToast'
 import { errorMessage } from '@/utils/error'
@@ -53,6 +76,9 @@ import LoadingMask from '@/components/LoadingMask.vue'
 
 /** 每页条数。⚠️ 计时订单用 page + size，商品订单用 pageNum + pageSize（后端两套口径） */
 const PAGE_SIZE = 10
+
+const route = useRoute()
+const router = useRouter()
 
 /** 当前 tab：timing 计时订单 / product 商品订单 */
 const type = ref('timing')
@@ -87,6 +113,8 @@ const filters = ref({
  */
 async function loadTiming() {
   loading.value = true
+  // URL 上的 query 与「正在查的条件」保持一致，见 syncQuery 的说明
+  syncQuery()
   try {
     const params = { page: page.value, size: PAGE_SIZE }
     const f = filters.value
@@ -151,6 +179,8 @@ const productFilters = ref({ status: '', userId: '' })
  */
 async function loadProductOrders() {
   productLoading.value = true
+  // 商品 tab 的筛选（与页码）同样写进 URL，切回这一页时不丢
+  syncQuery()
   try {
     const params = { pageNum: productPage.value, pageSize: PAGE_SIZE }
     if (productFilters.value.status) params.status = productFilters.value.status
@@ -183,6 +213,7 @@ async function loadProductOrders() {
  */
 function switchType(next) {
   type.value = next
+  syncQuery()
   if (next === 'product' && !productLoaded.value) loadProductOrders()
 }
 
@@ -198,6 +229,145 @@ function resetProductFilters() {
   applyProductFilters()
 }
 
+/* ==================== 筛选状态与 URL 的同步 ==================== */
+
+/**
+ * 把当前 tab、筛选条件与页码写进 URL 的 query。
+ *
+ * <p><b>为什么值得这么麻烦</b>：点一单进详情（{@code /admin/orders/:id}）再返回时，
+ * 这个组件会被重新创建 —— 不写进 URL 的话筛选全丢，管理员筛出某个用户后
+ * 连看几单就得重填几次。写进去之后「返回」只要把 query 原样带回即可
+ * （见 {@code OrderDetailView} 的 {@code goBack}）。
+ *
+ * <p>顺带两个好处：刷新不丢筛选；把 URL 发给同事，等于把「我看的那一屏」发过去。
+ *
+ * <p>⚠️ <b>用 {@code replace} 不用 {@code push}</b>：筛选条件是「同一屏的不同看法」，
+ * 每改一次都压一条历史的话，管理员按后退键要按很多次才能退出这一页。
+ * 也正因如此，这里<b>不监听 {@code route.query}</b>（监听 + replace 容易写成死循环），
+ * query 只在页面挂载时读一次。
+ *
+ * <p>空值一概不写进 URL（{@code ?status=} 与不写是同义的），页码 1 也不写 ——
+ * 让「默认状态」的 URL 保持干净。
+ */
+function syncQuery() {
+  const q = {}
+  if (type.value === 'product') q.type = 'product'
+
+  const f = filters.value
+  if (f.status) q.status = f.status
+  if (f.userId.trim()) q.userId = f.userId.trim()
+  if (f.from) q.from = f.from
+  if (f.to) q.to = f.to
+  if (f.adjustedOnly) q.adjusted = '1'
+  if (page.value > 1) q.page = String(page.value)
+
+  const p = productFilters.value
+  if (p.status) q.pStatus = p.status
+  if (p.userId.trim()) q.pUserId = p.userId.trim()
+  if (productPage.value > 1) q.pPage = String(productPage.value)
+
+  router.replace({ path: '/admin/orders', query: q })
+}
+
+/**
+ * 从 URL 的 query 复原筛选状态（页面挂载时读一次）。
+ *
+ * <p>⚠️ 时间控件认的格式是 {@code 2026-10-10T19:00}（与写进 URL 的格式一致），
+ * 所以这里不做任何转换 —— 中间转一道反而会让「刷新后时间筛选悄悄失效」。
+ *
+ * <p>页码只接受正整数：URL 是手可以改的，{@code ?page=abc} 进来时回落到第 1 页，
+ * 而不是带着一个 NaN 去请求（那会拼出 {@code page=NaN}，后端直接 400）。
+ */
+function initFromQuery() {
+  const q = route.query
+  const str = (v) => (typeof v === 'string' ? v : '')
+
+  if (str(q.type) === 'product') type.value = 'product'
+
+  filters.value.status = str(q.status)
+  filters.value.userId = str(q.userId)
+  filters.value.from = str(q.from)
+  filters.value.to = str(q.to)
+  filters.value.adjustedOnly = str(q.adjusted) === '1'
+  const p = Number.parseInt(str(q.page), 10)
+  if (Number.isInteger(p) && p > 1) page.value = p
+
+  productFilters.value.status = str(q.pStatus)
+  productFilters.value.userId = str(q.pUserId)
+  const pp = Number.parseInt(str(q.pPage), 10)
+  if (Number.isInteger(pp) && pp > 1) productPage.value = pp
+}
+
+/**
+ * 打开某一单的详情。
+ *
+ * <p>筛选条件（当前 query）一起带进详情页 —— 详情页的「返回订单流水」要按它复原。
+ * 管理员若在详情页刷新，query 仍在 URL 上，返回按钮照样管用。
+ *
+ * @param {object} o 订单行
+ */
+function openDetail(o) {
+  router.push({
+    name: 'admin-order-detail',
+    params: { id: o.id },
+    query: route.query
+  })
+}
+
+/* ==================== 优惠与计价 ==================== */
+
+/**
+ * 三项优惠之和（元）。
+ *
+ * <p>三种优惠并行存在且互不重叠（见后端 {@code BillingService} 的类注释）：
+ * {@code discountAmount} 是月度累计优惠、{@code cardFreeAmount} 是月卡、
+ * {@code activityFreeAmount} 是免费活动。合成一个数只用来判「有没有优惠」，
+ * 摊开展示时仍要分开 —— 否则月卡用户看到的一行会说成「活动减免」。
+ *
+ * @param {object} o 订单行
+ * @returns {number}
+ */
+function discountTotal(o) {
+  return (
+    Number(o.discountAmount || 0) +
+    Number(o.cardFreeAmount || 0) +
+    Number(o.activityFreeAmount || 0)
+  )
+}
+
+/**
+ * 这一单有没有优惠 —— 决定卡片上要不要多出「计价 / 实付」与那行减免明细。
+ *
+ * <p>使用中的订单没有金额（{@code payableAmount} 为 null），三项也全空，
+ * 自然走「无优惠」那条路，卡片上仍旧只有一个「—」。
+ *
+ * @param {object} o 订单行
+ * @returns {boolean}
+ */
+function hasDiscount(o) {
+  return discountTotal(o) > 0
+}
+
+/**
+ * 优惠前的计价（元）。
+ *
+ * <p>⚠️ <b>订单上没有「原价」这一列</b>：{@code totalAmount} 与
+ * {@code payableAmount} 存的都是<b>实收</b>（已按分段封顶、已含月度优惠、
+ * 已扣月卡与活动免除），那三项减免是说明性字段。所以原价只能反推：
+ * <b>实收 + 三项优惠</b>。
+ *
+ * <p>有一处它并不精确、且刻意保留：<b>半场累计封顶</b>削掉的钱不算优惠
+ * （那是同一半场的额度已经收满了，不是给这一单的减免），于是它会被算进
+ * 「计价」里。这正是这个数字该有的口径 —— 「没享受到这些优惠与额度时要付多少」。
+ * 逐段解释在详情页的账单里（{@code BillSegmentList} 会写明哪一段被削）。
+ *
+ * @param {object} o 订单行
+ * @returns {number}
+ */
+function originAmount(o) {
+  return Number(o.totalAmount || 0) + discountTotal(o)
+}
+
 /**
  * 下单人的展示文本。
  *
@@ -209,6 +379,39 @@ function resetProductFilters() {
  */
 function userText(o) {
   return o.userNickname || `用户 #${o.userId}`
+}
+
+/**
+ * 点卡片上的用户 ID：就地按这个用户筛一遍。
+ *
+ * <p><b>为什么卡片上要印 ID</b>：筛选栏是按「用户 ID」查的，而管理员既背不下
+ * 每个人的 ID、昵称又可能重名（同名同姓在一个店里并不罕见）。
+ *
+ * <p><b>为什么印出来还不够、还得能点</b>：看到「这人这单不太对」之后紧接着的动作
+ * 就是「把他这阵子的单都拉出来」。让管理员照着那一串数字手抄进输入框，
+ * 等于把这个功能做成摆设。
+ *
+ * <p>走的是与「查询」按钮同一条路（{@link applyTimingFilters}）：回第 1 页、
+ * 重查、条件照样写进 URL —— 于是「按他筛一遍」的结果可以刷新、可以发给同事。
+ *
+ * @param {number} userId 用户 ID
+ */
+function filterByUser(userId) {
+  filters.value.userId = String(userId)
+  applyTimingFilters()
+}
+
+/**
+ * 商品订单那边的同款入口。
+ *
+ * <p>两个 tab 各有一套筛选（见文件头），所以这里<b>不切 tab</b>：
+ * 在商品流水里点 ID 就把商品流水按他筛一遍，跳到计时流水反而违背了「我正在看什么」。
+ *
+ * @param {number} userId 用户 ID
+ */
+function filterProductByUser(userId) {
+  productFilters.value.userId = String(userId)
+  applyProductFilters()
 }
 
 /**
@@ -351,7 +554,20 @@ async function submitAdjust() {
   }
 }
 
-onMounted(loadTiming)
+/**
+ * 进页面：<b>先从 URL 复原条件，再查</b>。
+ *
+ * <p>从详情页返回时正是靠这一步把筛选与页码带回来（详情页把进来的 query
+ * 原样推回这一页，见 {@code OrderDetailView#goBack}）。
+ *
+ * <p>⚠️ 商品 tab 也一样要复原：URL 上写着 {@code type=product} 时直接打开这一页
+ * 就该落在商品流水上，而不是先闪一下计时订单、再去查商品。
+ */
+onMounted(() => {
+  initFromQuery()
+  if (type.value === 'product') loadProductOrders()
+  else loadTiming()
+})
 </script>
 
 <template>
@@ -420,7 +636,19 @@ onMounted(loadTiming)
         <LoadingMask :loading="loading" />
 
         <div v-if="records.length" class="om__list">
-          <div v-for="o in records" :key="o.id" class="orow">
+          <!--
+            整张卡片可点，进这一单的详情（/admin/orders/:id）。
+            键盘也给一条路（tabindex + 回车）—— 后台是电脑上的工具，
+            只用键盘翻流水的管理员不该在这里被卡住
+          -->
+          <div
+            v-for="o in records"
+            :key="o.id"
+            class="orow orow--link"
+            tabindex="0"
+            @click="openDetail(o)"
+            @keyup.enter="openDetail(o)"
+          >
             <div class="orow__head">
               <span class="orow__no">{{ o.orderNo }}</span>
               <!-- 状态中文用后端给的 statusText，只有配色取自 labels.js -->
@@ -433,8 +661,14 @@ onMounted(loadTiming)
                 已调整
               </span>
               <span v-if="o.bookingId" class="tag">包场单</span>
-              <!-- 已支付的单不给这个按钮：调整必然改金额，改完要牵出退款 -->
-              <button v-if="canAdjust(o)" class="om__op" @click="openAdjust(o)">调整时长</button>
+              <!--
+                已支付的单不给这个按钮：调整必然改金额，改完要牵出退款。
+                ⚠️ click 必须 stop：整张卡片本身是可点的（进详情），
+                不拦住的话点「调整时长」会顺带跳走一页
+              -->
+              <button v-if="canAdjust(o)" class="om__op" @click.stop="openAdjust(o)">
+                调整时长
+              </button>
             </div>
 
             <!--
@@ -443,16 +677,57 @@ onMounted(loadTiming)
               还得自己对齐。昵称留在左边，一行之内交代完「谁 · 多久 · 多少」
             -->
             <div class="orow__line">
-              <span class="orow__left">{{ userText(o) }}</span>
+              <span class="orow__left">
+                {{ userText(o) }}
+                <!--
+                  用户 ID 与昵称并排（2026-10-16 加）：筛选栏要按「用户 ID」查，
+                  而管理员既背不下每个人的 ID、昵称又可能重名。
+                  **点它直接按这个用户筛一遍** —— 那正是看到 ID 之后想做的事；
+                  不拦冒泡的话会顺带跳进订单详情（整张卡片是可点的）
+                -->
+                <span
+                  class="orow__uid"
+                  title="只看该用户的订单"
+                  @click.stop="filterByUser(o.userId)"
+                >#{{ o.userId }}</span>
+              </span>
               <span class="orow__right">
                 <span v-if="o.stayMinutes != null" class="orow__stay">
                   在店 {{ formatDuration(o.stayMinutes) }}
                 </span>
-                <span class="orow__amount">{{ amountText(o) }}</span>
+                <!--
+                  「计价 → 实付」：只有真有优惠的单子才给这个对比。
+                  每行都写一遍「计价」的话，没优惠的九成订单上那两个字纯属噪音，
+                  而它们恰恰是流水里最不需要解释的那一批
+                -->
+                <span v-if="hasDiscount(o)" class="orow__origin">
+                  计价 ¥{{ formatMoney(originAmount(o)) }}
+                </span>
+                <span class="orow__amount">
+                  {{ hasDiscount(o) ? '实付 ' : '' }}{{ amountText(o) }}
+                </span>
               </span>
             </div>
 
             <p class="orow__meta">{{ rangeText(o) }}</p>
+
+            <!--
+              减免明细：三种优惠各有各的出资方（月度累计优惠 / 月卡 / 活动），
+              摊成三项而不是合成一个数 —— 合成之后，月卡用户省下的钱会被记到
+              活动头上，而那种错不会有任何报错
+            -->
+            <div v-if="hasDiscount(o)" class="orow__cuts">
+              <span v-if="Number(o.discountAmount) > 0" class="orow__cut">
+                月度优惠 -¥{{ formatMoney(o.discountAmount) }}
+              </span>
+              <span v-if="Number(o.cardFreeAmount) > 0" class="orow__cut">
+                月卡抵扣 -¥{{ formatMoney(o.cardFreeAmount) }}
+              </span>
+              <span v-if="Number(o.activityFreeAmount) > 0" class="orow__cut orow__cut--activity">
+                活动减免 -¥{{ formatMoney(o.activityFreeAmount) }}
+              </span>
+              <span class="orow__cut orow__cut--sum">共减 ¥{{ formatMoney(discountTotal(o)) }}</span>
+            </div>
           </div>
         </div>
 
@@ -520,7 +795,11 @@ onMounted(loadTiming)
               不编一个名字，因为「查不到」与「叫这个名字」是两回事
             -->
             <p class="orow__meta">
-              购买人 {{ userText(o) }} · 单价 ¥{{ formatMoney(o.unitPrice) }} · 下单于
+              购买人 {{ userText(o) }}
+              <span class="orow__uid" title="只看该用户的商品订单" @click="filterProductByUser(o.userId)"
+                >#{{ o.userId }}</span
+              >
+              · 单价 ¥{{ formatMoney(o.unitPrice) }} · 下单于
               {{ formatDateTime(o.createdAt) }}
               <template v-if="o.paidAt"> · 付款于 {{ formatDateTime(o.paidAt) }}</template>
             </p>
@@ -547,6 +826,8 @@ onMounted(loadTiming)
       两条流水都在这一页：<b>计时订单</b>（用户端「开门计时」产生的）与<b>商品订单</b>（商城购买单）。
       <b>包场</b>在「包场」页、<b>月卡</b>在「用户」页的月卡弹层 —— 它们交付的是「权益」，
       要先经管理员复核，与这两条「提交即交付」的流水不是一回事。
+      <b>点计时订单的任意一单可看订单详情</b>（与用户端订单详情是同一份账单）；
+      金额上带「计价 / 实付」与减免明细，指的就是月度优惠、月卡与活动各自免了多少。
     </p>
 
     <!-- ---------------- 人工调整时长 ---------------- -->
@@ -718,6 +999,35 @@ onMounted(loadTiming)
   border-top: 1px solid var(--c-border);
 }
 
+/*
+ * 可点的订单卡片（整卡进详情）。
+ *
+ * 负边距 + 等量内边距：hover 的底色要比文字宽一点，看起来才像一整块可点的区域；
+ * 完全不加的话，底色紧贴文字边缘，像是文字被选中了。
+ * 溢出的部分落在卡片的 padding 里，不会顶到卡片外。
+ */
+.orow--link {
+  cursor: pointer;
+  margin-left: calc(-1 * var(--sp-2));
+  margin-right: calc(-1 * var(--sp-2));
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
+  border-radius: var(--r-btn);
+}
+
+.orow--link:hover {
+  background: var(--c-card);
+}
+
+/*
+ * 键盘焦点也要看得出来：只有 hover 的话，用 Tab 翻流水的管理员
+ * 根本不知道光标停在哪一行上
+ */
+.orow--link:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: -2px;
+}
+
 .orow__head {
   display: flex;
   align-items: center;
@@ -762,6 +1072,29 @@ onMounted(loadTiming)
   overflow-wrap: anywhere;
 }
 
+/*
+ * 卡片上的用户 ID（2026-10-16 加）。
+ *
+ * 与昵称并排、压小一号、用等宽字体：它是拿来核对与点击的，不该跟昵称抢注意力，
+ * 但要能和昵称一眼分开。给一点淡主色底 —— 它是个可点的东西，不是标记。
+ */
+.orow__uid {
+  margin-left: var(--sp-2);
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
+  font-size: 11px;
+  font-weight: 400;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.orow__uid:hover {
+  text-decoration: underline;
+}
+
 /* 时长与金额同住右侧：两者是「这单多久、多少」，读的时候本就是一体的 */
 .orow__right {
   display: flex;
@@ -776,12 +1109,63 @@ onMounted(loadTiming)
   color: var(--c-text-sub);
 }
 
+/*
+ * 优惠前的计价。比实付轻一档：它回答的是「本来要付多少」，
+ * 是实付那个数字的注解，不该跟实付抢注意力
+ */
+.orow__origin {
+  font-size: 12px;
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .orow__amount {
   font-size: 15px;
   font-weight: 600;
   color: var(--c-primary);
   /* 等宽数字：翻页时数字不会因字形宽窄而左右跳动 */
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 减免明细。
+ *
+ * 摊成一个个小标签而不是一句「共减 ¥23.50」：三种优惠的出资方不是同一个
+ * （月度累计优惠 / 月卡 / 活动），管理员要能一眼看出这一单便宜在哪儿 ——
+ * 合成一句的话，月卡免掉的钱会被读成活动送的
+ */
+.orow__cuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.orow__cut {
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--c-card);
+  color: var(--c-text-sub);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 活动减免用主色 —— 与账单里的口径一致：活动是「此刻正在发生的优惠」，
+ * 比一张长期持有的月卡更值得被看见（月卡保持中性灰）
+ */
+.orow__cut--activity {
+  background: var(--c-primary-pale);
+  color: var(--c-primary);
+}
+
+/* 合计那一枚只留文字，不加底色：它是前几项的和，不是第四种优惠 */
+.orow__cut--sum {
+  padding-left: 0;
+  padding-right: 0;
+  background: transparent;
+  font-weight: 600;
 }
 
 .orow__meta {

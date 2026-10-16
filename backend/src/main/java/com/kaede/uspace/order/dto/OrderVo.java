@@ -35,9 +35,10 @@ public class OrderVo {
     /**
      * 下单用户昵称（昵称未填时回落登录名）。
      *
-     * <p><b>只有后台列表接口（{@code /api/admin/orders}）填充它</b> ——
-     * 后台的流水要一眼看出「这是谁的单」；用户端查自己的订单时它恒为 null
-     * （那条路不带、也不必带，见 {@code OrderService#listOrders}）。
+     * <p><b>只有后台的两个接口填充它</b>（列表 {@code /api/admin/orders} 与
+     * 详情 {@code /api/admin/orders/{id}}）—— 后台要一眼看出「这是谁的单」；
+     * 用户端查自己的订单时它恒为 null（那条路不带、也不必带，
+     * 见 {@code OrderService#listOrders}）。
      *
      * <p>用户已注销或确实查不到时为 null，前端回落成「用户 #ID」。
      */
