@@ -12,8 +12,13 @@ import java.time.Duration;
 /**
  * 从 OneBot 给的地址把图片取回来（模块 11）。
  *
- * <p>群消息里的图片段带着一个可下载的 {@code url}，它是 NapCat 在<b>本机</b>起的
- * 一个小服务 —— 后端与它同机，取图是局域网内的 HTTP，正常情况下是毫秒级。
+ * <p>群消息里的图片段带着一个可下载的 {@code url}，它指向 NapCat 的 HTTP 服务
+ * （形如 {@code http://127.0.0.1:3001/...}）。
+ *
+ * <p>⚠️ <b>2026-10-17 起 NapCat 跑在云端 Linux</b>：这个 {@code 127.0.0.1} 是
+ * <b>服务器本机</b>的，而后端在另一台机器上 —— 全靠本机 SSH 隧道里的
+ * {@code -L 127.0.0.1:3001:127.0.0.1:3001} 把请求送过去。
+ * 隧道漏了 3001 的表现很隐蔽：别的一切正常，只有群里的图片一律回「这张图没取到」。
  *
  * <p><b>失败一律返回 null，绝不抛异常</b>：调用方（群内的凭证受理）据此回一句
  * 「图没取到」，而不是让一次网络抖动把整条链路炸掉。这与其他几处
@@ -25,7 +30,7 @@ import java.time.Duration;
 @ConditionalOnProperty(name = "uspace.qqbot.enabled", havingValue = "true")
 public class OneBotImageFetcher {
 
-    /** 连接超时。地址在本机，连不上就是 NapCat 那边出了问题，没必要等 */
+    /** 连接超时。地址最终落在 NapCat 那侧，连不上就是那边或隧道出了问题，没必要等 */
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
 
     /** 读取超时。图片可能几 MB，给宽一点 */

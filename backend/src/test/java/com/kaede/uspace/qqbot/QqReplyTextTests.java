@@ -650,6 +650,44 @@ class QqReplyTextTests {
     }
 
     @Test
+    @DisplayName("帮助：2026-10-17 重排后的分组顺序与命名")
+    void help_groupsRenamedAndReordered() {
+        String text = QqReplyText.help(true, false, null);
+
+        int common = text.indexOf("【常用】");
+        int store = text.indexOf("【门店】");
+        int profile = text.indexOf("【个人信息】");
+        int other = text.indexOf("【其他】");
+        assertTrue(common >= 0, "要有【常用】段：" + text);
+        assertTrue(store > common && profile > store && other > profile,
+                "顺序应为 常用 → 门店 → 个人信息 → 其他：" + text);
+        assertFalse(text.contains("【看店里】"), "旧分组名不该再出现：" + text);
+        assertFalse(text.contains("【我自己的】"), "旧分组名不该再出现：" + text);
+
+        // fw在店 挪进常用；kklm 是它的别名，不再单独成一条
+        assertTrue(text.substring(common, store).contains("fw在店"),
+                "看店要列在常用里：" + text);
+        assertFalse(text.substring(store, profile).contains("fw在店"),
+                "门店组里不能重复列同一条：" + text);
+    }
+
+    @Test
+    @DisplayName("帮助：横杠取数量的写法要列出来")
+    void help_mentionsDashQuantity() {
+        String text = QqReplyText.help(true, false, null);
+        assertTrue(text.contains("fw可乐-n"),
+                "fw可乐-n 是商品下单的第三种写法，解析器里一直支持，帮助不能漏：" + text);
+    }
+
+    @Test
+    @DisplayName("帮助：只读时说明写指令为什么没列")
+    void help_readOnlyExplainsMissingWrites() {
+        String text = QqReplyText.help(false, false, null);
+        assertTrue(text.contains("写指令未开启"),
+                "静默少列一段，用户只会以为机器人坏了：" + text);
+    }
+
+    @Test
     @DisplayName("帮助：调整库存那条只对管理员列出")
     void help_listsStockAdjustOnlyForAdmin() {
         String admin = QqReplyText.help(true, true, null);

@@ -339,8 +339,38 @@ public class QqCommandService {
      * @param qq      发送者 QQ（用于判定要不要列出管理员指令）
      */
     private void replyHelp(Long groupId, Long qq) {
-        replyQueue.submit(groupId, qq,
-                QqReplyText.help(writeUsable(), writeCommandService.isAdmin(qq), baseUrl()));
+        boolean writeEnabled = writeUsable();
+        boolean admin = writeCommandService.isAdmin(qq);
+        // 先试图（2026-10-17）：一屏二十多行的指令表在群里就是刷屏，
+        // 一张 2×2 的图扫一眼就够。画不出 / 发不出都回落文字版 ——
+        // 指令永远要有回音，见类注释
+        if (properties.isHelpImageEnabled() && sendHelpImage(groupId, writeEnabled, admin)) {
+            return;
+        }
+        replyQueue.submit(groupId, qq, QqReplyText.help(writeEnabled, admin, baseUrl()));
+    }
+
+    /**
+     * 发帮助图 —— <b>一张 2×2 四格，塞在同一条消息里</b>（2026-10-17 由用户定）。
+     *
+     * <p>图注只有一句前缀说明：图里已经有分组与指令，再附一段文字就把
+     * 「不刷屏」的初衷抵消了。
+     *
+     * <p>返回值语义：渲染失败、或发送失败都返回 false，调用方回落文字版 ——
+     * 一条消息要么整份发出去、要么整份不发。
+     *
+     * @param groupId      目标群
+     * @param writeEnabled 写指令此刻能不能用（决定「常用」格里列不列那几条）
+     * @param admin        发送者是不是管理员（决定要不要画管理两条）
+     * @return 整份发出去了返回 true
+     */
+    private boolean sendHelpImage(Long groupId, boolean writeEnabled, boolean admin) {
+        byte[] image = HelpCardRenderer.render(QqReplyText.helpPages(writeEnabled, admin));
+        if (image == null) {
+            return false;
+        }
+        return client.sendGroupMessageImage(groupId, image,
+                "可用指令（前缀 fw，例如 fw在店）");
     }
 
     /**

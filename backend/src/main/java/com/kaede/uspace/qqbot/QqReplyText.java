@@ -979,52 +979,224 @@ public final class QqReplyText {
      *                     没配置时这一行不出现
      * @return 多行文本
      */
+    /**
+     * 一条帮助指令（{@code fw帮助} 的一行）。
+     *
+     * <p><b>同一行有两种呈现，所以字段分成了两套</b>：
+     * 文字版用 {@link #text}（「fw在店 或 fw看看里面，也可直接发 kklm」这种带口语的整句），
+     * 帮助图用 {@link #cmd} + {@link #alias} 两段（字号与颜色不同，靠版式区分主次）。
+     *
+     * <p>⚠️ <b>加一条指令时四个字段要一起写</b>：只写 {@code text} 的话图上会缺这一行，
+     * 只写 {@code cmd} 的话文字版会缺 —— 两种呈现各漏一次，谁都发现不了。
+     *
+     * @param text  文字版里「——」之前的那串
+     * @param cmd   图上粗体的主命令
+     * @param alias 图上的别名（斜杠分隔），没有别名时为 null
+     * @param desc  说明 —— 文字版的「——」之后；图片上也会用它
+     * @param shortDesc 图片专用的短说明，可为 null
+     *
+     *              <p>为什么需要它：图上每个格子宽 410px，16 号字一行只放得下约 22 字，
+     *              而文字版里有的说明长到 30 字（「把待付款单的付款入口重新发一遍
+     *              （可直接发付款截图）」）。<b>靠自动截断会把句子拦腰切掉</b>，
+     *              于是在这里给一个只有图上才用的短句；为 null 时回落 {@code desc}。
+     */
+    public record HelpLine(String text, String cmd, String alias, String desc, String shortDesc) {
+
+        /**
+         * 没有短说明时的常用构造（图片与文字共用同一句说明）。
+         *
+         * @param text  文字版的命令串
+         * @param cmd   图上的主命令
+         * @param alias 图上的别名
+         * @param desc  说明
+         */
+        public HelpLine(String text, String cmd, String alias, String desc) {
+            this(text, cmd, alias, desc, null);
+        }
+    }
+
+    /**
+     * 帮助的一页：文字版里是一段、图片版里是一格。
+     *
+     * @param title      分组名
+     * @param lines      本组条目
+     * @param adminLines 只画在图里「常用」格底部的管理员条目
+     *                   （文字版另起【管理】段，所以那一格不带这些条目）
+     * @param note       图里贴底的一行小字（文字版没有），可为 null
+     */
+    public record HelpPage(String title, List<HelpLine> lines, List<HelpLine> adminLines,
+                           String note) {}
+
+    /**
+     * 常用的<b>只读</b>条目 —— 写指令关着时也要列（它们照样发得动）。
+     *
+     * <p>「fw在店」的行里带着 {@code kklm} 的说明：它是免前缀别名，
+     * 不写这一句就没人知道可以直接发（{@code QqCommandParser#PREFIX_FREE_ALIASES}）。
+     */
+    private static final List<HelpLine> HELP_COMMON_READONLY = List.of(
+            new HelpLine("fw在店 或 fw看看里面，也可直接发 kklm", "fw在店", "fw看看里面 / kklm",
+                    "查看当前在店人员"),
+            new HelpLine("fw菜单 或 fwmenu", "fw菜单", "fwmenu", "查看在售商品与库存"));
+
+    /** 门店组：只读查询，与「常用」分开是因为它们不参与任何写操作 */
+    private static final List<HelpLine> HELP_STORE = List.of(
+            new HelpLine("fw营业 或 fwstatus", "fw营业", "fwstatus", "查看门店营业状态"),
+            new HelpLine("fw包场 或 fwbooking", "fw包场", "fwbooking", "查看近期包场安排"),
+            new HelpLine("fw公告 或 fwgg", "fw公告", "fwgg", "查看最近门店公告"),
+            new HelpLine("fw机台 或 fwdevice", "fw机台", "fwdevice", "查看店内设施与状况"),
+            new HelpLine("fw价格 或 fwprice", "fw价格", "fwprice", "查看计费规则"),
+            new HelpLine("fw月卡 或 fwpass", "fw月卡", "fwpass", "查看月卡种类与价格"));
+
+    /** 个人信息组 */
+    private static final List<HelpLine> HELP_PROFILE = List.of(
+            new HelpLine("fw看看自己 或 fwme", "fw看看自己", "fwme", "查看本人的月卡、消费与在店时长"),
+            new HelpLine("fw当前订单 或 fwnow", "fw当前订单", "fwnow", "查看当前订单金额（仅预览，不停表）"),
+            new HelpLine("fw未付款 或 fwunpaid", "fw未付款", "fwunpaid", "查看本人未付款的单子"));
+
+    /**
+     * 管理组：只对管理员列出，且写指令总开关关着时也不列。
+     *
+     * <p>条目本身不写「仅管理员」—— 文字版的段标题与图片上的小标已经说了；
+     * 每条再带一遍，那一格会显得挤。机台状况的三种取值放在段尾一句说明里。
+     */
+    private static final List<HelpLine> HELP_ADMIN = List.of(
+            new HelpLine("fw可乐5", "fw可乐5", null, "把该商品的库存调整为 5"),
+            new HelpLine("fw拍拍机 1 号维护中", "fw拍拍机 1 号维护中", null,
+                    "把该机台状况改为维护中", "改机台状况"));
+
+    /** 其他组 */
+    private static final List<HelpLine> HELP_OTHER = List.of(
+            new HelpLine("fwweb 或 fw网址", "fwweb", "fw网址", "查看网页端地址（下单、查账单）"),
+            new HelpLine("fwping 或 fw在吗，也可直接发 ping", "fwping", "fw在吗 / ping",
+                    "检测机器人是否在线"),
+            new HelpLine("fw帮助 或 fwhelp", "fw帮助", "fwhelp", "显示本消息"));
+
+    /**
+     * 「常用」组此刻该列哪些条目。
+     *
+     * <p>写指令关着时<b>不是整组消失</b>（2026-10-17 起）：{@code fw在店}、{@code fw菜单}
+     * 本来就能用，藏起来只是让人以为机器人没这功能。开门 / 结账 / 下单那几条
+     * 由写开关决定，见 {@link #help} 与 {@link #helpPages}。
+     *
+     * @param writeEnabled 写指令是否可用
+     * @return 条目列表
+     */
+    private static List<HelpLine> commonLines(boolean writeEnabled) {
+        if (!writeEnabled) {
+            return HELP_COMMON_READONLY;
+        }
+        // 顺序是 2026-10-17 由用户定的：开门 → 结账 → 付款 → 看店（含 kklm）→ 菜单
+        // → 买可乐 → 取消订单 → 取消单号。「看店」夹在中间而非最后，是因为
+        // 它是群里最高频的一条（kklm 免前缀），排在支付动作之后、商品之前最顺手
+        List<HelpLine> lines = new ArrayList<>();
+        lines.add(new HelpLine("fw开门 或 fwopen", "fw开门", "fwopen", "开始计时并获取门锁密码"));
+        lines.add(new HelpLine("fw结账 或 fwpay", "fw结账", "fwpay", "停止计时并前往付款"));
+        lines.add(new HelpLine("fw付款", "fw付款", null,
+                "把待付款单的付款入口重新发一遍（可直接发付款截图）", "重发待付款单的付款入口"));
+        lines.addAll(HELP_COMMON_READONLY);
+        lines.add(new HelpLine("fw买个可乐 或 fw买n个可乐 或 fw可乐-n", "fw买个可乐",
+                "fw买n个可乐 / fw可乐-n", "下单购买商品"));
+        lines.add(new HelpLine("fw取消订单", "fw取消订单", null, "取消名下那笔待付款的商品单"));
+        lines.add(new HelpLine("fw取消 <单号>", "fw取消 <单号>", null,
+                "取消未付款的商品单、月卡购买单或包场"));
+        return lines;
+    }
+
+    /**
+     * 指令列表（按「你想干什么」分组）—— <b>文字版</b>。
+     *
+     * <p>顺带写明前缀要求 —— 这是「必须带前缀」那条规矩唯一的说明处，
+     * 少了它用户会照着指令名裸发，然后什么都得不到。
+     *
+     * <p><b>分组是 2026-10-04 排的、2026-10-17 按用户要求重排过</b>：
+     * 常用（含看店与商品）在前，随后是门店、个人信息、管理、其他。
+     * 之所以把「常用」提到最前，是因为它含开门 / 结账 / 看店三条真正高频的指令，
+     * 而分组<b>只影响这一条回复的排版</b>，不改变任何识别规则
+     *（别名与整条精确匹配都在 {@code QqCommandParser} 里）。
+     *
+     * <p>⚠️ 图片版见 {@link #helpPages}：两个方法共用上面的常量，
+     * 改条目只需改常量，不要在任一处另写一份文案。
+     *
+     * @param writeEnabled 写指令是否启用（关掉时那几条整段不列出来，
+     *                     否则用户发了没反应，而原因无处可查）
+     * @param admin        发送者是不是管理员 —— <b>调整库存那条只对管理员列</b>：
+     *                     它对别人本来就发不动（执行时会拒绝），列出来只会让人问
+     *                     「为什么我不能用」。为此多查一次 {@code sys_user} 是划算的，
+     *                     {@code fw帮助} 本来就是低频指令
+     * @param webUrl       网页端地址，放在最底下（2026-10-09 由用户要求）——
+     *                     它是这条长消息里最常被回头找的一样东西；
+     *                     没配置时这一行不出现
+     * @return 多行文本
+     */
     public static String help(boolean writeEnabled, boolean admin, String webUrl) {
         // ⚠️ 前缀只写 fw（2026-10-09 起 `/` 已不是前缀，发 `/在店` 会当闲聊静默）——
         // 这里曾写着「前缀 / 或 fw」，是那次改动漏掉的一处，别改回去
         StringBuilder text = new StringBuilder("可用指令（前缀 fw，例如 fw在店）：\n");
 
-        text.append("\n【看店里】\n");
-        text.append("fw在店 或 fw看看里面，也可直接发 kklm —— 查看当前在店人员\n");
-        text.append("fw营业 或 fwstatus —— 查看门店营业状态\n");
-        text.append("fw包场 或 fwbooking —— 查看近期包场安排\n");
-        text.append("fw公告 或 fwgg —— 查看最近门店公告\n");
-        text.append("fw菜单 或 fwmenu —— 查看在售商品与库存\n");
-        text.append("fw机台 或 fwdevice —— 查看店内设施与状况\n");
-        text.append("fw价格 或 fwprice —— 查看计费规则\n");
-        text.append("fw月卡 或 fwpass —— 查看月卡种类与价格\n");
-
-        text.append("\n【我自己的】\n");
-        text.append("fw看看自己 或 fwme —— 查看本人的月卡、消费与在店时长\n");
-        text.append("fw当前订单 或 fwnow —— 查看当前订单金额（仅预览，不停表）\n");
-        text.append("fw未付款 或 fwunpaid —— 查看本人未付款的单子\n");
-
-        if (writeEnabled) {
-            text.append("\n【常用】\n");
-            text.append("fw开门 或 fwopen —— 开始计时并获取门锁密码\n");
-            text.append("fw结账 或 fwpay —— 停止计时并前往付款\n");
-            text.append("fw付款 —— 把待付款单的付款入口重新发一遍（可直接发付款截图）\n");
-            text.append("fw买个可乐 或 fw买n个可乐 或 fw可乐-2 —— 下单购买商品\n");
-            text.append("fw取消订单 —— 取消名下那笔待付款的商品单\n");
-            text.append("fw取消 <单号> —— 取消未付款的商品单、月卡购买单或包场\n");
+        text.append("\n【常用】\n");
+        appendLines(text, commonLines(writeEnabled));
+        if (!writeEnabled) {
+            // 只读时把「为什么少了那几条」说清 —— 静默少列一段，用户只会以为机器人坏了
+            text.append("（写指令未开启：开门 / 结账 / 下单请在网页端操作）\n");
         }
+
+        text.append("\n【门店】\n");
+        appendLines(text, HELP_STORE);
+
+        text.append("\n【个人信息】\n");
+        appendLines(text, HELP_PROFILE);
+
         if (writeEnabled && admin) {
-            text.append("\n【管理】\n");
-            text.append("fw可乐5 —— 把该商品的库存调整为 5（仅管理员）\n");
-            text.append("fw拍拍机 1 号维护中 —— 把该机台状况改为维护中"
-                    + "（仅管理员，也可写「待维护」「良好」）\n");
+            text.append("\n【管理】（仅管理员）\n");
+            appendLines(text, HELP_ADMIN);
+            // 机台状况的三种取值不塞进每一条，放在段尾一句里 —— 图片版装不下这句，
+            // 管理员看图时靠 fw机台 / 网页端也能查到取值
+            text.append("（机台状况可写：良好 / 待维护 / 维护中）\n");
         }
 
         text.append("\n【其他】\n");
-        text.append("fwweb 或 fw网址 —— 查看网页端地址（下单、查账单）\n");
-        text.append("fwping 或 fw在吗，也可直接发 ping —— 检测机器人是否在线\n");
-        text.append("fw帮助 或 fwhelp —— 显示本消息\n");
+        appendLines(text, HELP_OTHER);
 
         text.append("\n注册时网页会提供一条以「fw验证 」开头的指令，复制发送到群里即可完成 QQ 号绑定。");
         if (webUrl != null && !webUrl.isBlank()) {
             text.append("\n\n网页端：").append(webUrl);
         }
         return text.toString();
+    }
+
+    /**
+     * 帮助的分页 —— <b>图片版</b>（2×2 四格，2026-10-17 由用户定）。
+     *
+     * <p>与 {@link #help} 共用同一批常量；差别只在组织方式：
+     * 文字版把管理员条目另起【管理】段，图片版把它们并进「常用」格底部
+     *（只有四格，多一段就多一块）。{@code note} 也是图片专用的：
+     * 文字版里的注册说明已在末尾，图上没地方放，压成一行小字贴底。
+     *
+     * @param writeEnabled 写指令是否启用
+     * @param admin        发送者是不是管理员
+     * @return 固定四页：常用 / 门店 / 个人信息 / 其他
+     */
+    public static List<HelpPage> helpPages(boolean writeEnabled, boolean admin) {
+        List<HelpPage> pages = new ArrayList<>();
+        pages.add(new HelpPage("常用", commonLines(writeEnabled),
+                writeEnabled && admin ? HELP_ADMIN : List.of(),
+                writeEnabled ? null : "写指令未开启：开门 / 结账 / 下单请到网页端操作"));
+        pages.add(new HelpPage("门店", HELP_STORE, List.of(), null));
+        pages.add(new HelpPage("个人信息", HELP_PROFILE, List.of(), "完整账单与进出记录在网页端查看"));
+        pages.add(new HelpPage("其他", HELP_OTHER, List.of(), "绑定：把网页出示的「fw验证 ……」发到群里"));
+        return pages;
+    }
+
+    /**
+     * 把一组条目按文字版的格式追加进 StringBuilder。
+     *
+     * @param text  目标
+     * @param lines 条目
+     */
+    private static void appendLines(StringBuilder text, List<HelpLine> lines) {
+        for (HelpLine line : lines) {
+            text.append(line.text()).append(" —— ").append(line.desc()).append('\n');
+        }
     }
 
     // ==================================================================

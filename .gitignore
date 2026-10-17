@@ -91,6 +91,16 @@ loadNapCat.js
 # 规则挡住，整目录排除是双保险（也免得那个 exe 被 git add . 捎进去）。
 frpc/
 
+# ---------- NapCat SSH 隧道与部署说明（本机工具，含服务器地址与密码） ----------
+# tools/napcat/ 下是「本机 SSH 到云端 NapCat 服务器」的隧道脚本、askpass 密码文件
+# 与部署说明。与 NapCat.Shell/、frpc/ 同性质：本机工具，不属于项目源码。
+# askpass.bat 里是明文服务器密码、napcat-tunnel.ps1 里是服务器 IPv6 地址 ——
+# 本仓库是 public，整目录排除。
+tools/napcat/
+
+# ---------- 项目根目录的隧道入口脚本（同样含服务器地址与明文密码） ----------
+启动-隧道.ps1
+
 # ---------- 前端（Vue，脚手架待创建） ----------
 node_modules/
 dist/

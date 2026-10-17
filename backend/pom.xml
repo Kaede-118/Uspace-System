@@ -86,6 +86,16 @@
         </dependency>
 
         <!--
+            邮件：NapCat 掉线时给运营者发提醒（QqbotOfflineNotifier）。
+            只在 uspace.qqbot.mail.enabled=true 时才会真的发信 ——
+            没配 SMTP 的环境不会因此多出一个对外连接。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+
+        <!--
             数据访问：MyBatis-Plus
             注意 artifactId 带 spring-boot3 后缀 —— 这是 Spring Boot 3.x 专用的 starter。
             误用 mybatis-plus-boot-starter（Boot 2.x 用）会导致自动配置失效。

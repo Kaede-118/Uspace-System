@@ -120,6 +120,16 @@ public class QqbotProperties {
     private boolean instoreImageEnabled = true;
 
     /**
+     * {@code fw帮助} 是否渲染成图片（{@code uspace.qqbot.help-image-enabled}）。
+     *
+     * <p>默认 true（2026-10-17 加）：帮助原本是一屏 20 多行的文本，发到群里就是刷屏；
+     * 一张 2×2 的图扫一眼就能看出有哪些指令。渲染或发送任何一步失败都会
+     * <b>自动回落文字版</b>（本机没有中文字体、连接问题），所以关掉它只是为了
+     * 「不想发图」这一种情形，不是缺字体时的兜底（那个渲染器自己会发现）。
+     */
+    private boolean helpImageEnabled = true;
+
+    /**
      * 本人自查询的金额是否显示（{@code fw看看自己} 与 {@code fw结账} 的回复里）。
      *
      * <p>⚠️ <b>它与 {@link #isAmountVisible} 各管一件事，不要混，更不要互相推断</b>：

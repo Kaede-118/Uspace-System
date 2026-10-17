@@ -72,16 +72,21 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
     /** 上一次发「已连接」群消息的时刻；null 表示本次进程内还没发过 */
     private final AtomicReference<LocalDateTime> lastConnectNoticeAt = new AtomicReference<>();
 
+    /** 掉线邮件提醒。始终存在，开关在它内部判断（见该类注释） */
+    private final QqbotOfflineNotifier offlineNotifier;
+
     public OneBotWebSocketHandler(OneBotClient client,
                                   QqCommandService commandService,
                                   ObjectMapper objectMapper,
                                   QqbotProperties properties,
-                                  Clock clock) {
+                                  Clock clock,
+                                  QqbotOfflineNotifier offlineNotifier) {
         this.client = client;
         this.commandService = commandService;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.clock = clock;
+        this.offlineNotifier = offlineNotifier;
     }
 
     /**
@@ -98,6 +103,8 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
         // 断开有日志（见 afterConnectionClosed）、连上反而一直什么都没有 ——
         // 排查「什么时候连上的」只能靠猜，这条补的就是那半边（2026-10-10 由用户提出）
         log.info("[QQ机器人] NapCat 已连接 sessionId={}", session.getId());
+        // 断开后 60 秒内又连上（最常见的抖动）就取消掉那封邮件
+        offlineNotifier.onReconnected();
         noticeConnected();
     }
 
@@ -182,6 +189,8 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         client.detach(session);
         log.info("[QQ机器人] 连接关闭 code={} reason={}", status.getCode(), status.getReason());
+        // 安排一封「N 秒后仍没重连」的邮件；期间重连会被 onReconnected 取消
+        offlineNotifier.onDisconnected("code=" + status.getCode() + " reason=" + status.getReason());
     }
 
     /**
@@ -214,6 +223,12 @@ public class OneBotWebSocketHandler extends TextWebSocketHandler {
     private void handleEvent(JsonNode frame) throws Exception {
         OneBotEvent event = objectMapper.treeToValue(frame, OneBotEvent.class);
         if (event.isMetaEvent()) {
+            // 心跳里的 status.online 是「QQ 是否在线」的唯一信号：
+            // 被挤下线时 NapCat 进程还在、WS 可能不断，只看连接关闭事件会漏掉
+            if ("heartbeat".equals(event.getMetaEventType())) {
+                boolean online = frame.path("status").path("online").asBoolean(true);
+                offlineNotifier.onHeartbeat(online);
+            }
             log.debug("[QQ机器人] 元事件 metaEventType={}", event.getMetaEventType());
             return;
         }

@@ -179,19 +179,12 @@ public final class InstoreCardRenderer {
     private static final Color ICON_BG = new Color(0xEDECF3);
 
     /**
-     * 中文字体候选，按平台排列：Windows → macOS → Linux（Noto / 思源 / 文泉驿）。
+     * 选定并可画汉字的字体名；null 表示本机画不了中文。
      *
-     * <p>逐个试到 {@code canDisplay('在')} 为真的那个；一个都画不出汉字时
-     *（容器里没装任何 CJK 字体）为 null，渲染直接回落文字版。
-     * 不写死某一个字体名：Windows 上没有 {@code Noto Sans CJK SC}，
-     * Linux 容器里也没有 {@code Microsoft YaHei} —— 写死等于换个平台就画不出字。
+     * <p>候选表与探测逻辑在 {@link CardFonts} —— 帮助图用的是同一份，
+     * 两处各写一份的话，换台机器会出现「一张图画得出来、另一张全是方框」。
      */
-    private static final List<String> FONT_CANDIDATES = List.of(
-            "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",
-            "Source Han Sans SC", "WenQuanYi Micro Hei", "SimHei");
-
-    /** 选定并可画汉字的字体名；null 表示本机画不了中文 */
-    private static final String FONT_FAMILY = pickFontFamily();
+    private static final String FONT_FAMILY = CardFonts.FAMILY;
 
     private InstoreCardRenderer() {
     }
@@ -636,22 +629,5 @@ public final class InstoreCardRenderer {
         };
     }
 
-    /**
-     * 从候选里挑一个能画汉字的字体。
-     *
-     * <p>判定用 {@code canDisplay('在')} 而不是「字体名存不存在」：
-     * {@code new Font(不存在的名)} 会返回一个兜底字体而不报错，
-     * 而那个兜底字体在没装 CJK 的系统上画不出汉字 ——
-     * 只看名字是查不出来的，画出来才发现是一屏方框。
-     *
-     * @return 可用的字体名；一个都没有时返回 null
-     */
-    private static String pickFontFamily() {
-        for (String name : FONT_CANDIDATES) {
-            if (new Font(name, Font.PLAIN, 16).canDisplay('在')) {
-                return name;
-            }
-        }
-        return null;
-    }
+
 }
