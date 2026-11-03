@@ -17,9 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 月卡段级免费的计费测试。
  *
  * <p><b>纯单测，不启动 Spring。</b>被测对象直接 {@code new} 出来，
- * 规则参数取 {@link BillingProperties} 的默认值（即线上配置的那一套：
- * 日 4 / 夜 3.5 元每半小时、宽限 5 分钟、封顶 40/35、门槛 200 元、
- * 优惠价 3.5/3 元且封顶 35/30）。
+ * 规则参数取 {@link BillingProperties} 的默认值（即线上配置的那一套，2026-10-17 调价后的
+ * 开业优惠价：日 5 / 夜 4.5 元每半小时、宽限 5 分钟、封顶 50/45、门槛 200 元、
+ * 优惠价 4.5/4 元且封顶 45/40）。
  *
  * <p>这一层有两处「写错不报错、只会静默算错」的地方，各有一条用例专门守着：
  * <ol>
@@ -141,7 +141,7 @@ class BillingServiceCardCoverageTests {
 
         assertEquals(2, bill.getSegments().size(), "21:00–23:30 应被切成日场与夜场两段");
         assertAmount("0", bill, "全天卡覆盖所有段");
-        assertCardFree("18.5", bill, "免掉的是不持卡时应付的金额：日场 8 + 夜场 10.5");
+        assertCardFree("23.5", bill, "免掉的是不持卡时应付的金额：日场 10 + 夜场 13.5");
     }
 
     @Test
@@ -158,16 +158,16 @@ class BillingServiceCardCoverageTests {
         // 这几个中间结果正是账单页解释「这段为什么免费」的依据，
         // 一起归零的话，界面上就只剩一个没有来由的 0 元
         assertEquals(2, day.getUnits(), "日场 1 小时 = 2 档");
-        assertEquals(0, new BigDecimal("4").compareTo(day.getUnitPrice()), "单价仍是日场原价");
-        assertEquals(0, new BigDecimal("8").compareTo(day.getRawAmount()), "封顶前金额仍算得出来");
-        assertEquals(0, new BigDecimal("40").compareTo(day.getCapAmount()), "封顶值仍记下来");
-        assertEquals(0, new BigDecimal("8").compareTo(day.getCardFreeAmount()), "本段免掉 8 元");
+        assertEquals(0, new BigDecimal("5").compareTo(day.getUnitPrice()), "单价仍是日场原价");
+        assertEquals(0, new BigDecimal("10").compareTo(day.getRawAmount()), "封顶前金额仍算得出来");
+        assertEquals(0, new BigDecimal("50").compareTo(day.getCapAmount()), "封顶值仍记下来");
+        assertEquals(0, new BigDecimal("10").compareTo(day.getCardFreeAmount()), "本段免掉 10 元");
 
         SegmentBill night = bill.getSegments().get(1);
         assertEquals(BillingPeriod.NIGHT, night.getPeriod());
         assertTrue(night.isFreeByCard(), "夜场段同样免费");
         assertEquals(3, night.getUnits(), "夜场 1.5 小时 = 3 档");
-        assertEquals(0, new BigDecimal("10.5").compareTo(night.getCardFreeAmount()), "本段免掉 10.5 元");
+        assertEquals(0, new BigDecimal("13.5").compareTo(night.getCardFreeAmount()), "本段免掉 13.5 元");
     }
 
     @Test
@@ -178,10 +178,10 @@ class BillingServiceCardCoverageTests {
 
         assertTrue(bill.isDiscounted(), "当月累计已过门槛，本单走优惠价");
         assertAmount("0", bill, "全天卡覆盖所有段");
-        assertCardFree("16", bill, "免的是优惠价口径的钱：日场 7 + 夜场 9，而非原价的 18.5");
+        assertCardFree("21", bill, "免的是优惠价口径的钱：日场 9 + 夜场 12，而非原价的 23.5");
 
         // ⚠️ 守门用例：算 discountAmount 时按原价重算那一步若漏传 CardCoverage，
-        // 免费段会算出一份并不存在的原价，这里就会变成 18.5 —— 而金额、状态、
+        // 免费段会算出一份并不存在的原价，这里就会变成 23.5 —— 而金额、状态、
         // 页面全都正常，只有统计报表里的「优惠活动效果」悄悄虚高
         assertDiscount("0", bill, "月度优惠与月卡互不重叠，被月卡免掉的段不算月度优惠");
     }
@@ -203,13 +203,13 @@ class BillingServiceCardCoverageTests {
     // ==================================================================
 
     @Test
-    @DisplayName("夜间卡：草案原例 —— 21:00 进场 23:30 离场，日场段照收 8 元、夜场段免费")
+    @DisplayName("夜间卡：草案原例 —— 21:00 进场 23:30 离场，日场段照收 10 元、夜场段免费")
     void nightCard_matchesDesignDocExample() {
         BillingResult bill = billingService.calculate(
                 at(21, 0), at(23, 30), BELOW_THRESHOLD, nightCard());
 
-        assertAmount("8", bill, "与 docs/月卡设计草案.md 第四节的例子逐字一致");
-        assertCardFree("10.5", bill, "只有夜场段被覆盖");
+        assertAmount("10", bill, "与 docs/月卡设计草案.md 第四节的例子逐字一致");
+        assertCardFree("13.5", bill, "只有夜场段被覆盖");
 
         assertFalse(bill.getSegments().get(0).isFreeByCard(), "日场段不在夜间卡的覆盖范围内");
         assertTrue(bill.getSegments().get(1).isFreeByCard(), "夜场段被覆盖");
@@ -221,7 +221,7 @@ class BillingServiceCardCoverageTests {
         BillingResult bill = billingService.calculate(
                 at(14, 0), at(16, 0), BELOW_THRESHOLD, nightCard());
 
-        assertAmount("16", bill, "14:00–16:00 共 2 小时，4 档 × 4 元");
+        assertAmount("20", bill, "14:00–16:00 共 2 小时，4 档 × 5 元");
         assertCardFree("0", bill, "夜间卡对日场没有任何减免");
         assertFalse(bill.getSegments().get(0).isFreeByCard());
     }
@@ -234,10 +234,10 @@ class BillingServiceCardCoverageTests {
 
         // 段级叠加（2026-09-29 拍板）：未覆盖的段是正常付费消费，照常享月度优惠价。
         // 若改成「有段被免就整单不打折」，会出现「多玩半小时反而更贵」的价格悬崖 ——
-        // 20:00–21:30 全在日场收 7 元，21:00–23:30 进了夜场却收 8 元，运营解释不通
-        assertAmount("7", bill, "日场段按优惠价 3.5 元 × 2 档 = 7 元，夜场段免费");
-        assertCardFree("9", bill, "夜场段免掉的是优惠价口径的 3 档 × 3 元");
-        assertDiscount("1", bill, "只有日场段享了月度优惠：原价 8 元 − 优惠价 7 元");
+        // 20:00–21:30 全在日场收 9 元，21:00–23:30 进了夜场却收 10 元，运营解释不通
+        assertAmount("9", bill, "日场段按优惠价 4.5 元 × 2 档 = 9 元，夜场段免费");
+        assertCardFree("12", bill, "夜场段免掉的是优惠价口径的 3 档 × 4 元");
+        assertDiscount("1", bill, "只有日场段享了月度优惠：原价 10 元 − 优惠价 9 元");
     }
 
     // ==================================================================
@@ -247,16 +247,16 @@ class BillingServiceCardCoverageTests {
     @Test
     @DisplayName("免费仍可能触发封顶：capped 按封顶前金额判定")
     void freeSegment_cappedFlagStillReflectsRawAmount() {
-        // 日场 5 小时 6 分 → 可计费 301 分钟 → 11 档 × 4 元 = 44 元 > 封顶 40 元
+        // 日场 5 小时 6 分 → 可计费 301 分钟 → 11 档 × 5 元 = 55 元 > 封顶 50 元
         BillingResult bill = billingService.calculate(
                 at(10, 0), at(15, 6), BELOW_THRESHOLD, allDayCard());
 
         SegmentBill day = bill.getSegments().get(0);
         assertTrue(day.isCapped(), "原始金额确实超过了封顶，与是否免费无关");
-        assertEquals(0, new BigDecimal("44").compareTo(day.getRawAmount()), "封顶前 44 元");
-        assertEquals(0, new BigDecimal("40").compareTo(day.getCardFreeAmount()),
-                "免掉的是封顶后的 40 元，不是封顶前的 44 元");
-        assertAmount("0", bill, "无卡时本该收 40 元，被全天卡免掉");
+        assertEquals(0, new BigDecimal("55").compareTo(day.getRawAmount()), "封顶前 55 元");
+        assertEquals(0, new BigDecimal("50").compareTo(day.getCardFreeAmount()),
+                "免掉的是封顶后的 50 元，不是封顶前的 55 元");
+        assertAmount("0", bill, "无卡时本该收 50 元，被全天卡免掉");
     }
 
     @Test
@@ -313,11 +313,11 @@ class BillingServiceCardCoverageTests {
 
         SegmentBill after = bill.getSegments().get(1);
         assertFalse(after.isFreeByCard(), "零点起卡已失效，照常计费");
-        assertEquals(0, new BigDecimal("7").compareTo(after.getAmount()),
-                "夜场 1 小时 = 2 档 × 3.5 元");
+        assertEquals(0, new BigDecimal("9").compareTo(after.getAmount()),
+                "夜场 1 小时 = 2 档 × 4.5 元");
 
-        assertAmount("7", bill, "整单只收卡失效之后的那 7 元");
-        assertCardFree("7", bill, "零点前那 1 小时本该收 7 元，被月卡免掉");
+        assertAmount("9", bill, "整单只收卡失效之后的那 9 元");
+        assertCardFree("9", bill, "零点前那 1 小时本该收 9 元，被月卡免掉");
     }
 
     @Test
@@ -333,8 +333,8 @@ class BillingServiceCardCoverageTests {
         assertEquals(2, bill.getSegments().size(), "卡的生效时刻同样是一条切分线");
         assertFalse(bill.getSegments().get(0).isFreeByCard(), "卡生效之前那段照常收费");
         assertTrue(bill.getSegments().get(1).isFreeByCard(), "生效之后那段免费");
-        assertAmount("7", bill, "只收生效前那 1 小时：夜场 2 档 × 3.5 元");
-        assertCardFree("7", bill, "免掉的是生效之后那 1 小时");
+        assertAmount("9", bill, "只收生效前那 1 小时：夜场 2 档 × 4.5 元");
+        assertCardFree("9", bill, "免掉的是生效之后那 1 小时");
     }
 
     @Test
@@ -347,7 +347,7 @@ class BillingServiceCardCoverageTests {
                 at(23, 0), LocalDateTime.of(2026, 9, 17, 1, 0), BELOW_THRESHOLD, null);
 
         assertEquals(1, bill.getSegments().size(), "整单都在夜场，应当只有一段");
-        assertAmount("14", bill, "2 小时 = 4 档 × 3.5 元");
+        assertAmount("18", bill, "2 小时 = 4 档 × 4.5 元");
     }
 
     @Test

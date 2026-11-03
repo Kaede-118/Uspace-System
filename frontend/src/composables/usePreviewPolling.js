@@ -16,10 +16,14 @@ import { ApiError } from '@/utils/error'
  *
  * @param {object} [options]
  * @param {number} [options.interval] 轮询间隔（毫秒），默认 10 秒
+ * @param {Function} [options.onClosed] 轮询拿到 409（订单已不再是进行中）时的回调。
+ *        首页用它重新核对订单状态 —— 否则「首页开着不动、别处把这单结了」时，
+ *        进行中卡片会一直挂着，按钮也一直停在「查看密码」
  * @returns {object} 轮询器
  */
 export function usePreviewPolling(options = {}) {
   const interval = options.interval ?? 10000
+  const onClosed = typeof options.onClosed === 'function' ? options.onClosed : null
 
   /** 最新一次预览结果。 */
   const preview = ref(null)
@@ -149,6 +153,8 @@ export function usePreviewPolling(options = {}) {
        */
       if (err instanceof ApiError && err.status === 409) {
         stop()
+        // 通知调用方「这一单已经不是进行中了」—— 让它去把订单状态重新核对一遍
+        if (onClosed) onClosed()
         return
       }
       // 其余错误（网络抖动等）静默忽略，下一轮会重试 ——
@@ -184,13 +190,17 @@ export function usePreviewPolling(options = {}) {
    * 开始轮询。
    *
    * @param {number|string} id 订单 ID
+   * @param {object} [options]
+   * @param {boolean} [options.silent] 首次拉取是否静默。默认 false ——
+   *        首次进入页面时页面是空的，要让用户看见「在加载」；
+   *        而 keep-alive 页面「回到页面时重新核对」那一路传 true，
+   *        用户看到的是缓存内容，不该再盖一层「加载中」
    */
-  async function start(id) {
+  async function start(id, { silent = false } = {}) {
     stop()
     orderId = id
     renderedPreviewAt = ''
-    // 首次加载【不静默】：页面此刻是空的，要让用户看见「在加载」
-    await fetchOnce({ silent: false })
+    await fetchOnce({ silent })
     if (orderId) {
       schedule()
       startTick()

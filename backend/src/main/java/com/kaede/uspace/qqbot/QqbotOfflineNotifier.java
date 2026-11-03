@@ -72,8 +72,16 @@ public class QqbotOfflineNotifier {
     /** 单线程调度器：延迟复查 + 心跳超时巡检 */
     private final ScheduledExecutorService scheduler;
 
-    /** OneBot 客户端：心跳巡检时用它确认 WS 是否还在 */
-    private final OneBotClient client;
+    /**
+     * OneBot 客户端（可选）：心跳巡检时用它确认 WS 是否还在。
+     *
+     * <p>⚠️ 用 {@link ObjectProvider} 而不是直接注入：{@link OneBotClient} 挂在
+     * {@code uspace.qqbot.enabled=true} 上，而本类<b>始终注册</b> —— 直接注入的话，
+     * 机器人关着时容器会因「找不到 OneBotClient」而整个起不来（2026-10-17 实测踩到，
+     * 表现为跑测试时 ApplicationContext 直接失败）。关掉机器人本该是最安全的配置，
+     * 不该成为最坏的结果。
+     */
+    private final ObjectProvider<OneBotClient> clientProvider;
 
     /** 上一次收到心跳的时刻（毫秒）；进程启动时初始化，避免一开机就报「很久没心跳」 */
     private final AtomicLong lastHeartbeatAt = new AtomicLong(System.currentTimeMillis());
@@ -82,14 +90,14 @@ public class QqbotOfflineNotifier {
     private static final long HEARTBEAT_TIMEOUT_MS = 90_000L;
 
     public QqbotOfflineNotifier(ObjectProvider<JavaMailSender> mailSenderProvider,
-                                OneBotClient client,
+                                ObjectProvider<OneBotClient> clientProvider,
                                 @Value("${uspace.qqbot.mail.enabled:false}") boolean enabled,
                                 @Value("${uspace.qqbot.mail.from:}") String from,
                                 @Value("${uspace.qqbot.mail.to:}") String to,
                                 @Value("${uspace.qqbot.mail.offline-delay-seconds:60}") long delaySeconds,
                                 @Value("${uspace.qqbot.mail.cooldown-minutes:10}") long cooldownMinutes) {
         this.mailSenderProvider = mailSenderProvider;
-        this.client = client;
+        this.clientProvider = clientProvider;
         this.enabled = enabled;
         this.from = from == null ? "" : from.trim();
         this.to = to == null ? "" : to.trim();
@@ -135,7 +143,9 @@ public class QqbotOfflineNotifier {
      */
     private void checkHeartbeat() {
         try {
-            if (!enabled || !client.isConnected()) {
+            OneBotClient client = clientProvider.getIfAvailable();
+            // 机器人关着时根本没有这个 bean：没有连接，也就没有「心跳停了」这回事
+            if (!enabled || client == null || !client.isConnected()) {
                 return;
             }
             long silent = System.currentTimeMillis() - lastHeartbeatAt.get();

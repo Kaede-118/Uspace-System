@@ -203,11 +203,13 @@ export function submitProof({ targetType, targetId, proofUrl, paymentNo, payQrId
  * <p>用户重交之后这条会自动消失 —— 重交会把状态翻回待复核，
  * 所以<b>不需要前端做任何「已处理」的标记</b>。
  *
+ * @param {object} [config] 额外的 axios 配置。首页「回到页面就核对一次」时传
+ *                          {@code { silent: true }}
  * @returns {Promise<{data:Array<{proofId, targetType, targetTypeLabel, targetId,
  *          orderNo, amount, reason, rejectedAt}>}>} 一条都没有时是空数组
  */
-export function listRejectedProofs() {
-  return http.get('/api/payment-proofs/rejected')
+export function listRejectedProofs(config = {}) {
+  return http.get('/api/payment-proofs/rejected', config)
 }
 
 /**

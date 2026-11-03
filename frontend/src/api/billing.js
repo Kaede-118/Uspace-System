@@ -21,8 +21,8 @@ import http from './http'
  *   <li>{@code dayPricePerHour} 等 —— 「元 / 小时」（展示与那句优惠文案要用）</li>
  * </ul>
  *
- * <p>⚠️ <b>有两个「7 元/小时」不要搞混</b>：优惠后的<b>日间</b>价是 7 元/小时，
- * 而<b>夜间原价</b>也是 7 元/小时 —— 数字一样、含义不同，优惠表里要分行写。
+ * <p>⚠️ <b>有两个「9 元/小时」不要搞混</b>：优惠后的<b>日间</b>价是 9 元/小时，
+ * 而<b>夜间原价</b>也是 9 元/小时 —— 数字一样、含义不同，优惠表里要分行写。
  *
  * @returns {Promise<{data:{
  *   unitMinutes, graceMinutes, dayStart, dayEnd,

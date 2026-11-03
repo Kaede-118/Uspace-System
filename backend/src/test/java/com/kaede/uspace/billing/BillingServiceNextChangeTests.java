@@ -108,18 +108,18 @@ class BillingServiceNextChangeTests {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, null, null);
 
         assertAt(at(10, 6), at(10, 2), change);
-        assertEquals("进入下一档 ¥4.00", change.getText());
+        assertEquals("进入下一档 ¥5.00", change.getText());
     }
 
     @Test
     @DisplayName("档位边界恰好命中：35 分钟时仍算第 1 档，1 分钟后才跳档")
     void exactlyAtBoundary_stillPointsAtNextTier() {
-        // 35 分钟时「可计费分钟」恰为 30，仍收 4 元；跳到 8 元要到第 36 分钟。
+        // 35 分钟时「可计费分钟」恰为 30，仍收 5 元；跳到 10 元要到第 36 分钟。
         // 少写那个「+1」的话，这里会算出「已经跳档」或「还有 30 分钟」
         NextChange change = billingService.nextChange(at(10, 0), at(10, 35), null, null, null);
 
         assertAt(at(10, 36), at(10, 35), change);
-        assertEquals("进入下一档 ¥8.00", change.getText());
+        assertEquals("进入下一档 ¥10.00", change.getText());
     }
 
     @Test
@@ -128,7 +128,7 @@ class BillingServiceNextChangeTests {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 50), null, null, null);
 
         assertAt(at(11, 6), at(10, 50), change);
-        assertEquals("进入下一档 ¥12.00", change.getText());
+        assertEquals("进入下一档 ¥15.00", change.getText());
     }
 
     @Test
@@ -137,8 +137,8 @@ class BillingServiceNextChangeTests {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2), AT_THRESHOLD, null, null);
 
         assertAt(at(10, 6), at(10, 2), change);
-        assertEquals("进入下一档 ¥3.50", change.getText(),
-                "门槛已达，单价降到 3.5 元 —— 拿原价 4 元去算会让用户多估一档的价钱");
+        assertEquals("进入下一档 ¥4.50", change.getText(),
+                "门槛已达，单价降到 4.5 元 —— 拿原价 5 元去算会让用户多估一档的价钱");
     }
 
     @Test
@@ -146,7 +146,7 @@ class BillingServiceNextChangeTests {
     void justBelowThreshold_usesOriginalPrice() {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2), BELOW_THRESHOLD, null, null);
 
-        assertEquals("进入下一档 ¥4.00", change.getText());
+        assertEquals("进入下一档 ¥5.00", change.getText());
     }
 
     @Test
@@ -156,7 +156,7 @@ class BillingServiceNextChangeTests {
         NextChange change = billingService.nextChange(at(21, 0), at(23, 0), null, null, null);
 
         assertAt(at(23, 6), at(23, 0), change);
-        assertEquals("进入下一档 ¥10.50", change.getText(),
+        assertEquals("进入下一档 ¥13.50", change.getText(),
                 "段起点要是错用了订单起点（21:00），这里会算出一个属于日场的答案");
     }
 
@@ -167,7 +167,7 @@ class BillingServiceNextChangeTests {
         NextChange change = billingService.nextChange(at(21, 0), at(22, 0), null, null, null);
 
         assertAt(at(22, 6), at(22, 0), change);
-        assertEquals("进入下一档 ¥3.50", change.getText());
+        assertEquals("进入下一档 ¥4.50", change.getText());
     }
 
     // ------------------------------------------------------------------
@@ -219,7 +219,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("已达封顶：只给说明、不给倒计时")
     void capped_reportsNoFurtherChange() {
-        // 10:00 进场、现在 15:00 = 300 分钟，第 10 档，金额恰好等于日场封顶 40 元。
+        // 10:00 进场、现在 15:00 = 300 分钟，第 10 档，金额恰好等于日场封顶 50 元。
         // 注意此时段上的 capped 标志仍是 false（那要到第 11 档才为 true），
         // 靠它判断会漏报，必须用「原始金额 ≥ 封顶」
         NextChange change = billingService.nextChange(at(10, 0), at(15, 0), null, null, null);
@@ -233,7 +233,7 @@ class BillingServiceNextChangeTests {
     @Test
     @DisplayName("已达封顶：优惠价下同样识别得出")
     void capped_withDiscountPrice() {
-        // 优惠价封顶 35 元 = 10 档 × 3.5 元，第 10 档同样在 4 小时 36 分起
+        // 优惠价封顶 45 元 = 10 档 × 4.5 元，第 10 档同样在 4 小时 36 分起
         NextChange change = billingService.nextChange(at(10, 0), at(15, 0), AT_THRESHOLD, null, null);
 
         assertNull(change.getInSeconds(), "优惠价下封顶值不同，判定也必须跟着走");
@@ -257,7 +257,7 @@ class BillingServiceNextChangeTests {
 
         NextChange day = billingService.nextChange(at(10, 0), at(10, 2), null, NIGHT_CARD, null);
         assertAt(at(10, 6), at(10, 2), day);
-        assertEquals("进入下一档 ¥4.00", day.getText(),
+        assertEquals("进入下一档 ¥5.00", day.getText(),
                 "日场段不在夜间卡的覆盖范围里 —— 照抄「有卡就免费」会让账单少收钱");
     }
 

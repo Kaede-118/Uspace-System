@@ -23,15 +23,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 整点是否恰好为单价 × 2、四个封顶点、跨时段的切分、月度优惠的门槛边界），
  * 这里逐条钉死。这些用例同时也是计费准确性的验证材料。
  *
- * <p>2026-09-26 定价改版、2026-09-28 调整宽限后的关键参数：
+ * <p>2026-10-17 调价后的关键参数（配置里当前执行的是<b>开业优惠价</b>）：
  * <ul>
- *   <li>日场 4 元/30 分、封顶 40；月度优惠价 3.5 元/30 分、封顶 35</li>
- *   <li>夜场 3.5 元/30 分、封顶 35；月度优惠价 3 元/30 分、封顶 30</li>
+ *   <li>日场 5 元/30 分、封顶 50；月度优惠价 4.5 元/30 分、封顶 45</li>
+ *   <li>夜场 4.5 元/30 分、封顶 45；月度优惠价 4 元/30 分、封顶 40</li>
  *   <li>免费宽限 5 分钟（档位边界落在 5 / 35 / 65 …）；月度优惠门槛 200 元</li>
  * </ul>
- * 注意四组封顶都等于「10 档 × 对应单价」，即 5 小时价格。
- * 宽限只影响档位边界，不改动单价与封顶金额，因此整点金额、封顶金额、
- * 月度优惠相关的用例不受 09-28 调整影响。
+ * 四组封顶都等于「10 档 × 对应单价」，即 5 小时价格。
+ * 门市价（日 12/55、夜 10/50）与门市价那一套的优惠价（日 11/55、夜 9/45）
+ * 不写在代码里，见 {@code docs/用户版计费与优惠说明.md}。
  */
 @SpringBootTest
 class BillingServiceTests {
@@ -107,21 +107,21 @@ class BillingServiceTests {
     }
 
     @Test
-    @DisplayName("6 分钟：超出宽限 1 分钟，进入第一档收 4 元")
+    @DisplayName("6 分钟：超出宽限 1 分钟，进入第一档收 5 元")
     void oneMinuteOverGrace_chargesFirstUnit() {
-        assertAmount("4", billingService.calculate(at(10, 0), at(10, 6)));
+        assertAmount("5", billingService.calculate(at(10, 0), at(10, 6)));
     }
 
     @Test
-    @DisplayName("35 分钟：可计费分钟恰为 30，仍收 4 元（余数舍弃）")
+    @DisplayName("35 分钟：可计费分钟恰为 30，仍收 5 元（余数舍弃）")
     void atFirstBoundary_chargesFirstUnit() {
-        assertAmount("4", billingService.calculate(at(10, 0), at(10, 35)));
+        assertAmount("5", billingService.calculate(at(10, 0), at(10, 35)));
     }
 
     @Test
-    @DisplayName("36 分钟：可计费分钟超过 30，进位收 8 元")
+    @DisplayName("36 分钟：可计费分钟超过 30，进位收 10 元")
     void oneMinuteOverBoundary_chargesTwoUnits() {
-        assertAmount("8", billingService.calculate(at(10, 0), at(10, 36)));
+        assertAmount("10", billingService.calculate(at(10, 0), at(10, 36)));
     }
 
     // ------------------------------------------------------------------
@@ -129,27 +129,27 @@ class BillingServiceTests {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("日场恰好 1 小时：2 档 × 4 元 = 8 元")
-    void dayExactlyOneHour_isEightYuan() {
-        assertAmount("8", billingService.calculate(at(10, 0), at(11, 0)));
+    @DisplayName("日场恰好 1 小时：2 档 × 5 元 = 10 元")
+    void dayExactlyOneHour_isTenYuan() {
+        assertAmount("10", billingService.calculate(at(10, 0), at(11, 0)));
     }
 
     @Test
-    @DisplayName("日场恰好 2 小时：16 元")
-    void dayExactlyTwoHours_isSixteenYuan() {
-        assertAmount("16", billingService.calculate(at(10, 0), at(12, 0)));
+    @DisplayName("日场恰好 2 小时：20 元")
+    void dayExactlyTwoHours_isTwentyYuan() {
+        assertAmount("20", billingService.calculate(at(10, 0), at(12, 0)));
     }
 
     @Test
-    @DisplayName("日场恰好 3 小时：24 元")
-    void dayExactlyThreeHours_isTwentyFourYuan() {
-        assertAmount("24", billingService.calculate(at(10, 0), at(13, 0)));
+    @DisplayName("日场恰好 3 小时：30 元")
+    void dayExactlyThreeHours_isThirtyYuan() {
+        assertAmount("30", billingService.calculate(at(10, 0), at(13, 0)));
     }
 
     @Test
-    @DisplayName("夜场恰好 1 小时：2 档 × 3.5 元 = 7 元（夜间更便宜）")
-    void nightExactlyOneHour_isSevenYuan() {
-        assertAmount("7", billingService.calculate(at(22, 0), at(23, 0)));
+    @DisplayName("夜场恰好 1 小时：2 档 × 4.5 元 = 9 元（夜间更便宜）")
+    void nightExactlyOneHour_isNineYuan() {
+        assertAmount("9", billingService.calculate(at(22, 0), at(23, 0)));
     }
 
     // ------------------------------------------------------------------
@@ -157,47 +157,47 @@ class BillingServiceTests {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("日场恰好 5 小时：金额正好等于 40 元封顶，但不算「超出封顶」")
+    @DisplayName("日场恰好 5 小时：金额正好等于 50 元封顶，但不算「超出封顶」")
     void dayExactlyFiveHours_equalsCapButNotMarkedCapped() {
-        // 5 小时 = 10 档 × 4 元 = 40 元，刚好等于封顶值
+        // 5 小时 = 10 档 × 5 元 = 50 元，刚好等于封顶值
         BillingResult result = billingService.calculate(at(10, 0), at(15, 0));
 
-        assertAmount("40", result);
+        assertAmount("50", result);
         SegmentBill segment = result.getSegments().get(0);
         assertEquals(10, segment.getUnits());
         assertFalse(segment.isCapped(), "恰好等于封顶值不算超出");
     }
 
     @Test
-    @DisplayName("日场超长：原始金额 44 元被封到 40 元，标记 capped")
+    @DisplayName("日场超长：原始金额 55 元被封到 50 元，标记 capped")
     void daySession_hitsCap() {
-        // 10:00 起 5 小时 20 分，可计费 320 − 5 = 315 分钟 → 11 档 × 4 = 44 元
+        // 10:00 起 5 小时 20 分，可计费 320 − 5 = 315 分钟 → 11 档 × 5 = 55 元
         BillingResult result = billingService.calculate(at(10, 0), at(15, 20));
 
-        assertAmount("40", result);
+        assertAmount("50", result);
         assertEquals(1, result.getSegments().size());
         SegmentBill segment = result.getSegments().get(0);
         assertEquals(BillingPeriod.DAY, segment.getPeriod());
         assertTrue(segment.isCapped(), "应标记为已封顶");
-        assertMoney("40", segment.getAmount(), "段金额应被封顶");
-        assertMoney("44", segment.getRawAmount(), "原始金额应如实保留，便于追溯");
-        assertMoney("4", segment.getUnitPrice(), "日场段单价应为 4 元");
-        assertMoney("40", segment.getCapAmount(), "封顶值应记为日场原价封顶，账单才解释得了 44 为何变 40");
+        assertMoney("50", segment.getAmount(), "段金额应被封顶");
+        assertMoney("55", segment.getRawAmount(), "原始金额应如实保留，便于追溯");
+        assertMoney("5", segment.getUnitPrice(), "日场段单价应为 5 元");
+        assertMoney("50", segment.getCapAmount(), "封顶值应记为日场原价封顶，账单才解释得了 55 为何变 50");
     }
 
     @Test
-    @DisplayName("夜场超长：原始金额 38.5 元被封到 35 元，标记 capped")
+    @DisplayName("夜场超长：原始金额 49.5 元被封到 45 元，标记 capped")
     void nightSession_hitsCap() {
-        // 22:00 起 5 小时 20 分（跨到次日 03:20），可计费 320 − 5 = 315 分钟 → 11 档 × 3.5 = 38.5 元
+        // 22:00 起 5 小时 20 分（跨到次日 03:20），可计费 320 − 5 = 315 分钟 → 11 档 × 4.5 = 49.5 元
         BillingResult result = billingService.calculate(at(22, 0), at(3, 20).plusDays(1));
 
-        assertAmount("35", result);
+        assertAmount("45", result);
         assertEquals(1, result.getSegments().size());
         SegmentBill segment = result.getSegments().get(0);
         assertEquals(BillingPeriod.NIGHT, segment.getPeriod());
         assertTrue(segment.isCapped());
-        assertMoney("38.5", segment.getRawAmount(), "原始金额应如实保留");
-        assertMoney("3.5", segment.getUnitPrice(), "夜场段单价应为 3.5 元");
+        assertMoney("49.5", segment.getRawAmount(), "原始金额应如实保留");
+        assertMoney("4.5", segment.getUnitPrice(), "夜场段单价应为 4.5 元");
     }
 
     @Test
@@ -212,7 +212,7 @@ class BillingServiceTests {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("跨时段：21:30–23:30 切成日场 30 分 4 元 + 夜场 90 分 10.5 元 = 14.5 元")
+    @DisplayName("跨时段：21:30–23:30 切成日场 30 分 5 元 + 夜场 90 分 13.5 元 = 18.5 元")
     void crossPeriod_splitsIntoSegments() {
         BillingResult result = billingService.calculate(at(21, 30), at(23, 30));
 
@@ -223,15 +223,15 @@ class BillingServiceTests {
         assertEquals(BillingPeriod.DAY, day.getPeriod());
         assertEquals(30, day.getMinutes());
         assertEquals(1, day.getUnits());
-        assertMoney("4", day.getAmount(), "日场段 30 分钟收 1 档 4 元");
+        assertMoney("5", day.getAmount(), "日场段 30 分钟收 1 档 5 元");
 
         SegmentBill night = segments.get(1);
         assertEquals(BillingPeriod.NIGHT, night.getPeriod());
         assertEquals(90, night.getMinutes());
         assertEquals(3, night.getUnits());
-        assertMoney("10.5", night.getAmount(), "夜场段 90 分钟收 3 档 × 3.5 元");
+        assertMoney("13.5", night.getAmount(), "夜场段 90 分钟收 3 档 × 4.5 元");
 
-        assertAmount("14.5", result);
+        assertAmount("18.5", result);
     }
 
     @Test
@@ -239,15 +239,15 @@ class BillingServiceTests {
     void crossPeriod_shortSession_isFree() {
         // 21:55–22:05 共 10 分钟，切成 5 分 + 5 分，两段都恰好等于 5 分钟宽限。
         // 宽限每缩短一次，能落进这个免费档的跨时段订单就更短一分：
-        // 同样是 10 分钟，全在日场要收 4 元，跨时段反而免费。
+        // 同样是 10 分钟，全在日场要收 5 元，跨时段反而免费。
         // 这个窗口现在只有 10 分钟宽（两段各 ≤5 分钟），刻意套利的空间已被压得很小
         BillingResult result = billingService.calculate(at(21, 55), at(22, 5));
 
         assertEquals(2, result.getSegments().size());
         assertAmount("0", result);
 
-        // 对照组：同样 10 分钟全落在日场，进 1 档收 4 元
-        assertAmount("4", billingService.calculate(at(20, 0), at(20, 10)));
+        // 对照组：同样 10 分钟全落在日场，进 1 档收 5 元
+        assertAmount("5", billingService.calculate(at(20, 0), at(20, 10)));
     }
 
     @Test
@@ -260,7 +260,7 @@ class BillingServiceTests {
     }
 
     @Test
-    @DisplayName("跨零点：深夜到次日上午，夜场段封顶 35 元 + 日场段 4 元 = 39 元")
+    @DisplayName("跨零点：深夜到次日上午，夜场段封顶 45 元 + 日场段 5 元 = 50 元")
     void acrossMidnight_splitsCorrectly() {
         // 23:00 -> 次日 10:30：夜场 23:00–10:00，日场 10:00–10:30
         BillingResult result = billingService.calculate(at(23, 0), at(10, 30).plusDays(1));
@@ -272,17 +272,17 @@ class BillingServiceTests {
         assertEquals(BillingPeriod.DAY, segments.get(1).getPeriod());
         assertEquals(30, segments.get(1).getMinutes());
 
-        // 夜场段 660 分钟原始 22 档 = 77 元，封顶 35 元；日场段 30 分钟 = 1 档 4 元
-        assertAmount("39", result);
+        // 夜场段 660 分钟原始 22 档 × 4.5 = 99 元，封顶 45 元；日场段 30 分钟 = 1 档 5 元
+        assertAmount("50", result);
         assertTrue(segments.get(0).isCapped(), "夜场段应触顶");
     }
 
     @Test
-    @DisplayName("夜场在前的跨时段：09:00–11:00 切成夜场 60 分 7 元 + 日场 60 分 8 元 = 15 元")
+    @DisplayName("夜场在前的跨时段：09:00–11:00 切成夜场 60 分 9 元 + 日场 60 分 10 元 = 19 元")
     void nightThenDay_splitsCorrectly() {
         // 上午 9 点仍属夜场（夜场一直算到次日 10:00），10 点起才转日场。
         // 这个用例专门验证单价是「按时段取」而不是「按段的先后顺序取」——
-        // 若把第一段误当日场，会得出 8 + 7 = 15 的巧合结果，所以这里逐段断言单价
+        // 若把第一段误当日场，会得出 10 + 9 = 19 的巧合结果，所以这里逐段断言单价
         BillingResult result = billingService.calculate(at(9, 0), at(11, 0));
 
         List<SegmentBill> segments = result.getSegments();
@@ -292,15 +292,15 @@ class BillingServiceTests {
         assertEquals(BillingPeriod.NIGHT, night.getPeriod());
         assertEquals(60, night.getMinutes());
         assertEquals(2, night.getUnits());
-        assertMoney("3.5", night.getUnitPrice(), "前一段是夜场，单价应为 3.5 元");
+        assertMoney("4.5", night.getUnitPrice(), "前一段是夜场，单价应为 4.5 元");
 
         SegmentBill day = segments.get(1);
         assertEquals(BillingPeriod.DAY, day.getPeriod());
         assertEquals(60, day.getMinutes());
         assertEquals(2, day.getUnits());
-        assertMoney("4", day.getUnitPrice(), "后一段是日场，单价应为 4 元");
+        assertMoney("5", day.getUnitPrice(), "后一段是日场，单价应为 5 元");
 
-        assertAmount("15", result);
+        assertAmount("19", result);
     }
 
     // ------------------------------------------------------------------
@@ -312,7 +312,7 @@ class BillingServiceTests {
     void belowThreshold_noDiscount() {
         BillingResult result = billingService.calculate(at(10, 0), at(11, 0), BELOW_THRESHOLD);
 
-        assertAmount("8", result);
+        assertAmount("10", result);
         assertFalse(result.isDiscounted(), "未达门槛不应走优惠价");
         assertDiscount("0", result);
         assertMoney("199", result.getMonthSpentBefore(), "结算前累计额应原样留痕");
@@ -323,8 +323,8 @@ class BillingServiceTests {
     void exactlyAtThreshold_discounts() {
         BillingResult result = billingService.calculate(at(10, 0), at(11, 0), AT_THRESHOLD);
 
-        // 2 档 × 3.5 = 7 元，比原价 8 元省 1 元
-        assertAmount("7", result);
+        // 2 档 × 4.5 = 9 元，比原价 10 元省 1 元
+        assertAmount("9", result);
         assertTrue(result.isDiscounted());
         assertDiscount("1", result);
     }
@@ -339,19 +339,19 @@ class BillingServiceTests {
         BillingResult result = billingService.calculate(
                 at(10, 0), at(11, 0), new BigDecimal("200.00"));
 
-        assertAmount("7", result);
+        assertAmount("9", result);
         assertTrue(result.isDiscounted(), "200.00 与 200 必须视为同一门槛");
     }
 
     @Test
-    @DisplayName("超过门槛：整单按优惠价，段单价记为 3.5 元")
+    @DisplayName("超过门槛：整单按优惠价，段单价记为 4.5 元")
     void aboveThreshold_usesDiscountedUnitPrice() {
         BillingResult result = billingService.calculate(at(10, 0), at(11, 0), ABOVE_THRESHOLD);
 
-        assertAmount("7", result);
+        assertAmount("9", result);
         assertTrue(result.isDiscounted());
         SegmentBill segment = result.getSegments().get(0);
-        assertMoney("3.5", segment.getUnitPrice(), "优惠单的日场段单价应为 3.5 元");
+        assertMoney("4.5", segment.getUnitPrice(), "优惠单的日场段单价应为 4.5 元");
         assertEquals(2, segment.getUnits(), "档数不因优惠而改变");
     }
 
@@ -360,7 +360,7 @@ class BillingServiceTests {
     void nullMonthSpent_noDiscount() {
         BillingResult result = billingService.calculate(at(10, 0), at(11, 0), null);
 
-        assertAmount("8", result);
+        assertAmount("10", result);
         assertFalse(result.isDiscounted());
         assertDiscount("0", result);
         assertMoney("0", result.getMonthSpentBefore(), "null 应回填为 0，便于日志与展示");
@@ -371,54 +371,54 @@ class BillingServiceTests {
     void twoArgOverload_treatedAsNoDiscount() {
         BillingResult result = billingService.calculate(at(10, 0), at(11, 0));
 
-        assertAmount("8", result);
+        assertAmount("10", result);
         assertFalse(result.isDiscounted());
     }
 
     @Test
-    @DisplayName("优惠 + 跨时段：两段都按优惠价，各自套优惠封顶，合计 12.5 元")
+    @DisplayName("优惠 + 跨时段：两段都按优惠价，各自套优惠封顶，合计 16.5 元")
     void discount_appliesToAllSegments() {
         BillingResult result = billingService.calculate(at(21, 30), at(23, 30), AT_THRESHOLD);
 
         List<SegmentBill> segments = result.getSegments();
         assertEquals(2, segments.size());
 
-        // 日场 30 分 → 1 档 × 3.5 = 3.5；夜场 90 分 → 3 档 × 3 = 9
-        assertMoney("3.5", segments.get(0).getAmount(), "优惠日场段");
-        assertMoney("9", segments.get(1).getAmount(), "优惠夜场段");
-        assertAmount("12.5", result);
-        // 原价 4 + 10.5 = 14.5，优惠后 12.5，省 2 元
+        // 日场 30 分 → 1 档 × 4.5 = 4.5；夜场 90 分 → 3 档 × 4 = 12
+        assertMoney("4.5", segments.get(0).getAmount(), "优惠日场段");
+        assertMoney("12", segments.get(1).getAmount(), "优惠夜场段");
+        assertAmount("16.5", result);
+        // 原价 5 + 13.5 = 18.5，优惠后 16.5，省 2 元
         assertDiscount("2", result);
     }
 
     @Test
-    @DisplayName("优惠 + 长单触顶：日场 6 小时按优惠封顶收 35 元，省 5 元")
+    @DisplayName("优惠 + 长单触顶：日场 6 小时按优惠封顶收 45 元，省 5 元")
     void discount_hitsDiscountedDayCap() {
-        // 10:00–16:00 共 6 小时，可计费 360 − 5 = 355 分钟 → 12 档 × 3.5 = 42 元 → 封顶 35 元
+        // 10:00–16:00 共 6 小时，可计费 360 − 5 = 355 分钟 → 12 档 × 4.5 = 54 元 → 封顶 45 元
         BillingResult result = billingService.calculate(at(10, 0), at(16, 0), AT_THRESHOLD);
 
-        assertAmount("35", result);
+        assertAmount("45", result);
         SegmentBill segment = result.getSegments().get(0);
         assertTrue(segment.isCapped());
-        assertMoney("42", segment.getRawAmount(), "优惠单的原始金额按优惠单价算");
-        assertMoney("35", segment.getAmount(), "优惠后封顶为 35 元");
-        assertMoney("35", segment.getCapAmount(), "封顶值应随优惠下降到 35 元");
-        // 原价封顶 40，优惠后 35，省 5 元
+        assertMoney("54", segment.getRawAmount(), "优惠单的原始金额按优惠单价算");
+        assertMoney("45", segment.getAmount(), "优惠后封顶为 45 元");
+        assertMoney("45", segment.getCapAmount(), "封顶值应随优惠下降到 45 元");
+        // 原价封顶 50，优惠后 45，省 5 元
         assertDiscount("5", result);
     }
 
     @Test
-    @DisplayName("优惠 + 夜场长单触顶：夜场 5 小时 20 分按优惠封顶收 30 元，省 5 元")
+    @DisplayName("优惠 + 夜场长单触顶：夜场 5 小时 20 分按优惠封顶收 40 元，省 5 元")
     void discount_hitsDiscountedNightCap() {
         BillingResult result = billingService.calculate(
                 at(22, 0), at(3, 20).plusDays(1), AT_THRESHOLD);
 
-        assertAmount("30", result);
+        assertAmount("40", result);
         SegmentBill segment = result.getSegments().get(0);
         assertTrue(segment.isCapped());
-        assertMoney("3", segment.getUnitPrice(), "优惠单的夜场段单价应为 3 元");
-        assertMoney("33", segment.getRawAmount(), "11 档 × 3 元 = 33 元");
-        // 原价封顶 35，优惠后 30，省 5 元
+        assertMoney("4", segment.getUnitPrice(), "优惠单的夜场段单价应为 4 元");
+        assertMoney("44", segment.getRawAmount(), "11 档 × 4 元 = 44 元");
+        // 原价封顶 45，优惠后 40，省 5 元
         assertDiscount("5", result);
     }
 
@@ -441,9 +441,9 @@ class BillingServiceTests {
 
         assertEquals(original.getSegments().get(0).getUnits(),
                 discounted.getSegments().get(0).getUnits());
-        // 原价 4 档 × 4 = 16，优惠 4 档 × 3.5 = 14
-        assertAmount("16", original);
-        assertAmount("14", discounted);
+        // 原价 4 档 × 5 = 20，优惠 4 档 × 4.5 = 18
+        assertAmount("20", original);
+        assertAmount("18", discounted);
         assertDiscount("2", discounted);
     }
 

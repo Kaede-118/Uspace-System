@@ -91,7 +91,7 @@ class MonthlyCardServiceTests {
         assertNotNull(vo.getOrderNo(), "要返回单号 —— 付款时它充当商户订单号");
         assertTrue(vo.getOrderNo().startsWith(MonthlyCardNo.PREFIX),
                 "单号前缀必须对，它是支付回调路由的依据");
-        assertEquals("600", vo.getPrice().toPlainString(), "价格取配置里的全天卡单价");
+        assertEquals("450", vo.getPrice().toPlainString(), "价格取配置里的全天卡单价");
         assertEquals(CardOrderStatus.PENDING_PAYMENT.name(), vo.getStatus());
         assertNotNull(vo.getExpireAt(), "要给出失效时刻，前端据此显示倒计时");
 
@@ -312,8 +312,8 @@ class MonthlyCardServiceTests {
         assertTrue(result.isSuccess());
         assertEquals(TODAY, result.getData().getStartDate());
         assertEquals(TODAY.plusDays(29), result.getData().getEndDate(), "含首尾 30 天");
-        assertEquals(new BigDecimal("600"), result.getData().getPrice());
-        assertEquals(new BigDecimal("600"), user.getCardPaid(),
+        assertEquals(new BigDecimal("450"), result.getData().getPrice());
+        assertEquals(new BigDecimal("450"), user.getCardPaid(),
                 "面对面收的钱要记进累计消费（与线上支付走同一个累加点）");
     }
 

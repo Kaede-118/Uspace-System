@@ -43,24 +43,24 @@ class BillingServiceDiscountDisabledTests {
                 LocalDateTime.of(2026, 9, 16, 11, 0),
                 new BigDecimal("9999"));
 
-        // 2 档 × 4 元 = 8 元（原价），而非优惠价 7 元
-        assertEquals(0, new BigDecimal("8").compareTo(result.getTotalAmount()),
+        // 2 档 × 5 元 = 10 元（原价），而非优惠价 9 元
+        assertEquals(0, new BigDecimal("10").compareTo(result.getTotalAmount()),
                 "关闭优惠后应一律按原价，实际 " + result.getTotalAmount() + " 元");
         assertFalse(result.isDiscounted());
         assertEquals(0, BigDecimal.ZERO.compareTo(result.getDiscountAmount()));
     }
 
     @Test
-    @DisplayName("优惠开关关闭：夜场同样按原价，段单价记 3.5 元")
+    @DisplayName("优惠开关关闭：夜场同样按原价，段单价记 4.5 元")
     void disabled_nightChargesOriginalPrice() {
         BillingResult result = billingService.calculate(
                 LocalDateTime.of(2026, 9, 16, 22, 0),
                 LocalDateTime.of(2026, 9, 16, 23, 0),
                 new BigDecimal("9999"));
 
-        assertEquals(0, new BigDecimal("7").compareTo(result.getTotalAmount()),
-                "夜场 2 档 × 3.5 元 = 7 元");
-        assertEquals(0, new BigDecimal("3.5").compareTo(
+        assertEquals(0, new BigDecimal("9").compareTo(result.getTotalAmount()),
+                "夜场 2 档 × 4.5 元 = 9 元");
+        assertEquals(0, new BigDecimal("4.5").compareTo(
                 result.getSegments().get(0).getUnitPrice()));
     }
 }

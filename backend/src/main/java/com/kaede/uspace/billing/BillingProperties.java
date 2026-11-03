@@ -17,8 +17,19 @@ import java.time.LocalTime;
  * 浮点运算在金额累加时会产生精度误差。
  *
  * <p>2026-09-26 定价改版后共有四组单价与封顶：日夜场各自区分原价与月度优惠价
- * （优惠参数见 {@link MonthlyDiscount}）。四组封顶一律等于「10 档 × 对应单价」，
+ * （优惠参数见 {@link MonthlyDiscount}）。四组封顶都等于「10 档 × 对应单价」，
  * 也就是「5 小时价格」—— 这条关系是计费规则的骨架，调价时四个数字要一起改。
+ *
+ * <p><b>2026-10-17 调价</b>：门市价与开业优惠价两套，都在
+ * {@code docs/用户版计费与优惠说明.md} 与 {@code docs/开发约定与设计说明.md} 里：
+ * <pre>
+ *            门市原价                开业优惠价（本类默认值 = 这一套）
+ *   日场     12 元/时 封顶 55         10 元/时 封顶 50
+ *   夜场     10 元/时 封顶 50          9 元/时 封顶 45
+ * </pre>
+ * 代码里只装<b>当前执行的那一套</b>（开业优惠），门市价是资料，结束优惠时改配置即可。
+ * ⚠️ 门市日场的封顶 55 刻意不是 12 × 5 = 60，是店主定的数 ——
+ * 这处例外只影响资料与「换价时填什么」，不影响本类算法。
  */
 @Data
 @Component
@@ -28,16 +39,23 @@ public class BillingProperties {
     /** 计费单位的时长（分钟）。默认 30 分钟一档 */
     private int unitMinutes = 30;
 
-    /** 日场单价（元 / 计费单位）。默认 4 元 / 30 分钟，即 8 元/小时 */
-    private BigDecimal dayUnitPrice = new BigDecimal("4");
+    /**
+     * 日场单价（元 / 计费单位）。默认 5 元 / 30 分钟，即 10 元/小时。
+     *
+     * <p>这是<b>开业优惠期间</b>的价；门市原价是 12 元/小时（6 元 / 30 分钟），
+     * 结束优惠时把本项与 {@link #dayCap} 一起换掉。
+     */
+    private BigDecimal dayUnitPrice = new BigDecimal("5");
 
     /**
-     * 夜场单价（元 / 计费单位）。默认 3.5 元 / 30 分钟，即 7 元/小时。
+     * 夜场单价（元 / 计费单位）。默认 4.5 元 / 30 分钟，即 9 元/小时。
      *
-     * <p>夜场比日场便宜 1 元/小时 —— 夜间（22:00–次日 10:00）是共享娱乐空间
-     * 闲置率最高的时段，用价格换利用率。
+     * <p>夜场比日场便宜 2 元/小时（门市价 10 比 12 也是差 2 元）——
+     * 夜间（22:00–次日 10:00）是共享娱乐空间闲置率最高的时段，用价格换利用率。
+     *
+     * <p>这是<b>开业优惠期间</b>的价；门市原价是 10 元/小时（5 元 / 30 分钟）。
      */
-    private BigDecimal nightUnitPrice = new BigDecimal("3.5");
+    private BigDecimal nightUnitPrice = new BigDecimal("4.5");
 
     /**
      * 结账误差宽限（分钟）。默认 5 分钟。
@@ -64,11 +82,11 @@ public class BillingProperties {
      */
     private int graceMinutes = 5;
 
-    /** 日场封顶金额（元）。默认 40 元 = 10 档 × 日场单价，即 5 小时价格 */
-    private BigDecimal dayCap = new BigDecimal("40");
+    /** 日场封顶金额（元）。默认 50 元 = 10 档 × 日场单价，即 5 小时价格（门市价那一套是 55，见类注释） */
+    private BigDecimal dayCap = new BigDecimal("50");
 
-    /** 夜场封顶金额（元）。默认 35 元 = 10 档 × 夜场单价，即 5 小时价格 */
-    private BigDecimal nightCap = new BigDecimal("35");
+    /** 夜场封顶金额（元）。默认 45 元 = 10 档 × 夜场单价，即 5 小时价格（门市价那一套是 50） */
+    private BigDecimal nightCap = new BigDecimal("45");
 
     /** 日场开始时间。该时刻起算日场 */
     private LocalTime dayStart = LocalTime.of(10, 0);
@@ -97,8 +115,13 @@ public class BillingProperties {
      * 用户看得懂，代码也不必维护逐档推进的游标。已经结算过的订单不因后来达标而退款。
      *
      * <p>优惠价同样遵循「封顶 = 10 档 × 单价 = 5 小时价格」的关系，
-     * 因此优惠后封顶随之下降（日 40 → 35，夜 35 → 30）——
+     * 因此优惠后封顶随之下降（开业期间 日 50 → 45，夜 45 → 40）——
      * 优惠是整列降价，不是只降单价、封顶照旧。
+     *
+     * <p><b>2026-10-17 调价后「每小时减 1 元」仍是规则，减的是当时的单价</b>：
+     * 开业期间 10 → 9、9 → 8（本类默认值）；结束优惠后 12 → 11、10 → 9
+     *（那时本组要换成 day 5.5/55、night 4.5/45）。两套都要一起换，
+     * 否则会出现「原价降了、优惠价没降」这种静默的 1 元差。
      */
     @Data
     public static class MonthlyDiscount {
@@ -109,16 +132,16 @@ public class BillingProperties {
         /** 触发优惠的当月累计实付额门槛（元）。默认 200 元 */
         private BigDecimal threshold = new BigDecimal("200");
 
-        /** 优惠后的日场单价（元 / 计费单位）。默认 3.5 元 / 30 分钟 */
-        private BigDecimal dayUnitPrice = new BigDecimal("3.5");
+        /** 优惠后的日场单价（元 / 计费单位）。默认 4.5 元 / 30 分钟 = 9 元/小时（开业期间：原价 10 减 1） */
+        private BigDecimal dayUnitPrice = new BigDecimal("4.5");
 
-        /** 优惠后的夜场单价（元 / 计费单位）。默认 3 元 / 30 分钟 */
-        private BigDecimal nightUnitPrice = new BigDecimal("3");
+        /** 优惠后的夜场单价（元 / 计费单位）。默认 4 元 / 30 分钟 = 8 元/小时（开业期间：原价 9 减 1） */
+        private BigDecimal nightUnitPrice = new BigDecimal("4");
 
         /** 优惠后的日场封顶（元）= 10 档 × 优惠日场单价 */
-        private BigDecimal dayCap = new BigDecimal("35");
+        private BigDecimal dayCap = new BigDecimal("45");
 
         /** 优惠后的夜场封顶（元）= 10 档 × 优惠夜场单价 */
-        private BigDecimal nightCap = new BigDecimal("30");
+        private BigDecimal nightCap = new BigDecimal("40");
     }
 }

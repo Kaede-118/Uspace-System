@@ -24,10 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p><b>规则一句话</b>：同一个半场（日场 10:00-22:00、夜场 22:00-次日 10:00）
  * 里，实收合计不超过一个封顶价 —— 被包场剪开的几截、被活动或月卡切开的几段、
  * 乃至<b>同一半场内的其它订单</b>（用户玩一段结算再开新单），都共享同一份额度。
- * 跨半场不累计：日场收满 40 之后，接下来夜场重新从 0 起算。
+ * 跨半场不累计：日场收满 50 之后，接下来夜场重新从 0 起算。
  *
  * <p><b>它修掉的具体毛病</b>：在此之前每段各自套封顶 ——
- * 10:00-22:00 无活动时整段封顶 40 元，被活动切出一段后反而能收 56 元，
+ * 10:00-22:00 无活动时整段封顶 50 元，被活动切出一段后反而能收 70 元，
  * 「办了活动，顾客付得更多」。本类的第一条用例就是钉这个场景。
  *
  * <p><b>三处写错不会报错、只会静默算错的地方</b>，各有用例守着：
@@ -41,7 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ol>
  *
  * <p>纯单测，不启动 Spring；配置取 {@link BillingProperties} 的默认值
- * （与线上一致：日 4 / 夜 3.5 元每半小时、宽限 5 分钟、封顶 40/35）。
+ * （与线上一致，2026-10-17 调价后的开业优惠价：日 5 / 夜 4.5 元每半小时、
+ * 宽限 5 分钟、封顶 50/45）。
  */
 class BillingServiceHalfPeriodTests {
 
@@ -109,23 +110,23 @@ class BillingServiceHalfPeriodTests {
     // ==================================================================
 
     @Test
-    @DisplayName("⚠️ 核心：日场整段封顶 40，被活动切出一段后仍收 40（修掉「有活动反而更贵」）")
+    @DisplayName("⚠️ 核心：日场整段封顶 50，被活动切出一段后仍收 50（修掉「有活动反而更贵」）")
     void activitySplit_stillCappedAtHalfPeriodCap() {
-        // 无活动：12 小时整段 → 24 档 × 4 = 96 → 封顶 40
+        // 无活动：12 小时整段 → 24 档 × 5 = 120 → 封顶 50
         BillingResult plain = billingService.calculate(at(10, 0), at(22, 0), BELOW_THRESHOLD);
-        assertMoney("40", plain.getTotalAmount(), "无活动时整段封顶");
+        assertMoney("50", plain.getTotalAmount(), "无活动时整段封顶");
 
-        // 有活动（12:00-13:00）：切出三段，段级各自封顶的话会收 16 + 40 = 56
+        // 有活动（12:00-13:00）：切出三段，段级各自封顶的话会收 20 + 50 = 70
         BillingResult split = billingService.calculate(at(10, 0), at(22, 0), BELOW_THRESHOLD,
                 null, List.of(range(12, 0, 13, 0)));
-        assertMoney("40", split.getTotalAmount(),
+        assertMoney("50", split.getTotalAmount(),
                 "⚠️ 同半场累计封顶：有活动不该比没活动更贵 —— 这是本次规则变化的起因");
 
-        // 第三段（13:00-22:00）被半场额度压低：原始 72 → 段级封顶 40 → 剩余额度 24
+        // 第三段（13:00-22:00）被半场额度压低：原始 90 → 段级封顶 50 → 剩余额度 30
         SegmentBill third = split.getSegments().get(2);
-        assertMoney("16", third.getHalfPeriodUsedBefore(), "前一段已收 16 元占掉额度");
-        assertMoney("16", third.getHalfPeriodCutAmount(),
-                "该段段级封顶后本可收 40，因半场只剩 24 元额度，再少收 16 元");
+        assertMoney("20", third.getHalfPeriodUsedBefore(), "前一段已收 20 元占掉额度");
+        assertMoney("20", third.getHalfPeriodCutAmount(),
+                "该段段级封顶后本可收 50，因半场只剩 30 元额度，再少收 20 元");
     }
 
     @Test
@@ -135,13 +136,13 @@ class BillingServiceHalfPeriodTests {
         BillingResult bill = billingService.calculate(at(10, 0), at(22, 0), BELOW_THRESHOLD,
                 null, List.of(range(12, 0, 14, 0)));
 
-        // 段1 10-12：4 档 × 4 = 16（占额度）
-        // 段2 12-14：活动免 0（不占额度——若占了，段3 只剩 8 元额度）
-        // 段3 14-22：16 档 × 4 = 64 → 剩余额度 40-16 = 24 → 24
-        assertMoney("40", bill.getTotalAmount(), "合计仍到封顶价");
+        // 段1 10-12：4 档 × 5 = 20（占额度）
+        // 段2 12-14：活动免 0（不占额度——若占了，段3 只剩 10 元额度）
+        // 段3 14-22：16 档 × 5 = 80 → 剩余额度 50-20 = 30 → 30
+        assertMoney("50", bill.getTotalAmount(), "合计仍到封顶价");
         SegmentBill third = bill.getSegments().get(2);
-        assertMoney("24", third.getAmount(),
-                "⚠️ 免费段若消耗额度，这里会只剩 8 —— 等于他自己的免费时长压住了自己的额度");
+        assertMoney("30", third.getAmount(),
+                "⚠️ 免费段若消耗额度，这里会只剩 10 —— 等于他自己的免费时长压住了自己的额度");
         assertMoney("0", bill.getSegments().get(1).getAmount(), "活动段实收为 0");
     }
 
@@ -150,19 +151,19 @@ class BillingServiceHalfPeriodTests {
     // ==================================================================
 
     @Test
-    @DisplayName("跨半场不累计：日场收满 40 后，夜场重新从 0 起算")
+    @DisplayName("跨半场不累计：日场收满 50 后，夜场重新从 0 起算")
     void halfPeriodsDoNotShareQuotaAcrossPeriods() {
         HalfPeriodUsage usage = new HalfPeriodUsage();
 
-        // 日场 10:00-22:00 整段：收满 40
+        // 日场 10:00-22:00 整段：收满 50
         BillingResult day = billingService.calculate(at(10, 0), at(22, 0), BELOW_THRESHOLD,
                 null, null, usage);
-        assertMoney("40", day.getTotalAmount(), "日场收满封顶");
+        assertMoney("50", day.getTotalAmount(), "日场收满封顶");
 
-        // 接着夜场 22:00-次日 00:00：2 小时 → 4 档 × 3.5 = 14，不该被日场的额度压住
+        // 接着夜场 22:00-次日 00:00：2 小时 → 4 档 × 4.5 = 18，不该被日场的额度压住
         BillingResult night = billingService.calculate(at(22, 0), nextDayAt(0, 0),
                 BELOW_THRESHOLD, null, null, usage);
-        assertMoney("14", night.getTotalAmount(),
+        assertMoney("18", night.getTotalAmount(),
                 "夜场是另一个半场，额度重新起算 —— 跨半场一起累计的话这里会收 0");
     }
 
@@ -175,20 +176,20 @@ class BillingServiceHalfPeriodTests {
     void splitRanges_shareQuota() {
         HalfPeriodUsage usage = new HalfPeriodUsage();
 
-        // 区间1 10:00-14:00（4 小时 → 8 档 × 4 = 32）
+        // 区间1 10:00-14:00（4 小时 → 8 档 × 5 = 40）
         BillingResult first = billingService.calculate(at(10, 0), at(14, 0), BELOW_THRESHOLD,
                 null, null, usage);
-        assertMoney("32", first.getTotalAmount(), "第一截按其原价收");
+        assertMoney("40", first.getTotalAmount(), "第一截按其原价收");
 
-        // 区间2 18:00-22:00（4 小时，原始 32，但只剩 8 元额度）
+        // 区间2 18:00-22:00（4 小时，原始 40，但只剩 10 元额度）
         BillingResult second = billingService.calculate(at(18, 0), at(22, 0), BELOW_THRESHOLD,
                 null, null, usage);
-        assertMoney("8", second.getTotalAmount(),
-                "⚠️ 逐截各自新建累计器的话，这里会收 32 —— 同一个半场的封顶被收了两遍");
+        assertMoney("10", second.getTotalAmount(),
+                "⚠️ 逐截各自新建累计器的话，这里会收 40 —— 同一个半场的封顶被收了两遍");
 
         SegmentBill segment = second.getSegments().get(0);
-        assertMoney("32", segment.getHalfPeriodUsedBefore(), "账单要能解释这 8 元是怎么来的");
-        assertMoney("24", segment.getHalfPeriodCutAmount(), "因半场累计少收 24 元");
+        assertMoney("40", segment.getHalfPeriodUsedBefore(), "账单要能解释这 10 元是怎么来的");
+        assertMoney("30", segment.getHalfPeriodCutAmount(), "因半场累计少收 30 元");
     }
 
     @Test
@@ -196,13 +197,13 @@ class BillingServiceHalfPeriodTests {
     void usageKeepsHalfPeriodsSeparate() {
         HalfPeriodUsage usage = new HalfPeriodUsage();
 
-        // 日场收 32（用掉日场额度）
+        // 日场收 40（用掉日场额度）
         billingService.calculate(at(10, 0), at(14, 0), BELOW_THRESHOLD, null, null, usage);
 
-        // 夜场 22:00-次日 02:00（4 小时 → 8 档 × 3.5 = 28），不受日场额度影响
+        // 夜场 22:00-次日 02:00（4 小时 → 8 档 × 4.5 = 36），不受日场额度影响
         BillingResult night = billingService.calculate(at(22, 0), nextDayAt(2, 0),
                 BELOW_THRESHOLD, null, null, usage);
-        assertMoney("28", night.getTotalAmount(), "夜场额度是独立的一份");
+        assertMoney("36", night.getTotalAmount(), "夜场额度是独立的一份");
     }
 
     // ==================================================================
@@ -216,12 +217,12 @@ class BillingServiceHalfPeriodTests {
         BillingResult bill = billingService.calculate(at(10, 0), at(22, 0), ABOVE_THRESHOLD,
                 null, List.of(range(12, 0, 13, 0)));
 
-        // 优惠价线：段1 4 档 × 3.5 = 14；段3 18 档 × 3.5 = 63 → 剩余额度 35-14 = 21
-        //   合计 = 14 + 21 = 35（优惠封顶）
-        assertMoney("35", bill.getTotalAmount(), "优惠封顶按半场累计");
+        // 优惠价线：段1 4 档 × 4.5 = 18；段3 18 档 × 4.5 = 81 → 剩余额度 45-18 = 27
+        //   合计 = 18 + 27 = 45（优惠封顶）
+        assertMoney("45", bill.getTotalAmount(), "优惠封顶按半场累计");
 
-        // 原价线（独立累计）：段1 16；段3 72 → 剩余 40-16 = 24 → 24
-        //   合计 40；discountAmount = 40 - 35 = 5
+        // 原价线（独立累计）：段1 20；段3 90 → 剩余 50-20 = 30 → 30
+        //   合计 50；discountAmount = 50 - 45 = 5
         assertMoney("5", bill.getDiscountAmount(),
                 "⚠️ 两条线共用额度的话，原价重算会读到优惠价用掉的额度，"
                         + "封顶差额被记成「月度优惠」，本单优惠金额会虚高");
@@ -238,10 +239,10 @@ class BillingServiceHalfPeriodTests {
     @Test
     @DisplayName("预告：剩余额度不足时，「下一档」只报到剩余额度为止")
     void nextChange_capsAtRemainingQuota() {
-        // 本段之前同半场已收 36 → 只剩 4 元额度
-        BigDecimal usedBefore = new BigDecimal("36");
+        // 本段之前同半场已收 46 → 只剩 4 元额度（日场封顶 50）
+        BigDecimal usedBefore = new BigDecimal("46");
 
-        // 第 2 分钟（宽限内，本段还是 0 元）：下一档收 1 档 × 4 = 4，恰好等于剩余额度
+        // 第 2 分钟（宽限内，本段还是 0 元）：下一档收 1 档 × 5 = 5，被剩余额度压到 4
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2),
                 null, null, null, usedBefore);
         assertNotNull(change);
@@ -259,11 +260,11 @@ class BillingServiceHalfPeriodTests {
     @DisplayName("预告：半场额度已被历史收满时，立刻报「已到封顶价」")
     void nextChange_fullyUsedQuota() {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2),
-                null, null, null, new BigDecimal("40"));
+                null, null, null, new BigDecimal("50"));
 
         assertNotNull(change);
         assertEquals("当前已到封顶价", change.getText(),
-                "额度为 0 时，连宽限期过后那 4 元都收不到 —— 预告不能还报「进入下一档」");
+                "额度为 0 时，连宽限期过后那 5 元都收不到 —— 预告不能还报「进入下一档」");
     }
 
     @Test
@@ -272,7 +273,7 @@ class BillingServiceHalfPeriodTests {
         NextChange change = billingService.nextChange(at(10, 0), at(10, 2), null, null, null);
 
         assertNotNull(change);
-        assertEquals("进入下一档 ¥4.00", change.getText());
+        assertEquals("进入下一档 ¥5.00", change.getText());
     }
 
     // ==================================================================
@@ -283,17 +284,17 @@ class BillingServiceHalfPeriodTests {
     @DisplayName("封顶判定：同半场两段合计到封顶即为已封顶（旧口径会漏报）")
     void allHalfPeriodsCapped_trueWhenSumReachesCap() {
         assertTrue(billingService.allHalfPeriodsCapped(List.of(
-                        segment(BillingPeriod.DAY, at(10, 0), "32", "40"),
-                        segment(BillingPeriod.DAY, at(18, 0), "8", "40"))),
-                "⚠️ 单看某一段（32 < 40）会漏报 —— 这个半场其实已经收满");
+                        segment(BillingPeriod.DAY, at(10, 0), "40", "50"),
+                        segment(BillingPeriod.DAY, at(18, 0), "10", "50"))),
+                "⚠️ 单看某一段（40 < 50）会漏报 —— 这个半场其实已经收满");
     }
 
     @Test
     @DisplayName("封顶判定：跨半场时每个半场都要到顶")
     void allHalfPeriodsCapped_requiresEveryHalfPeriod() {
         assertFalse(billingService.allHalfPeriodsCapped(List.of(
-                        segment(BillingPeriod.DAY, at(10, 0), "40", "40"),
-                        segment(BillingPeriod.NIGHT, at(22, 0), "21", "35"))),
+                        segment(BillingPeriod.DAY, at(10, 0), "50", "50"),
+                        segment(BillingPeriod.NIGHT, at(22, 0), "18", "45"))),
                 "夜场还没到顶，整张账单就还没到顶");
     }
 
@@ -308,7 +309,7 @@ class BillingServiceHalfPeriodTests {
     @DisplayName("封顶判定：实收恰好等于封顶算已封顶（与「超顶」不是一回事）")
     void allHalfPeriodsCapped_trueAtExactCap() {
         assertTrue(billingService.allHalfPeriodsCapped(List.of(
-                        segment(BillingPeriod.DAY, at(10, 0), "40", "40"))),
+                        segment(BillingPeriod.DAY, at(10, 0), "50", "50"))),
                 "第 10 档金额恰好等于封顶、段上的 capped 是 false，但那之后不会再涨");
     }
 
@@ -321,19 +322,19 @@ class BillingServiceHalfPeriodTests {
     void seedUsage_groupsByHalfPeriod() {
         HalfPeriodUsage usage = new HalfPeriodUsage();
         billingService.seedUsage(usage, List.of(
-                segment(BillingPeriod.DAY, at(10, 0), "32", "40"),
-                segment(BillingPeriod.NIGHT, at(22, 30), "10.5", "35"),
+                segment(BillingPeriod.DAY, at(10, 0), "40", "50"),
+                segment(BillingPeriod.NIGHT, at(22, 30), "13.5", "45"),
                 // 次日凌晨 1 点 —— 仍属于 10/8 那一场夜场
-                segment(BillingPeriod.NIGHT, nextDayAt(1, 0), "7", "35"),
+                segment(BillingPeriod.NIGHT, nextDayAt(1, 0), "9", "45"),
                 // 金额为 0 的段（被免费活动免掉的）不占额度
-                segment(BillingPeriod.DAY, at(15, 0), "0", "40")));
+                segment(BillingPeriod.DAY, at(15, 0), "0", "50")));
 
-        assertMoney("32", usage.usedIn(at(10, 0), true), "日场半场的已收");
-        assertMoney("17.5", usage.usedIn(at(22, 0), true),
+        assertMoney("40", usage.usedIn(at(10, 0), true), "日场半场的已收");
+        assertMoney("22.5", usage.usedIn(at(22, 0), true),
                 "⚠️ 深夜与凌晨是同一场夜场，用日期做键会拆成两份额度、封顶被收两遍");
         assertMoney("0", usage.usedIn(at(10, 0).plusDays(1), true),
                 "次日日场是新的半场，还没有已收");
-        assertMoney("32", usage.usedIn(at(10, 0), false), "原价线与实收线同时预置");
+        assertMoney("40", usage.usedIn(at(10, 0), false), "原价线与实收线同时预置");
     }
 
     @Test

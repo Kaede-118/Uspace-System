@@ -18,7 +18,7 @@
  * 前者只对 {@code IN_USE} 生效、显示计时与金额；后者只说「你欠着费」，
  * 不显示计时（待支付不是进行中）。
  */
-import { ref, computed, onDeactivated, onUnmounted } from 'vue'
+import { ref, computed, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getStoreStatus, getNotices, getBookingSchedule, getFreePeriods } from '@/api/store'
 import { getCurrentOrder, createOrder, listMyOrders, getPasscode } from '@/api/order'
@@ -96,7 +96,16 @@ const {
   countdownSeconds,
   start: startPreview,
   stop: stopPreview
-} = usePreviewPolling({ interval: 30000 })
+} = usePreviewPolling({
+  interval: 30000,
+  /*
+   * 轮询拿到 409 = 这一单已经不是进行中了（被结账 / 被清场 / 在另一个标签页结了）。
+   * 首页必须据此重新核对订单状态，否则那张「正在计费」的卡片会一直挂着，
+   * 按钮也一直停在「查看密码」—— 用户点下去只会得到一句
+   * 「只有进行中的订单才能查看开门密码」。
+   */
+  onClosed: onOrderClosed
+})
 
 /* ---------------- 派生展示值 ---------------- */
 
@@ -131,30 +140,43 @@ const nextChangeText = computed(() => preview.value?.nextChangeText || '')
 /* ---------------- 数据加载 ---------------- */
 
 /**
- * 并发拉取首页需要的六路数据。
+ * 「订单状态」三路加载的序号。
  *
- * <p>用 {@code allSettled} 而不是 {@code all}：公告接口挂了不该让整个首页白屏，
- * 门店状态、进行中订单这些更要紧的东西仍然要显示出来。
- *
- * <p>⚠️ 公告、包场时间表、免费活动、门店状态四个接口<b>匿名可访问</b>；
- * 进行中订单与未付款查询需要登录 —— 但本页本来就在登录守卫之内。
+ * <p>⚠️ 「回到页面就核对一次」与「全量数据保鲜过期」两条路径会同时发起请求
+ *（见文件末尾的 onActivated）。两个请求的返回顺序不保证 —— 后发的先回、
+ * 先发的后回，就会把新结果盖成旧的。这里与 usePreviewPolling 的
+ * {@code previewAt} 单调性检查是同一个道理：只认最新发起的那一次。
  */
-async function loadAll() {
-  const [statusRes, noticesRes, scheduleRes, freeRes, currentRes, unpaidRes, rejectedRes] =
-    await Promise.allSettled([
-      getStoreStatus(),
-      getNotices({ page: 1, size: HOME_NOTICE_LIMIT }),
-      getBookingSchedule(5),
-      getFreePeriods(3),
-      getCurrentOrder(),
-      listMyOrders({ status: 'PENDING_PAYMENT', size: 1 }),
-      listRejectedProofs()
-    ])
+let orderStateSeq = 0
 
-  if (statusRes.status === 'fulfilled') storeStatus.value = statusRes.value.data
-  if (noticesRes.status === 'fulfilled') notices.value = noticesRes.value.data?.records || []
-  if (scheduleRes.status === 'fulfilled') schedule.value = scheduleRes.value.data || []
-  if (freeRes.status === 'fulfilled') freePeriods.value = freeRes.value.data || []
+/**
+ * 拉取「订单状态」相关的三路数据，并据此启停预览轮询。
+ *
+ * <p><b>为什么单独拆出来、而且每次回到首页都要跑一遍：</b>
+ * 「开门计时 / 查看密码」两副面孔、未付款提醒、被驳回的付款凭证，
+ * 全由这三个接口的结果决定。而结账与支付【发生在别的页面】——
+ * 用户点「离店结账」、停止计时、支付完再回到首页时，
+ * 若这三路还跟着全量数据一起等 30 秒保鲜期，按钮就会停在「查看密码」，
+ * 点下去报「只有进行中的订单才能查看开门密码」，而且不手动刷新永远不会自己好
+ *（首页没有第二处会再拉 current）。2026-10-17 修的就是这个。
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.silent] 是否跳过全局加载遮罩。默认 false ——
+ *        首次进入时页面是空的，要让用户看见「在加载」
+ * @param {boolean} [options.restartPreview] 是否按结果重启预览轮询。默认 true；
+ *        {@link onOrderClosed} 那一路传 false，理由见它的注释
+ */
+async function loadOrderState({ silent = false, restartPreview = true } = {}) {
+  const seq = ++orderStateSeq
+  const [currentRes, unpaidRes, rejectedRes] = await Promise.allSettled([
+    getCurrentOrder({ silent }),
+    listMyOrders({ status: 'PENDING_PAYMENT', size: 1 }, { silent }),
+    listRejectedProofs({ silent })
+  ])
+
+  // 已有更新的一次在跑（或已跑完），本次结果直接丢弃 —— 见 orderStateSeq 的说明
+  if (seq !== orderStateSeq) return
+
   if (currentRes.status === 'fulfilled') currentOrder.value = currentRes.value.data || null
   if (unpaidRes.status === 'fulfilled') {
     unpaidCount.value = unpaidRes.value.data?.total || 0
@@ -162,12 +184,59 @@ async function loadAll() {
   }
   if (rejectedRes.status === 'fulfilled') rejectedProofs.value = rejectedRes.value.data || []
 
+  if (!restartPreview) {
+    stopPreview()
+    return
+  }
+
   // 只有真有进行中的订单时才启动预览轮询 —— 无单时不轮询，别白白打接口
   if (currentOrder.value?.id) {
-    await startPreview(currentOrder.value.id)
+    await startPreview(currentOrder.value.id, { silent })
   } else {
     stopPreview()
   }
+}
+
+/**
+ * 预览轮询发现「这一单已经不是进行中」时的处置。
+ *
+ * <p>两种情形都会走到这里：订单被管理员 / 群里 `fw结账` 结束，
+ * 或者用户在另一个标签页把它结了 —— 而首页这一页开着没动。
+ * 此时那张「正在计费」的卡片必须消失、按钮必须变回「开门计时」。
+ *
+ * <p>⚠️ 刻意<b>不在回调里重启轮询</b>（{@code restartPreview: false}）：
+ * 万一后端一时给出「current 还说进行中、preview 却已 409」的不一致，
+ * 重启就会变成 409 → 刷新 → 再 409 的死循环。
+ * 少刷一次金额，比让页面打接口打到停不下来强。
+ */
+function onOrderClosed() {
+  loadOrderState({ silent: true, restartPreview: false })
+}
+
+/**
+ * 并发拉取首页的只读数据（门店状态、公告、包场时间表、免费活动）。
+ *
+ * <p>用 {@code allSettled} 而不是 {@code all}：公告接口挂了不该让整个首页白屏，
+ * 门店状态这些更要紧的东西仍然要显示出来。
+ *
+ * <p>⚠️ 这四个接口<b>匿名可访问</b>；订单状态那三路需要登录 ——
+ * 但本页本来就在登录守卫之内。
+ */
+async function loadAll() {
+  const [statusRes, noticesRes, scheduleRes, freeRes] = await Promise.allSettled([
+    getStoreStatus(),
+    getNotices({ page: 1, size: HOME_NOTICE_LIMIT }),
+    getBookingSchedule(5),
+    getFreePeriods(3)
+  ])
+
+  if (statusRes.status === 'fulfilled') storeStatus.value = statusRes.value.data
+  if (noticesRes.status === 'fulfilled') notices.value = noticesRes.value.data?.records || []
+  if (scheduleRes.status === 'fulfilled') schedule.value = scheduleRes.value.data || []
+  if (freeRes.status === 'fulfilled') freePeriods.value = freeRes.value.data || []
+
+  // 订单状态单独一路：回到页面时它要【每次都刷】，不能跟着上面的 30 秒保鲜期
+  await loadOrderState()
 
   // 收尾放在这里而不是 onMounted 里：keep-alive 返回页面时的静默刷新
   // 走的是同一个函数，那条路径也得把 loading 收掉
@@ -351,10 +420,35 @@ function onGoResubmit(proof) {
 }
 
 /*
- * 首次加载 + 从别的页面切回来时的过期刷新，都交给 keep-alive 那个 composable：
+ * 首次加载 + 从别的页面切回来时的【过期】刷新，交给 keep-alive 那个 composable：
  * 数据还新鲜就【不重新加载】（秒开），过期了才静默补一次。
+ * ⚠️ 它只管门店状态 / 公告 / 包场 / 免费活动这些只读数据 ——
+ * 订单状态不归它管，见下面那个 onActivated。
  */
 useKeepAliveRefresh(loadAll, 30000)
+
+/**
+ * 回到首页时【总是】核对一次订单状态，不看保鲜期。
+ *
+ * <p>这 30 秒保鲜期是给只读数据省请求的，用在订单状态上就是错的：
+ * 「开门计时 / 查看密码」直接决定用户点下去是「下单花钱」还是「再看一眼密码」，
+ * 而结账、支付都发生在别的页面。用户结完账回到首页时，
+ * 若这里还按保鲜期跳过刷新，按钮会停在「查看密码」，
+ * 点下去报「只有进行中的订单才能查看开门密码」—— 而且要手动刷新才恢复
+ *（首页没有第二处会再拉 current）。2026-10-17 用户报的就是这个。
+ *
+ * <p>请求走 {@code silent: true}：此刻用户看到的是缓存内容，
+ * 后台核对不该把页面盖成「加载中」，那会把 keep-alive 的秒开变成又转一圈。
+ */
+let activatedOnce = false
+onActivated(() => {
+  // 首次进入由 onMounted → loadAll 负责，这里再跑一遍就是重复请求
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  loadOrderState({ silent: true })
+})
 
 /*
  * ⚠️ 停轮询必须挂在 onDeactivated 上：本页被 keep-alive 缓存之后，

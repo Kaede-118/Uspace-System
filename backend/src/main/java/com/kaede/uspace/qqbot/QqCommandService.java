@@ -624,7 +624,7 @@ public class QqCommandService {
             return null;
         }
         if (card.getData() != null) {
-            // 卡种必须报：全天 600 与夜间 320 差着一倍，只报单号他认不出买的是哪张
+            // 卡种必须报：全天 450 与夜间 320 差着一截，只报单号他认不出买的是哪张
             bills.add(new UnpaidBill("月卡", card.getData().getCardTypeLabel(),
                     card.getData().getOrderNo(), card.getData().getPrice(),
                     card.getData().getStatusLabel(), true, false));

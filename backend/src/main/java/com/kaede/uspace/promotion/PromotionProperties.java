@@ -58,8 +58,8 @@ public class PromotionProperties {
          */
         private int validDays = 30;
 
-        /** 全天月卡价格（元） */
-        private BigDecimal allDayPrice = new BigDecimal("600");
+        /** 全天月卡价格（元）。2026-10-17 由 600 调为 450 —— 与门市日封顶 55、夜封顶 50 一起看：三四个通宵就回本 */
+        private BigDecimal allDayPrice = new BigDecimal("450");
 
         /** 夜间月卡价格（元） */
         private BigDecimal nightPrice = new BigDecimal("320");

@@ -1603,27 +1603,27 @@ class OrderServiceTests {
     // ==================================================================
 
     @Test
-    @DisplayName("⚠️ 半场封顶跨订单：同半场里已付 32 元后，新单只收剩余的 8 元")
+    @DisplayName("⚠️ 半场封顶跨订单：同半场里已付 40 元后，新单只收剩余的 10 元")
     void calculateBill_deductsPaidOrdersInSameHalfPeriod() throws Exception {
         LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
 
-        // 历史：10:00-14:00 玩过一单（4 小时 → 32 元），已支付并留下快照
+        // 历史：10:00-14:00 玩过一单（4 小时 → 40 元），已支付并留下快照
         Order paid = seedOrder(USER_ID, OrderStatus.PAID, dayStart, dayStart.plusHours(4));
-        paid.setPayableAmount(new BigDecimal("32"));
-        paid.setTotalAmount(new BigDecimal("32"));
+        paid.setPayableAmount(new BigDecimal("40"));
+        paid.setTotalAmount(new BigDecimal("40"));
         paid.setBillSnapshot(segmentSnapshot(BillingPeriod.DAY,
-                dayStart, dayStart.plusHours(4), "32"));
+                dayStart, dayStart.plusHours(4), "40"));
 
-        // 本次：14:00 重新开门，算到 18:00（4 小时 → 原始 32，但日场只剩 8 元额度）
+        // 本次：14:00 重新开门，算到 18:00（4 小时 → 原始 40，但日场只剩 10 元额度）
         Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(4), null);
 
         BillingResult bill = service.calculateBill(order, dayStart.plusHours(8));
 
-        assertEquals(0, new BigDecimal("8").compareTo(bill.getTotalAmount()),
-                "⚠️ 不看历史的话这里会收 32 —— 玩一段结算再开新单，拆单就绕过了封顶");
-        assertEquals(0, new BigDecimal("32").compareTo(
+        assertEquals(0, new BigDecimal("10").compareTo(bill.getTotalAmount()),
+                "⚠️ 不看历史的话这里会收 40 —— 玩一段结算再开新单，拆单就绕过了封顶");
+        assertEquals(0, new BigDecimal("40").compareTo(
                         bill.getSegments().get(0).getHalfPeriodUsedBefore()),
-                "账单要能指出来：这 8 元是「半场额度已被之前那单用掉 32」的结果");
+                "账单要能指出来：这 10 元是「半场额度已被之前那单用掉 40」的结果");
     }
 
     @Test
@@ -1631,25 +1631,25 @@ class OrderServiceTests {
     void calculateBill_seedsOnlyMatchingHalfPeriodSegments() throws Exception {
         LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
 
-        // 历史：21:00-23:00 一单（日场段 21-22 收 8、夜场段 22-23 收 7），带完整快照
+        // 历史：21:00-23:00 一单（日场段 21-22 收 10、夜场段 22-23 收 9），带完整快照
         Order paid = seedOrder(USER_ID, OrderStatus.PAID,
                 dayStart.plusHours(11), dayStart.plusHours(13));
-        paid.setPayableAmount(new BigDecimal("15"));
+        paid.setPayableAmount(new BigDecimal("19"));
         paid.setBillSnapshot(multiSegmentSnapshot(
-                segment(BillingPeriod.DAY, dayStart.plusHours(11), dayStart.plusHours(12), "8"),
-                segment(BillingPeriod.NIGHT, dayStart.plusHours(12), dayStart.plusHours(13), "7")));
+                segment(BillingPeriod.DAY, dayStart.plusHours(11), dayStart.plusHours(12), "10"),
+                segment(BillingPeriod.NIGHT, dayStart.plusHours(12), dayStart.plusHours(13), "9")));
 
-        // 本次：23:00 开门，算到次日 07:00（8 小时 → 原始 56 → 段级封顶 35；
-        //       夜场额度只剩 35-7 = 28 → 收 28）
+        // 本次：23:00 开门，算到次日 07:00（8 小时 → 原始 72 → 段级封顶 45；
+        //       夜场额度只剩 45-9 = 36 → 收 36）
         Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(13), null);
 
         BillingResult bill = service.calculateBill(order, dayStart.plusHours(21));
 
-        assertEquals(0, new BigDecimal("28").compareTo(bill.getTotalAmount()),
-                "跨半场的历史单要被拆到各自半场：只有夜场那 7 元压住本次额度");
-        assertEquals(0, new BigDecimal("7").compareTo(
+        assertEquals(0, new BigDecimal("36").compareTo(bill.getTotalAmount()),
+                "跨半场的历史单要被拆到各自半场：只有夜场那 9 元压住本次额度");
+        assertEquals(0, new BigDecimal("9").compareTo(
                         bill.getSegments().get(0).getHalfPeriodUsedBefore()),
-                "日场那 8 元不该进来 —— 归位错的话这里会是 15");
+                "日场那 10 元不该进来 —— 归位错的话这里会是 19");
     }
 
     @Test
@@ -1657,11 +1657,11 @@ class OrderServiceTests {
     void calculateBill_crossesHalfPeriodWithHistory() throws Exception {
         LocalDateTime dayStart = LocalDateTime.of(LocalDate.now(), LocalTime.of(10, 0));
 
-        // 历史：日场 10:00-14:00 收了 32
+        // 历史：日场 10:00-14:00 收了 40
         Order paid = seedOrder(USER_ID, OrderStatus.PAID, dayStart, dayStart.plusHours(4));
-        paid.setPayableAmount(new BigDecimal("32"));
+        paid.setPayableAmount(new BigDecimal("40"));
         paid.setBillSnapshot(segmentSnapshot(BillingPeriod.DAY,
-                dayStart, dayStart.plusHours(4), "32"));
+                dayStart, dayStart.plusHours(4), "40"));
 
         // 本次：20:00 玩到次日 02:00 —— 日场段（20-22）被历史扣，夜场段（22-02）重新起算
         Order order = seedOrder(USER_ID, OrderStatus.IN_USE, dayStart.plusHours(10), null);
@@ -1670,10 +1670,10 @@ class OrderServiceTests {
 
         List<SegmentBill> segments = bill.getSegments();
         assertEquals(2, segments.size(), "20:00 开始跨零点，必然切成日场与夜场两段");
-        assertEquals(0, new BigDecimal("8").compareTo(segments.get(0).getAmount()),
-                "日场段：原始 16 元，但半场只剩 8 元额度");
-        assertEquals(0, new BigDecimal("28").compareTo(segments.get(1).getAmount()),
-                "夜场段：另一个半场，35 元额度全新，按原始金额收 28");
+        assertEquals(0, new BigDecimal("10").compareTo(segments.get(0).getAmount()),
+                "日场段：原始 20 元，但半场只剩 10 元额度");
+        assertEquals(0, new BigDecimal("36").compareTo(segments.get(1).getAmount()),
+                "夜场段：另一个半场，45 元额度全新，按原始金额收 36");
     }
 
     /**

@@ -39,10 +39,12 @@ export function createOrder(inviteToken) {
  * 待支付的单已经结算、密码已经撤销，返回它会让首页给出一个点不动的「查看密码」。
  * 所以判断「有没有欠费」要用 {@link listMyOrders} 单独查。
  *
+ * @param {object} [config] 额外的 axios 配置。首页「回到页面就核对一次」时传
+ *                          {@code { silent: true }} —— 那是后台核对，不该盖一层遮罩
  * @returns {Promise<{data:object|null}>} 没有进行中的订单时 {@code data} 为 null
  */
-export function getCurrentOrder() {
-  return http.get('/api/orders/current')
+export function getCurrentOrder(config = {}) {
+  return http.get('/api/orders/current', config)
 }
 
 /**
@@ -121,10 +123,11 @@ export function settleOrder(id) {
  * @param {number} [params.page]   页码，从 1 开始
  * @param {number} [params.size]   每页条数，1–100
  * @param {string} [params.status] IN_USE / PENDING_PAYMENT / PAID
+ * @param {object} [config] 额外的 axios 配置（同 {@link getCurrentOrder}）
  * @returns {Promise<{data:{total, current, size, records}}>}
  */
-export function listMyOrders(params = {}) {
-  return http.get('/api/orders/me', { params })
+export function listMyOrders(params = {}, config = {}) {
+  return http.get('/api/orders/me', { params, ...config })
 }
 
 /**

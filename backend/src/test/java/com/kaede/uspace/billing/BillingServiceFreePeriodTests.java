@@ -19,9 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 免费活动（免费时段）的计费测试。
  *
  * <p><b>纯单测，不启动 Spring。</b>被测对象直接 {@code new} 出来，
- * 规则参数取 {@link BillingProperties} 的默认值（即线上配置的那一套：
- * 日 4 / 夜 3.5 元每半小时、宽限 5 分钟、封顶 40/35、门槛 200 元、
- * 优惠价 3.5/3 元且封顶 35/30）。
+ * 规则参数取 {@link BillingProperties} 的默认值（即线上配置的那一套，2026-10-17 调价后的
+ * 开业优惠价：日 5 / 夜 4.5 元每半小时、宽限 5 分钟、封顶 50/45、门槛 200 元、
+ * 优惠价 4.5/4 元且封顶 45/40）。
  *
  * <p><b>免费活动走的是月卡那条路（段级置零），不是包场那条（剪区间）</b>：
  * 段照常产生、档数单价封顶照常算，只把实收置 0，并记下「这场活动省了多少」。
@@ -124,7 +124,7 @@ class BillingServiceFreePeriodTests {
 
         assertEquals(1, bill.getSegments().size(), "活动边界不在订单区间内，一段都不该多切");
         assertAmount("0", bill, "14:00–16:00 全在活动内");
-        assertActivityFree("16", bill, "120 分钟 = 4 档 × 4 元，全部由活动免掉");
+        assertActivityFree("20", bill, "120 分钟 = 4 档 × 5 元，全部由活动免掉");
 
         SegmentBill day = bill.getSegments().get(0);
         assertTrue(day.isFreeByActivity(), "日场段应标记为活动免费");
@@ -143,9 +143,9 @@ class BillingServiceFreePeriodTests {
         // 这几个中间结果正是账单页解释「这段为什么免费」的依据。
         // 一起归零的话，界面上就只剩一个没有来由的 0 元
         assertEquals(4, day.getUnits(), "120 分钟 = 4 档");
-        assertEquals(0, new BigDecimal("4").compareTo(day.getUnitPrice()), "单价仍是日场原价");
-        assertEquals(0, new BigDecimal("16").compareTo(day.getRawAmount()), "封顶前金额仍算得出来");
-        assertEquals(0, new BigDecimal("40").compareTo(day.getCapAmount()), "封顶值仍记下来");
+        assertEquals(0, new BigDecimal("5").compareTo(day.getUnitPrice()), "单价仍是日场原价");
+        assertEquals(0, new BigDecimal("20").compareTo(day.getRawAmount()), "封顶前金额仍算得出来");
+        assertEquals(0, new BigDecimal("50").compareTo(day.getCapAmount()), "封顶值仍记下来");
     }
 
     @Test
@@ -159,8 +159,8 @@ class BillingServiceFreePeriodTests {
         assertTrue(bill.getSegments().get(0).isFreeByActivity(), "15:00 之前那段在活动内");
         assertFalse(bill.getSegments().get(1).isFreeByActivity(), "15:00 之后那段照常计费");
 
-        assertAmount("8", bill, "只收活动结束后的那 1 小时");
-        assertActivityFree("8", bill, "活动免掉的是活动期间的那 1 小时");
+        assertAmount("10", bill, "只收活动结束后的那 1 小时");
+        assertActivityFree("10", bill, "活动免掉的是活动期间的那 1 小时");
     }
 
     @Test
@@ -174,11 +174,11 @@ class BillingServiceFreePeriodTests {
         assertTrue(bill.getSegments().get(1).isFreeByActivity());
         assertFalse(bill.getSegments().get(2).isFreeByActivity());
 
-        // 13:00–14:00 收 8 元 + 15:00–17:00 收 16 元。
-        // 注意它与「不切段」算出来的 32 元不同 —— 那是「分段各享一次宽限」的
+        // 13:00–14:00 收 10 元 + 15:00–17:00 收 20 元。
+        // 注意它与「不切段」算出来的 40 元不同 —— 那是「分段各享一次宽限」的
         // 固有结果（与跨日夜场那条已知副作用同源），不是本次改动引入的
-        assertAmount("24", bill, "8 + 0 + 16");
-        assertActivityFree("8", bill, "只有中间那 1 小时被免");
+        assertAmount("30", bill, "10 + 0 + 20");
+        assertActivityFree("10", bill, "只有中间那 1 小时被免");
     }
 
     @Test
@@ -190,7 +190,7 @@ class BillingServiceFreePeriodTests {
                 List.of(range(20, 0, 21, 0)));
 
         assertEquals(1, bill.getSegments().size(), "活动边界不在订单区间内，不该多切");
-        assertAmount("7", bill, "夜场 1 小时 = 2 档 × 3.5 元");
+        assertAmount("9", bill, "夜场 1 小时 = 2 档 × 4.5 元");
         assertActivityFree("0", bill, "不在活动区间内，活动没免掉任何东西");
         assertFalse(bill.getSegments().get(0).isFreeByActivity());
     }
@@ -213,7 +213,7 @@ class BillingServiceFreePeriodTests {
         assertTrue(bill.getSegments().get(1).isFreeByActivity(), "夜场段（22:00–次日 02:00）同样在活动内");
 
         assertAmount("0", bill, "整场活动内都不计费");
-        assertActivityFree("44", bill, "日场 16 元 + 夜场 28 元，全部由活动免掉");
+        assertActivityFree("56", bill, "日场 20 元 + 夜场 36 元，全部由活动免掉");
     }
 
     @Test
@@ -226,7 +226,7 @@ class BillingServiceFreePeriodTests {
 
         assertEquals(2, bill.getSegments().size(), "只有日夜场边界切了一刀，活动边界都在订单之外");
         assertAmount("0", bill, "两段都在活动内");
-        assertActivityFree("15", bill, "日场 1 小时 8 元 + 夜场 1 小时 7 元");
+        assertActivityFree("19", bill, "日场 1 小时 10 元 + 夜场 1 小时 9 元");
     }
 
     // ==================================================================
@@ -240,8 +240,8 @@ class BillingServiceFreePeriodTests {
                 allDayCard(), List.of(range(20, 0, 23, 59)));
 
         assertAmount("0", bill, "两种优惠都覆盖了整单");
-        assertEquals(0, new BigDecimal("18.5").compareTo(bill.getCardFreeAmount()),
-                "免掉的钱记在月卡账上 —— 日场 8 + 夜场 10.5");
+        assertEquals(0, new BigDecimal("23.5").compareTo(bill.getCardFreeAmount()),
+                "免掉的钱记在月卡账上 —— 日场 10 + 夜场 13.5");
         assertActivityFree("0", bill,
                 "月卡用户本来就免费，活动并没有为他省下什么；两个都记会让活动复盘虚高");
 
@@ -260,10 +260,10 @@ class BillingServiceFreePeriodTests {
 
         assertTrue(bill.isDiscounted(), "当月累计已过门槛，本单走优惠价");
         assertAmount("0", bill, "活动覆盖整单");
-        assertActivityFree("14", bill, "免的是优惠价口径的钱：4 档 × 3.5 元，而非原价的 16");
+        assertActivityFree("18", bill, "免的是优惠价口径的钱：4 档 × 4.5 元，而非原价的 20");
 
         // ⚠️ 守门用例：算 discountAmount 时按原价重算那一步若漏传 freeRanges，
-        // 被活动免掉的段会算出一份并不存在的原价，这里就会变成 14 ——
+        // 被活动免掉的段会算出一份并不存在的原价，这里就会变成 18 ——
         // 而金额、状态、页面全都正常，只有统计报表里的「优惠活动效果」悄悄虚高
         assertEquals(0, BigDecimal.ZERO.compareTo(bill.getDiscountAmount()),
                 "活动免掉的钱不是月度优惠省下的钱，两个口径不能混");
@@ -288,16 +288,16 @@ class BillingServiceFreePeriodTests {
     @Test
     @DisplayName("活动免费仍可能触发封顶：capped 按封顶前金额判定")
     void activityFreeSegment_cappedFlagStillReflectsRawAmount() {
-        // 日场 5 小时 6 分 → 可计费 301 分钟 → 11 档 × 4 元 = 44 元 > 封顶 40 元
+        // 日场 5 小时 6 分 → 可计费 301 分钟 → 11 档 × 5 元 = 55 元 > 封顶 50 元
         BillingResult bill = billingService.calculate(at(10, 0), at(15, 6), BELOW_THRESHOLD, null,
                 List.of(range(10, 0, 16, 0)));
 
         SegmentBill day = bill.getSegments().get(0);
         assertTrue(day.isCapped(), "原始金额确实超过了封顶，与是否免费无关");
-        assertEquals(0, new BigDecimal("44").compareTo(day.getRawAmount()), "封顶前 44 元");
-        assertEquals(0, new BigDecimal("40").compareTo(day.getActivityFreeAmount()),
-                "免掉的是封顶后的 40 元，不是封顶前的 44 元");
-        assertAmount("0", bill, "没有活动时本该收 40 元");
+        assertEquals(0, new BigDecimal("55").compareTo(day.getRawAmount()), "封顶前 55 元");
+        assertEquals(0, new BigDecimal("50").compareTo(day.getActivityFreeAmount()),
+                "免掉的是封顶后的 50 元，不是封顶前的 55 元");
+        assertAmount("0", bill, "没有活动时本该收 50 元");
     }
 
     @Test
